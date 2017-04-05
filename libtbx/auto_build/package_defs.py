@@ -13,9 +13,9 @@ import os
 import platform
 import sys
 
-BASE_CCI_PKG_URL = "http://cci.lbl.gov/cctbx_dependencies"
+BASE_CCI_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.5"
 BASE_XIA_PKG_URL = "http://www.ccp4.ac.uk/xia"
-BASE_HDF5_PKG_URL = "https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-1.8.15-patch1/src"
+BASE_HDF5_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.5"
 BASE_PIPY_PKG_URL = "https://pypi.python.org/packages/source"
 
 def pypi_pkg_url(package):
@@ -27,7 +27,7 @@ def pypi_pkg_url(package):
   return "%s/%s/%s" % (BASE_PIPY_PKG_URL, package[0], pkgname)
 
 # OpenSSL - needed for Mac OS X 10.11
-BASE_OPENSSL_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/master/"
+BASE_OPENSSL_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.5/"
 OPENSSL_PKG = "openssl-1.0.2k.tar.gz"
 
 # base packages updated on 2/15/2015 by bkpoon
@@ -150,12 +150,10 @@ subversion_repositories = {
 # command line parameters
 git_repositories = {
   # lz4 and bitshuffle compressions for HDF5
-  "hdf5_lz4": ['git@github.com:dectris/HDF5Plugin.git',
-               'https://github.com/dectris/HDF5Plugin.git',
-               'https://github.com/dectris/HDF5Plugin/archive/master.zip'],
-  "bitshuffle": ['git@github.com:kiyo-masui/bitshuffle.git',
-                 'https://github.com/kiyo-masui/bitshuffle.git',
-                 'https://github.com/kiyo-masui/bitshuffle/archive/master.zip'],
+  "hdf5_lz4": ['-b dials-1.5', 'git@github.com:cctbx/HDF5Plugin.git',
+               'https://github.com/cctbx/HDF5Plugin/archive/dials-1.5.zip'],
+  "bitshuffle": ['-b dials-1.5', 'git@github.com:cctbx/bitshuffle.git',
+                 'https://github.com/cctbx/bitshuffle/archive/dials-1.5.zip'],
 }
 
 class fetch_packages (object) :
