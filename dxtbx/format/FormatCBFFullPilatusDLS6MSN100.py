@@ -50,6 +50,19 @@ class FormatCBFFullPilatusDLS6MSN100(FormatCBFFullPilatus):
 
     return
 
+  def get_mask(self, goniometer=None):
+    mask = super(FormatCBFFullPilatusDLS6MSN100, self).get_mask()
+    if self._dynamic_shadowing:
+      gonio_masker = self.get_goniometer_shadow_masker(goniometer=goniometer)
+      scan = self.get_scan()
+      detector = self.get_detector()
+      shadow_mask = gonio_masker.get_mask(detector, scan.get_oscillation()[0])
+      assert len(mask) == len(shadow_mask)
+      for m, sm in zip(mask, shadow_mask):
+        m &= sm
+
+    return mask
+
   def get_goniometer_shadow_masker(self, goniometer=None):
     if goniometer is None:
       goniometer = self.get_goniometer()
@@ -71,16 +84,24 @@ class FormatCBFFullPilatusDLS6MSN100(FormatCBFFullPilatus):
         #   with rectangle of size a(A) = 12.8 mm (x 20 mm)
 
         offsetA = 33.0
+        # semi-circle for phi=-90 ... +90
         radiusA = 10.0
-        sqdA = 12.8 # square depth
         phi = flex.double_range(-90, 100, step=10) * math.pi/180
         x = flex.double(phi.size(), -offsetA)
         y = radiusA * flex.cos(phi)
         z = radiusA * flex.sin(phi)
 
-        x.extend(flex.double(5, -offsetA))
-        y.extend(flex.double((-sqdA/2, -sqdA, -sqdA, -sqdA, -sqdA/2)))
-        z.extend(flex.double((radiusA, radiusA, 0, -radiusA, -radiusA)))
+        # corners of square
+        sqdA = 12.8 # square depth
+        nsteps = 10
+        for i in range(nsteps+1):
+          for sign in (+1, -1):
+            x.append(-offsetA)
+            y.append(i * -sqdA/nsteps)
+            z.append(sign * radiusA)
+        x.append(-offsetA)
+        y.append(-sqdA)
+        z.append(0)
 
         SMG.faceA = flex.vec3_double(x, y, z)
 
@@ -115,8 +136,8 @@ class FormatCBFFullPilatusDLS6MSN100(FormatCBFFullPilatus):
         # Align end station coordinate system with ImgCIF coordinate system
         from rstbx.cftbx.coordinate_frame_helpers import align_reference_frame
         from scitbx import matrix
-        R = align_reference_frame(matrix.col((1,0,0)), matrix.col((-1,0,0)),
-                                  matrix.col((0,1,0)), matrix.col((0,1,0)))
+        R = align_reference_frame(matrix.col((-1,0,0)), matrix.col((1,0,0)),
+                                  matrix.col((0,-1,0)), matrix.col((0,1,0)))
         faceA = R.elems * SMG.faceA
         faceE = R.elems * SMG.faceE
 
@@ -129,8 +150,9 @@ class FormatCBFFullPilatusDLS6MSN100(FormatCBFFullPilatus):
 
         for coords in (faceA, faceE):
           coords = coords.deep_copy()
-
           for i, axis in enumerate(axes):
+            if i == 0:
+              continue # shadow doesn't change with phi setting
             sel = flex.bool(len(coords), True)
             rotation = matrix.col(
               axis).axis_and_angle_as_r3_rotation_matrix(angles[i], deg=True)
