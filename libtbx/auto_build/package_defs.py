@@ -14,7 +14,7 @@ import platform
 import sys
 import urllib2
 
-BASE_CCI_PKG_URL = "http://cci.lbl.gov/cctbx_dependencies"
+BASE_CCI_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.7"
 BASE_PIPY_PKG_URL = "https://pypi.python.org/packages/source"
 
 def pypi_pkg_url(package):
@@ -51,7 +51,7 @@ def get_pypi_package_information(package, version=None, information_only=False):
   return package
 
 # OpenSSL - needed for Mac OS X 10.11 and later
-BASE_OPENSSL_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/master/"
+BASE_OPENSSL_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.7/"
 OPENSSL_PKG = "openssl-1.0.2l.tar.gz"
 
 # root certificates for macOS 10.11 and later
@@ -176,12 +176,10 @@ subversion_repositories = {
 # command line parameters
 git_repositories = {
   # lz4 and bitshuffle compressions for HDF5
-  "hdf5_lz4": ['git@github.com:dectris/HDF5Plugin.git',
-               'https://github.com/dectris/HDF5Plugin.git',
-               'https://github.com/dectris/HDF5Plugin/archive/master.zip'],
-  "bitshuffle": ['git@github.com:kiyo-masui/bitshuffle.git',
-                 'https://github.com/kiyo-masui/bitshuffle.git',
-                 'https://github.com/kiyo-masui/bitshuffle/archive/master.zip'],
+  "hdf5_lz4": ['-b dials-1.7', 'git@github.com:cctbx/HDF5Plugin.git',
+               'https://github.com/cctbx/HDF5Plugin/archive/dials-1.7.zip'],
+  "bitshuffle": ['-b dials-1.7', 'git@github.com:cctbx/bitshuffle.git',
+                 'https://github.com/cctbx/bitshuffle/archive/dials-1.7.zip'],
 }
 
 class fetch_packages (object) :
