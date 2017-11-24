@@ -127,7 +127,6 @@ class rmsd_values:
     rmsd,n=self.get_values(id=id)
     if target_length is not None and n is not None:
       return 100.*n/max(1.,target_length)
-
     else:
       return 0.
 
