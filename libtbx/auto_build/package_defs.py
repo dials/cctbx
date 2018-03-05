@@ -14,7 +14,7 @@ import platform
 import sys
 import urllib2
 
-BASE_CCI_PKG_URL = "http://cci.lbl.gov/cctbx_dependencies"
+BASE_CCI_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.9/"
 
 def get_pypi_package_information(package, version=None, information_only=False):
   '''Retrieve information about a PyPi package.'''
@@ -41,7 +41,7 @@ def get_pypi_package_information(package, version=None, information_only=False):
     package[field] = pkginfo['info'][field]
   return package
 
-DEPENDENCIES_BASE = "https://cdn.rawgit.com/dials/dependencies/master/"
+DEPENDENCIES_BASE = "https://cdn.rawgit.com/dials/dependencies/dials-1.9/"
 OPENSSL_PKG = "openssl-1.0.2n.tar.gz"    # OpenSSL
 PYTHON3_PKG = "Python-3.6.3.tgz"
 
@@ -73,7 +73,7 @@ SPHINX_VERSION="1.4.9" # for documentation
 MPI4PY_VERSION="3.0.0"
 
 # HDF5
-BASE_HDF5_PKG_URL = "https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/"
+BASE_HDF5_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.9"
 HDF5_PKG = "hdf5-1.10.1.tar.bz2"
 BASE_H5PY_PKG_URL = "https://pypi.python.org/packages/41/7a/6048de44c62fc5e618178ef9888850c3773a9e4be249e5e673ebce0402ff" # workaround because Python <2.7.9
 H5PY_PKG = "h5py-2.7.1.tar.gz" # dxtbx
@@ -166,10 +166,10 @@ git_repositories = {
   #         stopping with an error message.
   "hdf5_lz4": [#'git@github.com:dectris/HDF5Plugin.git',
                #'https://github.com/dectris/HDF5Plugin.git',
-               'https://github.com/dectris/HDF5Plugin/archive/master.zip'],
+               'https://github.com/cctbx/HDF5Plugin/archive/dials-1.9.zip'],
   "bitshuffle": [#'git@github.com:kiyo-masui/bitshuffle.git',
                  #'https://github.com/kiyo-masui/bitshuffle.git',
-                 'https://github.com/kiyo-masui/bitshuffle/archive/master.zip'],
+                 'https://github.com/cctbx/bitshuffle/archive/dials-1.9.zip'],
 }
 
 class fetch_packages (object) :
