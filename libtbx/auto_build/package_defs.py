@@ -44,9 +44,10 @@ def get_pypi_package_information(package, version=None, information_only=False):
 DEPENDENCIES_BASE = "https://cdn.rawgit.com/dials/dependencies/dials-1.9/"
 OPENSSL_PKG = "openssl-1.0.2n.tar.gz"    # OpenSSL
 PYTHON3_PKG = "Python-3.6.3.tgz"
+PYTHON_PKG = "Python-2.7.14b.tgz"        # Python 2.7.14 + pip9.0.3 fix because MacOS is firmly stuck in past
+                                         # see https://github.com/cctbx/cctbx_project/issues/160 for more details
 
 # from CCI
-PYTHON_PKG = "Python-2.7.14.tgz"
 IMAGING_PKG = "Imaging-1.1.7.tar.gz"     # for labelit, gltbx
 REPORTLAB_PKG = "reportlab-2.6.tar.gz"   # for labelit
 ZLIB_PKG = "zlib-1.2.8.tar.gz"
@@ -61,6 +62,7 @@ CYTHON_VERSION="0.27.3"
 DOCUTILS_VERSION="0.12"
 FUTURE_VERSION="0.16"
 JINJA2_VERSION = "2.9.6"
+H5PY_VERSION="2.7.1"
 JUNIT_XML_VERSION="1.7"
 MOCK_VERSION="2.0.0"
 NUMPY_VERSION="1.13.3"
@@ -75,8 +77,6 @@ MPI4PY_VERSION="3.0.0"
 # HDF5
 BASE_HDF5_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.9"
 HDF5_PKG = "hdf5-1.10.1.tar.bz2"
-BASE_H5PY_PKG_URL = "https://pypi.python.org/packages/41/7a/6048de44c62fc5e618178ef9888850c3773a9e4be249e5e673ebce0402ff" # workaround because Python <2.7.9
-H5PY_PKG = "h5py-2.7.1.tar.gz" # dxtbx
 
 # GUI dependencies
 LIBPNG_PKG = "libpng-1.5.26.tar.gz"
