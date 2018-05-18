@@ -962,6 +962,21 @@ _replace_sysconfig_paths(build_time_vars)
 
     python_extra_dir = 'python_extra'
     python_extra_full_path = os.path.join(self.tmp_dir, python_extra_dir)
+
+    from bootstrap import Toolbox
+    basepath_remote = 'https://cdn.rawgit.com/dials/dependencies/dials-1.10/python_extra/'
+    for pkg in [
+        "altgraph-0.12.tar.gz",
+        "install.order",
+        "macholib-1.7.tar.gz",
+        "modulegraph-0.12.1.tar.gz" ]:
+      print "Downloading %s:" % pkg,
+      size = Toolbox().download_to_file(
+        basepath_remote + pkg,
+        os.path.join(python_extra_full_path, pkg))
+      if size <= 0 and size != -2:
+        raise Exception("Download error")
+
     if os.path.exists(python_extra_full_path):
       print >> self.log, "Installing further python packages...\n"
     else:
