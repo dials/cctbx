@@ -21,7 +21,7 @@ except ValueError:
   from bootstrap import Toolbox
   from installer_utils import *
 
-BASE_CCI_PKG_URL = "http://cci.lbl.gov/cctbx_dependencies"
+BASE_CCI_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.11/"
 
 def get_pypi_package_information(package, version=None, information_only=False):
   '''Retrieve information about a PyPi package.'''
@@ -48,7 +48,7 @@ def get_pypi_package_information(package, version=None, information_only=False):
     package[field] = pkginfo['info'][field]
   return package
 
-DEPENDENCIES_BASE = "https://cdn.rawgit.com/dials/dependencies/master/"
+DEPENDENCIES_BASE = "https://cdn.rawgit.com/dials/dependencies/dials-1.11/"
 OPENSSL_PKG = "openssl-1.0.2n.tar.gz"    # OpenSSL
 PYTHON3_PKG = "Python-3.6.5.tgz"
 PYTHON_PKG = "Python-2.7.15.tgz"
@@ -84,7 +84,7 @@ SCIPY_VERSION = "1.0.0"
 SCIKIT_LEARN_VERSION = "0.19.1"
 
 # HDF5
-BASE_HDF5_PKG_URL = "https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.1/src/"
+BASE_HDF5_PKG_URL = "https://cdn.rawgit.com/dials/dependencies/dials-1.11"
 HDF5_PKG = "hdf5-1.10.1.tar.bz2"
 
 # GUI dependencies
@@ -175,10 +175,10 @@ git_repositories = {
   #         stopping with an error message.
   "hdf5_lz4": [#'git@github.com:dectris/HDF5Plugin.git',
                #'https://github.com/dectris/HDF5Plugin.git',
-               'https://github.com/dectris/HDF5Plugin/archive/master.zip'],
+               'https://github.com/dials/HDF5Plugin/archive/dials-1.11.zip'],
   "bitshuffle": [#'git@github.com:kiyo-masui/bitshuffle.git',
                  #'https://github.com/kiyo-masui/bitshuffle.git',
-                 'https://github.com/kiyo-masui/bitshuffle/archive/master.zip'],
+                 'https://github.com/dials/bitshuffle/archive/dials-1.11.zip'],
 }
 
 class fetch_packages (object) :
