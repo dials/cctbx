@@ -19,4 +19,4 @@ def exercise():
 
 if __name__ == "__main__":
   if sys.platform != 'win32':
-    exercise()
+    pass
