@@ -736,6 +736,7 @@ class cctbx_module(SourceModule):
   module = 'cctbx_project'
   anonymous = ['git', '-b dials-1.14',
                'git@github.com:dials/cctbx.git',
+               'https://github.com/dials/cctbx.git',
                'https://github.com/dials/cctbx/archive/dials-1.14.zip']
 
 class qrefine_module(SourceModule):
