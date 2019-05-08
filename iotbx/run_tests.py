@@ -69,7 +69,6 @@ tst_list = (
   ["$D/regression/tst_phases.py", "P31"],
   "$D/regression/tst_pdbx_mmcif_tutorial.py",
   "$D/regression/tst_lattice_symmetry.py",
-  ["$D/regression/tst_reflection_statistics.py", "Fdd2 P31m"],
   "$D/regression/tst_data_plots.py",
   "$D/regression/tst_csv_utils.py",
   "$D/regression/tst_file_reader.py",
