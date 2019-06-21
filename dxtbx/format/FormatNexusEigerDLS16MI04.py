@@ -2,7 +2,7 @@ from __future__ import absolute_import, division, print_function
 
 from scitbx.array_family import flex
 from dxtbx.format.FormatNexus import FormatNexus
-
+from dxtbx.model import MultiAxisGoniometer
 
 class FormatNexusEigerDLS16MI04(FormatNexus):
     @staticmethod
@@ -38,11 +38,13 @@ class FormatNexusEigerDLS16MI04(FormatNexus):
 
         return FormatNexus.understand(image_file)
 
-    @staticmethod
-    def has_dynamic_shadowing(**kwargs):
+    def has_dynamic_shadowing(self, **kwargs):
         import libtbx
 
         dynamic_shadowing = kwargs.get("dynamic_shadowing", False)
+        if not isinstance(self.get_goniometer(), MultiAxisGoniometer):
+            # Single-axis goniometer, no goniometer shadows
+            return False
         if dynamic_shadowing in (libtbx.Auto, "Auto"):
             return True
         return dynamic_shadowing
@@ -56,8 +58,8 @@ class FormatNexusEigerDLS16MI04(FormatNexus):
         if not self.understand(image_file):
             raise IncorrectFormatError(self, image_file)
 
-        self._dynamic_shadowing = self.has_dynamic_shadowing(**kwargs)
         super(FormatNexusEigerDLS16MI04, self).__init__(image_file, **kwargs)
+        self._dynamic_shadowing = self.has_dynamic_shadowing(**kwargs)
 
     def get_mask(self, index, goniometer=None):
         mask = super(FormatNexusEigerDLS16MI04, self).get_mask()
