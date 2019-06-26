@@ -22,7 +22,11 @@ except ValueError:
   from bootstrap import Toolbox
   from installer_utils import *
 
-BASE_CCI_PKG_URL = "https://gitcdn.link/repo/dials/dependencies/dials-1.14/"
+BASE_CCI_PKG_URL = [
+  "https://gitcdn.link/repo/dials/dependencies/dials-1.14",
+  "https://gitcdn.xyz/repo/dials/dependencies/dials-1.14",
+  "https://github.com/dials/dependencies/raw/dials-1.14",
+]
 
 def get_pypi_package_information(package, version=None, information_only=False):
   '''Retrieve information about a PyPi package.'''
@@ -48,7 +52,7 @@ def get_pypi_package_information(package, version=None, information_only=False):
     package[field] = pkginfo['info'][field]
   return package
 
-DEPENDENCIES_BASE = "https://gitcdn.link/repo/dials/dependencies/dials-1.14/"
+DEPENDENCIES_BASE = BASE_CCI_PKG_URL
 OPENSSL_PKG = "openssl-1.0.2q.tar.gz"    # OpenSSL
 PYTHON3_PKG = "Python-3.7.2.tgz"
 PYTHON_PKG = "Python-2.7.15.tgz"
