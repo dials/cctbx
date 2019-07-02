@@ -293,10 +293,13 @@ class Toolbox(object):
       # if url fails to open, try using curl
       # temporary fix for old OpenSSL in system Python on macOS
       # https://github.com/cctbx/cctbx_project/issues/33
-      command = ['/usr/bin/curl', '--http1.0', '-Lo', file, '--retry', '5', url]
+      command = ['/usr/bin/curl', '--http1.0', '-fLo', file, '--retry', '5', url]
       subprocess.call(command, shell=False)
       socket = None     # prevent later socket code from being run
-      received = 1      # satisfy (filesize > 0) checks later on
+      try:
+        received = os.path.getsize(file)
+      except OSError:
+        raise RuntimeError("Download failed")
 
     if (socket is not None):
       try:
@@ -905,7 +908,11 @@ class dials_regression_module(SourceModule):
 
 class msgpack_module(SourceModule):
   module = 'msgpack'
-  anonymous = ['curl', "https://gitcdn.link/repo/dials/dependencies/dials-1.14/msgpack-3.1.1.tar.gz"]
+  anonymous = ['curl', [
+    "https://gitcdn.link/repo/dials/dependencies/dials-1.14/msgpack-3.1.1.tar.gz",
+    "https://gitcdn.xyz/repo/dials/dependencies/dials-1.14/msgpack-3.1.1.tar.gz",
+    "https://github.com/dials/dependencies/raw/dials-1.14/msgpack-3.1.1.tar.gz",
+  ]]
 
 class xfel_regression_module(SourceModule):
   module = 'xfel_regression'
@@ -1324,14 +1331,29 @@ class Builder(object):
     ))
 
   def _add_download(self, url, to_file):
+    if not isinstance(url, list):
+      url = [url]
     class _download(object):
       def run(self):
-        print("===== Downloading %s: " % url, end=' ')
-        Toolbox().download_to_file(url, to_file)
+        for _url in url:
+          for retry in (3,3,0):
+            print("===== Downloading %s: " % _url, end=' ')
+            try:
+              Toolbox().download_to_file(_url, to_file)
+              return
+            except Exception as e:
+              print("Download failed with", e)
+              if retry:
+                print("Retrying in %d seconds" % retry)
+                time.sleep(retry)
+        raise RuntimeError("Could not download " + to_file)
     self.add_step(_download())
 
   def _add_curl(self, module, url):
-    filename = urlparse.urlparse(url)[2].split('/')[-1]
+    if isinstance(url, list):
+      filename = urlparse.urlparse(url[0])[2].split('/')[-1]
+    else:
+      filename = urlparse.urlparse(url)[2].split('/')[-1]
     self._add_download(url, os.path.join('modules', filename))
     self.add_step(self.shell(
       name="extracting files from %s" %filename,
