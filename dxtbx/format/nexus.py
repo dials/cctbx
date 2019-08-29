@@ -155,6 +155,26 @@ class check_attr(object):
                 )
 
 
+def local_visit(nxfile, visitor):
+    """Implementation of visitor to replace node.visititems
+
+    Will dereference soft links but should avoid walking down into external files,
+    I think - not a property that NXgroup.visititems(visitor) has.
+    https://github.com/cctbx/dxtbx/issues/74
+
+    Args:
+      nxfile: hdf5 file node
+      visitor: visitor function to act on node and children
+    """
+    visitor(nxfile.name, nxfile)
+    for k in nxfile:
+        try:
+            if "NX_class" in nxfile[k].attrs:
+                local_visit(nxfile[k], visitor)
+        except KeyError:
+            pass
+
+
 def find_entries(nx_file, entry):
     """
     Find NXmx entries
@@ -169,7 +189,7 @@ def find_entries(nx_file, entry):
                         hits.append(obj)
 
     visitor(entry, nx_file[entry])
-    nx_file[entry].visititems(visitor)
+    local_visit(nx_file, visitor)
     return hits
 
 
@@ -184,7 +204,7 @@ def find_class(nx_file, nx_class):
             if obj.attrs["NX_class"] in [nx_class]:
                 hits.append(obj)
 
-    nx_file.visititems(visitor)
+    local_visit(nx_file, visitor)
     return hits
 
 
@@ -1339,7 +1359,10 @@ class DetectorFactory(object):
         detector_name = str(nx_detector.name)
 
         # Get the trusted range of pixel values
-        trusted_range = (-1, float(nx_detector["saturation_value"][()]))
+        if "saturation_value" in nx_detector:
+            trusted_range = (-1, float(nx_detector["saturation_value"][()]))
+        else:
+            trusted_range = (-1, 99999999)
 
         # Get the detector thickness
         thickness = nx_detector["sensor_thickness"]
@@ -1349,6 +1372,16 @@ class DetectorFactory(object):
 
         # Get the detector material
         material = str(nx_detector["sensor_material"][()])
+
+        try:
+            x_pixel = nx_detector["x_pixel_size"][()] * 1000.0
+            y_pixel = nx_detector["y_pixel_size"][()] * 1000.0
+
+            legacy_beam_x = float(x_pixel * nx_detector["beam_center_x"][()])
+            legacy_beam_y = float(y_pixel * nx_detector["beam_center_y"][()])
+        except KeyError:
+            legacy_beam_x = 0
+            legacy_beam_y = 0
 
         # Get the fast pixel size and vector
         fast_pixel_direction = nx_module["fast_pixel_direction"]
@@ -1370,9 +1403,11 @@ class DetectorFactory(object):
         )
         slow_axis = matrix.col(slow_pixel_direction_vector).normalize()
 
-        # Get the origin vector
+        # Get the origin vector - working around if absent
         module_offset = nx_module["module_offset"]
         origin = construct_vector(nx_file, module_offset.name)
+        if origin.elems[0] == 0.0 and origin.elems[1] == 0:
+            origin = -(origin + legacy_beam_x * fast_axis + legacy_beam_y * slow_axis)
 
         # Change of basis to convert from NeXus to IUCr/ImageCIF convention
         cob = matrix.sqr((-1, 0, 0, 0, 1, 0, 0, 0, -1))
