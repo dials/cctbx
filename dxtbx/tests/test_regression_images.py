@@ -5,6 +5,9 @@ from __future__ import division, print_function
 
 import os
 import re
+import bz2
+import gzip
+import shutil
 
 import pytest
 import py.path
@@ -263,3 +266,43 @@ def test_no_multiple_format_understanding(test_image):
 def test_no_exceptions_from_understand(test_image):
     for format in Registry._formats:
         format.understand(test_image)
+
+
+@pytest.mark.regression
+@pytest.mark.parametrize(
+    "image_to_test",
+    # Test miniCBF and a flavour of FullCBF
+    ["DLS_I02/X4_wide_M1S4_1_0001.cbf", "DLS_I04/grid_full_cbf_0005.cbf"],
+)
+@pytest.mark.parametrize(
+    "compression,extension",
+    [(gzip.GzipFile, "gz"), (bz2.BZ2File, "bz2")],
+    ids=["gzip", "bz2"],
+)
+def test_compressed_images(
+    dials_regression, compression, extension, image_to_test, tmpdir
+):
+    path = os.path.join(dials_regression, "image_examples", image_to_test)
+    if not os.path.exists(path):
+        pytest.skip(str(path) + " not present in dials_regression")
+
+    # Compress this file and write to disk
+    test_image_for_reading = os.path.join(
+        str(tmpdir), os.path.basename(path) + "." + extension
+    )
+    with open(path, "rb") as f_in:
+        with compression(test_image_for_reading, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+
+    # Find and instantiate the format class
+    format_class = Registry.find(test_image_for_reading)
+    assert format_class is not None, "no matching format class found"
+    instance = format_class(test_image_for_reading)
+
+    # Test metadata reading
+    assert instance.get_goniometer()
+    assert instance.get_beam()
+    assert instance.get_scan()
+    assert instance.get_detector()
+    # Test data reading
+    assert instance.get_raw_data()
