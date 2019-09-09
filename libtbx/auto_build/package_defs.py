@@ -93,7 +93,7 @@ PSUTIL_VERSION = "5.4.8"
 MRCFILE_VERSION = "1.1.0"
 
 # HDF5
-BASE_HDF5_PKG_URL = "https://gitcdn.link/repo/dials/dependencies/dials-1.14/"
+BASE_HDF5_PKG_URL = BASE_CCI_PKG_URL
 HDF5_PKG = "hdf5-1.10.4.tar.bz2"
 
 # GUI dependencies
