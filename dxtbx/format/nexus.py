@@ -604,7 +604,17 @@ class NXdetector(object):
                 "minOccurs": 0,
                 "checks": [
                     check_dset(
-                        dtype=["int32", "int64", "uint32", "uint64"], is_scalar=True
+                        dtype=[
+                            "int8",
+                            "int16",
+                            "int32",
+                            "int64",
+                            "uint8",
+                            "uint16",
+                            "uint32",
+                            "uint64",
+                        ],
+                        is_scalar=True,
                     )
                 ],
             },
@@ -632,13 +642,16 @@ class NXdetector(object):
                 "minOccurs": 0,
                 "checks": [
                     check_dset(
-                        dtype=["int32", "int64", "uint32", "uint64"], is_scalar=True
+                        dtype=["int8", "int16", "int32", "int64", "uint32", "uint64"],
+                        is_scalar=True,
                     )
                 ],
             },
             "bit_depth_readout": {
                 "minOccurs": 0,
-                "checks": [check_dset(dtype=["int32", "int64"], is_scalar=True)],
+                "checks": [
+                    check_dset(dtype=["uint16", "int32", "int64"], is_scalar=True)
+                ],
             },
             "detector_readout_time": {
                 "minOccurs": 0,
