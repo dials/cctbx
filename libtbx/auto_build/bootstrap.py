@@ -4,9 +4,9 @@
 # Running bootstrap requires a minimum Python version of 2.6.
 
 # To download this file:
-# wget https://raw.githubusercontent.com/cctbx/cctbx_project/master/libtbx/auto_build/bootstrap.py
+# wget https://raw.githubusercontent.com/dials/cctbx/dials-2.0/libtbx/auto_build/bootstrap.py
 # or
-# curl https://raw.githubusercontent.com/cctbx/cctbx_project/master/libtbx/auto_build/bootstrap.py > bootstrap.py
+# curl https://raw.githubusercontent.com/dials/cctbx/dials-2.0/libtbx/auto_build/bootstrap.py > bootstrap.py
 
 from __future__ import absolute_import, division, print_function
 
@@ -687,30 +687,15 @@ class SourceModule(object):
 # On Windows due to absence of rsync we use pscp from the Putty programs.
 class ccp4io_module(SourceModule):
   module = 'ccp4io'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/ccp4io.gz',
-    'https://drive.google.com/uc?id=1EF6AqowSrVnse7pRtRmIsvhS6Q0dsSLT&export=download',
-  ]]
-  authentarfile = ['%(cciuser)s@cci.lbl.gov', 'ccp4io.tar.gz', '/net/cci/auto_build/repositories/ccp4io']
-  authenticated = ['rsync', '%(cciuser)s@cci.lbl.gov:/net/cci/auto_build/repositories/ccp4io/']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class annlib_module(SourceModule):
   module = 'annlib'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/annlib.gz',
-    'https://drive.google.com/uc?id=1YD_KDXrfhJ5ryT97j4yxmbAPoecGLjg0&export=download',
-  ]]
-  authentarfile = ['%(cciuser)s@cci.lbl.gov', 'annlib.tar.gz', '/net/cci/auto_build/repositories/annlib']
-  authenticated = ['rsync', '%(cciuser)s@cci.lbl.gov:/net/cci/auto_build/repositories/annlib/']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class scons_module(SourceModule):
   module = 'scons'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/scons.gz',
-    'https://drive.google.com/uc?id=1hPd5cMbVcsN4j0P5qaPUV71XS_aifw-J&export=download',
-  ]]
-  authentarfile = ['%(cciuser)s@cci.lbl.gov', 'scons.tar.gz', '/net/cci/auto_build/repositories/scons']
-  authenticated = ['rsync', '%(cciuser)s@cci.lbl.gov:/net/cci/auto_build/repositories/scons/']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 # external modules
 class rosetta_class(SourceModule):
@@ -738,10 +723,10 @@ class libsvm_module(SourceModule):
 # These must all provide anonymous access.
 class cctbx_module(SourceModule):
   module = 'cctbx_project'
-  anonymous = ['git',
-               'git@github.com:cctbx/cctbx_project.git',
-               'https://github.com/cctbx/cctbx_project.git',
-               'https://github.com/cctbx/cctbx_project/archive/master.zip']
+  anonymous = ['git', '-b dials-2.0',
+               'git@github.com:dials/cctbx.git',
+               'https://github.com/dials/cctbx.git',
+               'https://github.com/dials/cctbx/archive/dials-2.0.zip']
 
 class amber_adaptbx_module(SourceModule):
   module = 'amber_adaptbx'
@@ -772,56 +757,31 @@ class geostd_module(SourceModule):
 
 class boost_module(SourceModule):
   module = 'boost'
-  anonymous = ['git',
-               'git@github.com:cctbx/boost.git',
-               'https://github.com/cctbx/boost.git',
-               'https://github.com/cctbx/boost/archive/master.zip']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class cbflib_module(SourceModule):
   module = 'cbflib'
-  anonymous = ['git',
-               'git@github.com:yayahjb/cbflib.git',
-               'https://github.com/yayahjb/cbflib.git',
-               'https://github.com/yayahjb/cbflib/archive/master.zip']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class ccp4io_adaptbx(SourceModule):
   module = 'ccp4io_adaptbx'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/ccp4io_adaptbx.gz',
-    'https://drive.google.com/uc?id=1X5kRE90KkV2yTEyF9zb-PHOjjRXjzYvx&export=download',
-    ]]
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/ccp4io_adaptbx/trunk']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class annlib_adaptbx(SourceModule):
   module = 'annlib_adaptbx'
-  anonymous = ['git',
-               'git@github.com:cctbx/annlib_adaptbx.git',
-               'https://github.com/cctbx/annlib_adaptbx.git',
-               'https://github.com/cctbx/annlib_adaptbx/archive/master.zip']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class tntbx_module(SourceModule):
   module = 'tntbx'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/tntbx.gz',
-    'https://drive.google.com/uc?id=1bDE_rF6iL0SeyplHSTNsfJyI1G1h7ZZv&export=download',
-    ]]
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/tntbx/trunk']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class clipper_module(SourceModule):
   module = 'clipper'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/clipper.gz',
-    'https://drive.google.com/uc?id=1xWAj59zoyVn26EoIuBrw7KLNRyGjS5wC&export=download',
-    ]]
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/clipper/trunk']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class gui_resources_module(SourceModule):
   module = 'gui_resources'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/gui_resources.gz',
-    'https://drive.google.com/uc?id=1TTibOePamkUiIvwDJF-OMmdgX8jdgNUS&export=download',
-  ]]
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/gui_resources/trunk']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 class opt_resources_module(SourceModule):
   module = 'opt_resources'
@@ -829,12 +789,7 @@ class opt_resources_module(SourceModule):
 
 class eigen_module(SourceModule):
   module = 'eigen'
-  anonymous = ['curl', [
-    'http://cci.lbl.gov/repositories/eigen.gz',
-    'https://drive.google.com/uc?id=138kErrF35WbnRRARqUczWaroao2w8p1A&export=download',
-  ]]
-  authentarfile = ['%(cciuser)s@cci.lbl.gov', 'eigen.tar.gz', '/net/cci/auto_build/repositories/eigen']
-  authenticated = ['rsync', '%(cciuser)s@cci.lbl.gov:/net/cci/auto_build/repositories/eigen/']
+  anonymous = ['git', '-b dials-2.0', 'https://github.com/dials/%s/archive/dials-2.0.zip' % module ]
 
 # Phenix repositories
 class phenix_module(SourceModule):
@@ -927,17 +882,17 @@ class labelit_regression_module(SourceModule):
 
 class dials_module(SourceModule):
   module = 'dials'
-  anonymous = ['git',
+  anonymous = ['git', '-b dials-2.0',
                'git@github.com:dials/dials.git',
                'https://github.com/dials/dials.git',
-               'https://github.com/dials/dials/archive/master.zip']
+               'https://github.com/dials/dials/archive/dials-2.0.zip']
 
 class dxtbx_module(SourceModule):
   module = 'dxtbx'
-  anonymous = ['git',
-               'git@github.com:cctbx/dxtbx.git',
-               'https://github.com/cctbx/dxtbx.git',
-               'https://github.com/cctbx/dxtbx/archive/master.zip']
+  anonymous = ['git', '-b dials-2.0',
+               'git@github.com:dials/dxtbx.git',
+               'https://github.com/dials/dxtbx.git',
+               'https://github.com/dials/dxtbx/archive/dials-2.0.zip']
 
 class dials_regression_module(SourceModule):
   module = 'dials_regression'
@@ -946,11 +901,7 @@ class dials_regression_module(SourceModule):
 
 class msgpack_module(SourceModule):
   module = 'msgpack'
-  anonymous = ['curl', [
-    "https://gitcdn.xyz/repo/dials/dependencies/dials-1.13/msgpack-3.1.1.tar.gz",
-    "https://gitcdn.link/repo/dials/dependencies/dials-1.13/msgpack-3.1.1.tar.gz",
-    "https://github.com/dials/dependencies/raw/dials-1.13/msgpack-3.1.1.tar.gz",
-  ]]
+  anonymous = ['curl', "https://gitcdn.link/repo/dials/dependencies/dials-2.0/msgpack-3.1.1.tar.gz"]
 
 class xfel_regression_module(SourceModule):
   module = 'xfel_regression'
@@ -959,10 +910,10 @@ class xfel_regression_module(SourceModule):
 
 class xia2_module(SourceModule):
   module = 'xia2'
-  anonymous = ['git',
+  anonymous = ['git', '-b dials-2.0',
                'git@github.com:xia2/xia2.git',
                'https://github.com/xia2/xia2.git',
-               'https://github.com/xia2/xia2/archive/master.zip']
+               'https://github.com/xia2/xia2/archive/dials-2.0.zip']
 
 # Duke repositories
 class probe_module(SourceModule):
