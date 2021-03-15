@@ -148,7 +148,6 @@ tst_list = [
    "$D/regression/tst_connectivity.py",
    "$D/regression/tst_connectivity_allsym.py",
    "$D/regression/tst_diffuse.py",
-   "$D/regression/tst_grm_modifications.py",
   ]
 
 tst_list_expected_unstable = [
