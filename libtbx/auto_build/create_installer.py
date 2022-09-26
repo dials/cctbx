@@ -34,15 +34,18 @@ if (not libtbx_path in sys.path):
 INSTALL_SH = """\
 #!/bin/bash
 if [ -z "$PYTHON_EXE" ]; then
-  PYTHON_EXE='/usr/bin/python'
-  if [ -f "/usr/bin/python2.7" ]; then
-    PYTHON_EXE='/usr/bin/python2.7'
-  elif [ -f "/usr/bin/python2.6" ]; then
-    PYTHON_EXE='/usr/bin/python2.6'
-  elif [ -f "/usr/bin/python2" ]; then
-    PYTHON_EXE='/usr/bin/python2'
-  elif [ -f "./conda_base/bin/python" ]; then
-    PYTHON_EXE='./conda_base/bin/python'
+  PYTHON_EXE="$(command -v python3 || command -v python2)"
+  if [ ! -f "$PYTHON_EXE" ]; then
+      PYTHON_EXE='/usr/bin/python'
+      if [ -f "/usr/bin/python2.7" ]; then
+        PYTHON_EXE='/usr/bin/python2.7'
+      elif [ -f "/usr/bin/python2.6" ]; then
+        PYTHON_EXE='/usr/bin/python2.6'
+      elif [ -f "/usr/bin/python2" ]; then
+        PYTHON_EXE='/usr/bin/python2'
+      elif [ -f "./conda_base/bin/python" ]; then
+        PYTHON_EXE='./conda_base/bin/python'
+      fi
   fi
 fi
 $PYTHON_EXE ./bin/install.py $@
