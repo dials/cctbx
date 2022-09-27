@@ -332,7 +332,7 @@ class installer(object):
       unpack_cmd = os.path.join('.', 'bin', 'conda-unpack')
       if sys.platform == 'win32':
         unpack_cmd = os.path.join('.', 'Scripts', 'conda-unpack.exe')
-      subprocess.check_call([unpack_cmd])
+      subprocess.check_call([sys.executable, unpack_cmd])
       os.chdir(cwd)
 
     # Reconfigure
