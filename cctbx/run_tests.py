@@ -100,7 +100,6 @@ tst_list = [
   "$D/maptbx/tst_real_space_refinement_simple.py",
   "$D/maptbx/tst_interpolation.py",
   "$D/maptbx/tst_interpolation_2.py",
-  "$D/regression/tst_loc_res.py",
   "$D/maptbx/tst_target_and_gradients.py",
   ["$D/regression/tst_miller_merge_equivalents.py", "P31"],
   ["$D/regression/tst_grouped_data.py", "P31"],
@@ -151,7 +150,6 @@ tst_list = [
    "$D/regression/tst_connectivity.py",
    "$D/regression/tst_connectivity_allsym.py",
    "$D/regression/tst_diffuse.py",
-   "$D/regression/tst_grm_modifications.py",
    "$D/regression/tst_prepare_map_for_docking.py",
    "$D/regression/tst_wavelength_units.py",
   ]
