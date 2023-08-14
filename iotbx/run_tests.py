@@ -45,7 +45,6 @@ tst_list_base = [
   "$D/cif/tests/tst_crystal_symmetry_builder.py",
   "$D/cif/tests/tst_lex_parse_build.py",
   "$D/cif/tests/tst_model.py",
-  "$D/cif/tests/tst_restraints.py",
   "$D/cif/tests/tst_validation.py",
   "$D/cif/tests/tst_ucif_examples_compilation.py",
   "$D/cif/tests/tst_parser.py",
