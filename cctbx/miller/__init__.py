@@ -1653,6 +1653,25 @@ class set(crystal.symmetry):
       binning=binning(self.unit_cell(), n_bins, self.indices(), d_max, d_min))
     return self.binner()
 
+  def safe_setup_binner(self, n_bins = None, d_max = None, d_min = None,
+     min_in_bin = 10):
+    # purpose: make sure there are data in all bins
+    # Returns: actual n_bins created
+
+    while n_bins >= 1:
+      self.setup_binner(n_bins = n_bins, d_max = d_max, d_min = d_min)
+      ok = True
+      for i_bin in self.binner().range_used():
+        sel = self.binner().selection(i_bin)
+        if sel.count(True)<min_in_bin:
+          n_bins = min(n_bins-1, max(1, int(0.5+n_bins*0.8)))
+          ok = False
+          break
+      if ok: break  # found it
+    if n_bins < 1:
+      raise Sorry("Unable to set up bins...perhaps no data?")
+    return n_bins  # binner is also set up in self.
+
   def log_binning(self, n_reflections_in_lowest_resolution_bin=100, eps=1.e-4,
                   max_number_of_bins = 30, min_reflections_in_bin=50):
     """
@@ -2324,7 +2343,8 @@ class array(set):
     result = self.deep_copy()
     info = result.info()
     result = result.eliminate_sys_absent()
-    info = info.customized_copy(systematic_absences_eliminated = True)
+    if info is not None:
+      info = info.customized_copy(systematic_absences_eliminated = True)
     if(not result.is_unique_set_under_symmetry()):
       merged = result.merge_equivalents()
       result = merged.array()
@@ -2349,15 +2369,9 @@ class array(set):
     return result.set_info(info)
 
   def g_function(self, R, s=None, volume_scale=False):
-    # reciprocal sphere
     if s is None:
-      s = 1./self.d_spacings().data()
-    else:
-      s = 1./s
-    arg = 2*math.pi*s*R
-    vol=1
-    if(volume_scale): vol = 4*math.pi*R**3/3
-    return vol*3*(flex.sin(arg) - arg*flex.cos(arg))/(arg)**3
+      s = 1./self.d_spacings().data() # Note f000 term will get s = -1
+    return scitbx.math.g_function(s, R, volume_scale)
 
   def as_double(self):
     """
@@ -3977,7 +3991,7 @@ class array(set):
     """
     mstr = self.crystal_symmetry().__repr__()
     if self._info:
-      mstr = mstr + "\n" + self._info.label_string()
+      mstr = mstr + "\n" + str(self._info.label_string())
     mstr = mstr + "\n" + self._data.__repr__()
     if self._sigmas:
       mstr = mstr + "\n" + self._sigmas.__repr__()
@@ -4582,8 +4596,6 @@ class array(set):
     # J. P. Abrahams and A. G. W. Leslie, Acta Cryst. (1996). D52, 30-42
     # This should really have been called "local_variance_map" because the
     # square root is not taken after local averaging of density-squared
-    complete_set = self.complete_set()
-    sphere_reciprocal = self.g_function(R=radius, s=complete_set.d_spacings().data())
     fft = self.fft_map(
       resolution_factor=resolution_factor,
       d_min=d_min,
@@ -4594,9 +4606,15 @@ class array(set):
       assert_shannon_sampling=assert_shannon_sampling,
       f_000=f_000)
     fft.apply_volume_scaling()
-    temp = complete_set.structure_factors_from_map(
-      flex.pow2(fft.real_map_unpadded()-mean_solvent_density))
-    fourier_coeff = complete_set.array(data=temp.data()*sphere_reciprocal)
+    from cctbx import miller
+    temp = miller.structure_factor_box_from_map(
+       map           = flex.pow2(fft.real_map_unpadded()-mean_solvent_density),
+       crystal_symmetry = self.crystal_symmetry(),
+       d_min = self.d_min(),
+       include_000      = True)
+
+    sphere_reciprocal = self.g_function(R=radius, s=1./temp.d_spacings().data())
+    fourier_coeff = temp.array(data=temp.data()*sphere_reciprocal)
     fft = fft_map(
       crystal_gridding=self.crystal_gridding(
         d_min=d_min,
@@ -4622,7 +4640,7 @@ class array(set):
     assert self.crystal_symmetry().unit_cell().is_similar_to(
         other.crystal_symmetry().unit_cell())
     complete_set = self.complete_set()
-    sphere_reciprocal = self.g_function(R=radius, s=complete_set.d_spacings().data())
+    sphere_reciprocal = self.g_function(R=radius, s=1./complete_set.d_spacings().data())
     if d_min is None:
       d_min=self.d_min()
     fft = self.fft_map(

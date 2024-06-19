@@ -7,7 +7,7 @@ procedure:
   phenix.python elbow/elbow/scripts/process_amino_acid_parentage_from_chemical_componts.py
 
 This file is intended to be generated monthly.
-The date of file generation: Wed Sep 27 09:55:16 2023
+The date of file generation: Wed May  8 17:01:21 2024
 """
 from __future__ import absolute_import, division, print_function
 
@@ -94,6 +94,7 @@ lookup = {
   "TYU" : "?",
   "U4M" : "?",
   "U5M" : "?",
+  "U6F" : "?",
   "UDP" : "?",
   "UFB" : "?",
   "UOA" : "?",
@@ -102,11 +103,15 @@ lookup = {
   "UY1" : "?",
   "UY4" : "?",
   "UZL" : "?",
+  "X0F" : "?",
+  "X0O" : "?",
   "XE6" : "?",
   "XEC" : "?",
   "XNY" : "?",
   "Y5P" : "?",
   "YA4" : "?",
+  "YWQ" : "?",
+  "ZF9" : "?",
   "ZHP" : "?",
   "02I" : "?",
   "0DA" : "?",
@@ -251,6 +256,7 @@ lookup = {
   "US4" : "?",
   "VET" : "?",
   "WC7" : "?",
+  "WVQ" : "?",
   "X4A" : "?",
   "XAE" : "?",
   "XAR" : "?",
@@ -339,6 +345,7 @@ lookup = {
   "LC" : "C",
   "LHH" : "C",
   "LV2" : "C",
+  "M3X" : "C",
   "M4C" : "C",
   "M5M" : "C",
   "MMX" : "C",
@@ -367,6 +374,7 @@ lookup = {
   "6HB" : "DA",
   "7DA" : "DA",
   "8BA" : "DA",
+  "A1H3G" : "DA",
   "A34" : "DA",
   "A35" : "DA",
   "A38" : "DA",
@@ -489,8 +497,11 @@ lookup = {
   "6PO" : "DG",
   "7BG" : "DG",
   "7GU" : "DG",
+  "7S8" : "DG",
   "8AG" : "DG",
+  "8EB" : "DG",
   "8FG" : "DG",
+  "8H2" : "DG",
   "8MG" : "DG",
   "8OG" : "DG",
   "8PY" : "DG",
@@ -724,11 +735,13 @@ lookup = {
   "TG" : "G",
   "TPG" : "G",
   "VC7" : "G",
+  "VSN" : "G",
   "XTS" : "G",
   "YG" : "G",
   "YYG" : "G",
   "ZGU" : "G",
   "RT" : "T",
+  "WUH" : "TTD",
   "125" : "U",
   "126" : "U",
   "127" : "U",

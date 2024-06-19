@@ -58,6 +58,7 @@ steps:
     conda install -y -c conda-forge --no-deps -n $(PYTHON_VERSION) junit-xml
     conda install -y -c conda-forge cmake pandas distro -n $(PYTHON_VERSION)
   displayName: Create conda environment
+  retryCountOnTaskFailure: 3
 
 - script: |
     set -xe
@@ -95,6 +96,7 @@ steps:
       libtbx.configure lunus
       make
     fi
+    rm -fr modules/kokkos/.git/*
   displayName: Configure and Build
 
 # test

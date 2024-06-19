@@ -375,7 +375,8 @@ master_phil = libtbx.phil.parse("""
     .type = bool
     .help = Just before writing out the map, swap the order of all sections \
              in Z.  This will change the hand of the map. Note that this\
-             removes any correspondence to models (these are not inverted).
+             removes any correspondence to models (these are not inverted). \
+             If you use this, be sure to apply it to all your starting maps.\
     .short_caption = Invert hand of map
 
   gui
@@ -676,6 +677,10 @@ def modify_params(params = None,
     print("\nNOTE: Skipping write of mtz file as keep_origin = True and \n"+\
        "keep_map_size is False\n", file = log)
     params.output_format = remove_element(params.output_format, element = 'mtz')
+
+  if params.output_external_origin and (not params.keep_origin):
+    raise Sorry(
+      "If you specify an external origin you must set keep_origin=True")
 
   if (write_output_files) and ("mtz" in params.output_format) and (
        (params.extract_unique)):
@@ -1123,7 +1128,7 @@ def run(args,
        gridding = params.output_unit_cell_grid)
     if mam.map_manager().ncs_object():
       # mam.map_manager().ncs_object().display_all()
-      from scitbx.array_family import flex
+
       mam.map_manager().ncs_object().set_shift_cart(
         mam.map_manager().shift_cart())
 
@@ -1164,6 +1169,7 @@ def run(args,
   #  keep_origin == False leave origin at (0, 0, 0)
   #  keep_origin == True: we shift everything back to where it was,
   #  output_origin_grid_units = 10, 10, 10: output origin is at (10, 10, 10)
+  #  output_external_origin = 10,10,10; set output_external_origin value
 
   print("\nBox cell dimensions: (%.2f, %.2f, %.2f) A" %(
       mam.map_manager().crystal_symmetry().unit_cell().parameters()[:3]),
@@ -1197,7 +1203,8 @@ def run(args,
       box_crystal_symmetry = mam.map_manager().crystal_symmetry(),
       pdb_outside_box_msg = "",
       gridding_first = getattr(mam, 'gridding_first', (0, 0, 0)),
-      gridding_last = getattr(mam, 'gridding_last', mam.map_manager().map_data().all()),
+      gridding_last = getattr(mam,
+          'gridding_last', mam.map_manager().map_data().all()),
       solvent_content = params.solvent_content,
       origin_shift_grid_units = [
          -x for x in mam.map_manager().origin_shift_grid_units],
@@ -1207,17 +1214,27 @@ def run(args,
     map_manager = mam.map_manager()
     ncs_object = mam.map_manager().ncs_object()
     from iotbx.data_manager import DataManager
-    dm = DataManager(datatypes = ['model', 'ncs_spec', 'real_map', 'miller_array'])
+    dm = DataManager(datatypes = [
+       'model', 'ncs_spec', 'real_map', 'miller_array'])
     dm.set_overwrite(True)
+
+    if params.output_external_origin:
+      assert (isinstance(params.output_external_origin,tuple) or \
+             isinstance(params.output_external_origin,list)) and \
+             len(params.output_external_origin) == 3
+      map_manager.set_output_external_origin(params.output_external_origin)
+      print("Set output_external_origin to %s" %(
+       str(params.output_external_origin)), file = log)
 
     # Write PDB file
     if model:
       if(params.output_file_name_prefix is None):
         filename = "%s_box"%output_prefix
       else: filename = "%s"%params.output_file_name_prefix
-      dm.write_model_file(model, filename = filename, extension = ".pdb")
+      full_filename = dm.write_model_file(
+        model, filename = filename, format = "pdb")
       print("Writing boxed PDB with box unit cell to %s" %(
-          "%s.pdb" %filename), file = log)
+          "%s" %full_filename), file = log)
 
     # Write NCS file if NCS
     if ncs_object and ncs_object.max_operators()>0:

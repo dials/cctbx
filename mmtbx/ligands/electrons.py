@@ -27,7 +27,7 @@ other_charges = {
   'HOH' : 0,
 }
 disallowed_element_charges = {
-  'N' :  2,
+  'N' :  1,
   'O' : -1,
   'C' :  1,
 }
@@ -128,7 +128,7 @@ class electron_distribution(dict):
     else:
       self.logger = log
     self.verbose=verbose
-    if [_f for _f in hierarchy.get_conformer_indices() if _f]:
+    if [_f for _f in hierarchy.get_conformer_indices().conformer_indices if _f]:
       assert (alternative_location_id is not None or
               alternative_location_index is not None)
     for atom in self.atoms:
@@ -851,7 +851,9 @@ class electron_distribution(dict):
             rc.setdefault(outl, [])
             rc[outl].append([atoms[key].quote(), key])
 
+    terminals = {}
     for atom, charge in charged_atoms:
+      if atom.name in [' OXT']: terminals[atom.parent().id_str()]=charge
       ag = atom.parent()
       if get_class(ag.resname) in ['common_amino_acid']:
         base = base_amino_acid_charges.get(ag.resname, 0)
@@ -874,9 +876,10 @@ class electron_distribution(dict):
     for ag in self.hierarchy.atom_groups():
       delta = 1
       if ag.resname in ['HIS']: delta=2
+      terminal_adjust = ag.id_str() in terminals
       charge = charged_residues.get(ag.id_str(), 0)
       outl = 'Unlikely charge for %s of %s' % (ag.resname, charge)
-      if abs(charge-base_amino_acid_charges.get(ag.resname, 0)) > delta:
+      if abs(charge-base_amino_acid_charges.get(ag.resname, 0)-int(terminal_adjust)) > delta:
         if raise_if_error: raise Sorry(outl)
         rc.setdefault(outl, [])
         rc[outl].append('"%s"' % ag.id_str())
@@ -886,7 +889,7 @@ class electron_distribution(dict):
     answers = {
       'Residue HOH has a problem with the charge : 2!=0' : \
         'Hydrogen atoms not added to water',
-      'Element has strange number of electrons  N  : 2' : \
+      'Element has strange number of electrons  N  : 1' : \
         'N terminal (or break) missing hydrogen atoms',
       'Element has strange number of electrons  O  : -1' : \
         'C terminal (or break) missing oxygen atoms',
@@ -918,7 +921,7 @@ class electron_distribution(dict):
     return report
 
 from libtbx.program_template import ProgramTemplate
-#from libtbx.utils import null_out
+from libtbx.utils import null_out
 from libtbx import group_args
 
 master_phil_str = '''
@@ -956,6 +959,7 @@ Inputs:
 
   def run(self):
     model = self.data_manager.get_model()
+    model.set_log(null_out())
     model.process(make_restraints=True)
     if self.params.input.selection:
       new_model = model.selection(self.params.input.selection)

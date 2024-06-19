@@ -6,19 +6,19 @@ to_kcal_mol = {'ev':23.0609,
 
 def _print_energy_in_kcal(e, units):
   if units.lower() in to_kcal_mol:
-    return '%15.3f %s' % (e*to_kcal_mol[units.lower()], 'kcal/mol')
+    return '%15.1f %s' % (e*to_kcal_mol[units.lower()], 'kcal/mol')
   else:
-    return '%15.3f %s' % (e, units)
+    return '%15.1f %s' % (e, units)
 
 def print_energy_in_kcal(ga):
   s=[]
   if ga is None: return s
-  for d, e, l, b in ga.energies:
+  for d, e, l, b, c in ga.energies:
     units=ga.units.lower()
     if d in ['opt', 'bound']: atoms=b
     elif d in ['energy', 'strain']: atoms=l
-    s.append('%-22s %s (atoms %4d)  ' % (d,
-                                          _print_energy_in_kcal(e, units), atoms))
+    s.append('%-22s %s (atoms %4d, charge %2d)  ' % (d,
+                                          _print_energy_in_kcal(e, units), atoms, c))
   return s
 
 class energies(list):
@@ -42,7 +42,7 @@ class energies(list):
       for j, ga in enumerate(gas):
         if ga:
           units=ga.units
-          for d, e, l, b in ga.energies:
+          for d, e, l, b, c in ga.energies:
             tmp[i][d]=e
             t_atoms[i][d]=b
         rc = print_energy_in_kcal(ga)
@@ -75,7 +75,7 @@ class energies(list):
                 b1=e1[2]==e2[2]
               if b1:
                 de = e2[1]-e1[1]
-                s+='%s%-12s %s\n' % (' '*6,
+                s+='%s%-22s %s\n' % (' '*6,
                                      '%s dE' % e2[0],
                                      _print_energy_in_kcal(e2[1]-e1[1],units))
           return s

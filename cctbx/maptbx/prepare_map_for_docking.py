@@ -1517,15 +1517,27 @@ def assess_cryoem_errors(
 
   # Get map coefficients for maps after spherical masking
   # Define box big enough to hold sphere plus soft masking
+  # Warn if sphere too near edge of full map for soft mask to reach zero
+  # or if less than about 85% of sphere would be within full map
+  # (outside by >= half-radius)
   boundary_to_smoothing_ratio = 2
   soft_mask_radius = d_min
   padding = soft_mask_radius * boundary_to_smoothing_ratio
   cushion = flex.double(3,radius+padding)
   cart_min = flex.double(sphere_cent_map) - cushion
   cart_max = flex.double(sphere_cent_map) + cushion
-  for i in range(3): # Keep within input map
-    cart_min[i] = max(cart_min[i],0)
-    cart_max[i] = min(cart_max[i],ucpars[i]-spacings[i])
+  max_outside = 0.
+  for i in range(3):
+    if cart_min[i] < 0:
+      max_outside = max(max_outside, -cart_min[i])
+    if cart_max[i] > ucpars[i]-spacings[i]:
+      max_outside = max(max_outside, cart_max[i]-(ucpars[i]-spacings[i]))
+  if max_outside > padding + radius/2:
+    print("\nWARNING: substantial fraction of sphere is outside map volume", file=log)
+  elif max_outside > padding:
+    print("\nWARNING: sphere is partially outside map volume", file=log)
+  elif max_outside > 0:
+    print("\nWARNING: sphere too near map edge to allow full extent of smooth masking", file=log)
 
   cs = mmm.crystal_symmetry()
   uc = cs.unit_cell()
@@ -1923,7 +1935,7 @@ def run():
           defaults to narrowest extent of input map divided by 4
   --no_shift_map_origin: don't shift output mtz file to match input map on its origin
           default False
-  --no_define_ordered_volume: don't define ordered volume for comparison with cutout volume
+  --no_determine_ordered_volume: don't define ordered volume for comparison with cutout volume
           default False
   --file_root: root name for output files
   --mute (or -m): mute output
@@ -1984,7 +1996,8 @@ def run():
   protein_mw = None
   nucleic_mw = None
   if (args.protein_mw is None) and (args.nucleic_mw is None):
-    raise Sorry("At least one of protein_mw or nucleic_mw must be given")
+    if determine_ordered_volume:
+      raise Sorry("At least one of protein_mw or nucleic_mw must be given")
   if args.protein_mw is not None:
     protein_mw = args.protein_mw
   if args.nucleic_mw is not None:
@@ -1994,7 +2007,7 @@ def run():
 
   if args.model is not None:
     if not (args.cutout_model or args.flatten_model):
-      raise Sorry('Use for model must be specified (flatten or cut out map')
+      raise Sorry("Use for model must be specified (flatten or cut out map)")
     model_file = args.model
     model = dm.get_model(model_file)
 

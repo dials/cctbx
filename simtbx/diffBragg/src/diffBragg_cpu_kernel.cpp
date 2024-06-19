@@ -311,6 +311,10 @@ void diffBragg_sum_over_steps(
       anisoG_local = db_cryst.anisoG;
       anisoU_local = db_cryst.anisoU;
 
+      if (laue_group_num < 1 || laue_group_num >14 ){
+        throw std::string("Laue group number not in range 1-14");
+      }
+
       num_laue_mats = gen_laue_mats(laue_group_num, laue_mats, db_cryst.rotate_principal_axes);
       for (int i_gam=0; i_gam<3; i_gam++){
         dG_dgam[i_gam] << 0,0,0,0,0,0,0,0,0;
@@ -369,6 +373,9 @@ void diffBragg_sum_over_steps(
         // reset photon count for this pixel
         double I=0;
         double Ilambda = 0;
+        double Imiller_h =0;
+        double Imiller_k =0;
+        double Imiller_l =0;
         double II_max = -1;
         double max_stats[11] = {0,0,0,0,0,
                                0,0,0,0,0,0};
@@ -718,9 +725,12 @@ void diffBragg_sum_over_steps(
 
             double Iincrement = s_hkl*I_cell*I_noFcell;
             I += Iincrement;
-            if(db_flags.wavelength_img)
+            if(db_flags.wavelength_img){
                 Ilambda += Iincrement*lambda_ang;
-
+                Imiller_h += Iincrement * h ;
+                Imiller_k += Iincrement * k;
+                Imiller_l += Iincrement * l;
+            }
             if (db_flags.refine_diffuse){
                 double step_scale = count_scale*I_cell;
                 for (int i_gam=0; i_gam <3; i_gam++){
@@ -913,6 +923,7 @@ void diffBragg_sum_over_steps(
                 int nom_l=l0;
                 //int f_cell_idx = 1;
                 if (use_nominal_hkl){
+
                     nom_h = db_cryst.nominal_hkl[i_pix*3];
                     nom_k = db_cryst.nominal_hkl[i_pix*3+1];
                     nom_l = db_cryst.nominal_hkl[i_pix*3+2];
@@ -1089,8 +1100,12 @@ void diffBragg_sum_over_steps(
 
             floatimage[i_pix] = scale_term*I;
 
-            if (db_flags.wavelength_img)
-                d_image.wavelength[i_pix] = Ilambda / I;
+            if (db_flags.wavelength_img){
+                d_image.wavelength[i_pix*4] = Ilambda / I;
+                d_image.wavelength[i_pix*4+1] = Imiller_h / I;
+                d_image.wavelength[i_pix*4+2] = Imiller_k / I;
+                d_image.wavelength[i_pix*4+3] = Imiller_l / I;
+            }
         }
         if (db_flags.refine_diffuse){
             for (int i_diff=0; i_diff < 6; i_diff++){
