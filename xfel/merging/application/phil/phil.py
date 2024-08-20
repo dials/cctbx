@@ -432,6 +432,10 @@ postrefinement {
     .type = choice
     .help = rs only, eta_deff protocol 7
     .expert_level = 3
+  partiality_threshold_hcfix = 0.2
+    .type = float ( value_min = 0.0001 )
+    .help = Throw out observations below this value. Hard coded as 0.2 for rs2
+    .help = Minimum positive value is required because partiality appears in the denominator
   rs {
     fix = thetax thetay *RS G BFACTOR
       .type = choice(multi=True)
@@ -478,14 +482,13 @@ postrefinement {
     .help = Spot radius for lower plot reflects partiality. Only implemented for rs_hybrid
 }
 """
-
 merging_phil = """
 merging {
   minimum_multiplicity = 2
     .type = int(value_min=2)
     .help = If defined, merged structure factors not produced for the Miller indices below this threshold.
   error {
-    model = ha14 *ev11 errors_from_sample_residuals
+    model = ha14 *ev11 mm24 errors_from_sample_residuals
       .type = choice
       .multiple = False
       .help = ha14, formerly sdfac_auto, apply sdfac to each-image data assuming negative
@@ -512,6 +515,46 @@ merging {
       plot_refinement_steps = False
         .type = bool
         .help = If True, plot refinement steps during refinement.
+    }
+    mm24
+      .help = Maximum log-likelihood from Mittan-Moreau 2024
+      {
+      expected_gain = None
+        .help = Expected gain used for s_fac initialization.\
+                If None, initialize s_fac using routine.
+        .type = float
+      number_of_intensity_bins = 100
+        .help = Number of intensity bins
+        .type = int
+      n_degrees = 2
+        .help = s_add as a n_degree polynomial of the correlation coefficient
+        .type = int
+      tuning_param = 10
+        .help = Tuning param for t-dist in maximum log likelihood
+        .type = float
+      n_max_differences = 100
+        .help = Maximum number of pairwise differences per reflection.\
+                If None, then do not limit the maximum number of differences
+        .type = int
+      random_seed = 50298
+        .help = Seed used to establish the random number generator for\
+                subsampling the pairwise differences.
+        .type = int
+      tuning_param_opt = False
+        .type = bool
+        .help = If True, optimize the t-distribution's tuning parameter
+      likelihood = normal *t-dist
+        .help = Choice for likelihood function.
+        .type = choice
+        .multiple = False
+      cc_after_pr = True
+        .type = bool
+        .help = If True - use correlation coefficient determined after post-refinement.\
+                If False - use correlation coefficient determined before. \
+                If post-refinement is not performed, must be False.
+      do_diagnostics = False
+        .type = bool
+        .help = Make diagnostic plots.
     }
   }
   plot_single_index_histograms = False
@@ -644,9 +687,32 @@ lunus {
 
 diffbragg_phil = """
 diffBragg {
-  include scope simtbx.command_line.hopper.phil_scope
+  include scope simtbx.diffBragg.phil.phil_scope
 }
 """
+
+monitor_phil = """
+monitor {
+  detail = *rank node rank0 none
+    .type = choice
+    .help = Detail of data to be collected: from every rank, from rank 0 only,
+    .help = from first rank on every node, or none.
+  period = 5.0
+    .type = float
+    .help = Interval between subsequent resource statistics checks in seconds.
+    .help = Short periods might lead to inconsistent logging.
+  plot = True
+    .type = bool
+    .help = Plot the resource usage history after the monitor is stopped.
+  prefix = monitor
+    .type = str
+    .help = Filename prefix for log files and summary plot.
+  write = True
+    .type = bool
+    .help = Write collected resource information to log files.
+}
+"""
+
 
 # A place to override any defaults included from elsewhere
 program_defaults_phil_str = """
@@ -655,7 +721,8 @@ modify.cosym.use_curvatures=False
 
 master_phil = dispatch_phil + input_phil + tdata_phil + filter_phil + modify_phil + \
               select_phil + scaling_phil + postrefinement_phil + merging_phil + \
-              output_phil + statistics_phil + group_phil + lunus_phil + publish_phil + diffbragg_phil
+              output_phil + statistics_phil + group_phil + lunus_phil + \
+              publish_phil + diffbragg_phil + monitor_phil
 
 import os, importlib
 custom_phil_pathstr = os.environ.get('XFEL_CUSTOM_WORKER_PATH')

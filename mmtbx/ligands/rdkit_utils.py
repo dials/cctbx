@@ -18,7 +18,7 @@ Functions:
   match_mol_indices: Match atom indices of different mols
 """
 
-def get_cc_cartesian_coordinates(cc_cif, label='pdbx_model_Cartn_x_ideal'):
+def get_cc_cartesian_coordinates(cc_cif, label='pdbx_model_Cartn_x_ideal', ignore_question_mark=False):
   rc = []
   for i, (code, monomer) in enumerate(cc_cif.items()):
     atom = monomer.get_loop_or_row('_chem_comp_atom')
@@ -35,7 +35,8 @@ def get_cc_cartesian_coordinates(cc_cif, label='pdbx_model_Cartn_x_ideal'):
                tmp.get('_chem_comp_atom.model_Cartn_z'),
                )
       rc.append(xyz)
-      if '?' in xyz[-1]: return None
+      if not ignore_question_mark and '?' in xyz[-1]: return None
+  print(rc)
   return rc
 
 def read_chemical_component_filename(filename):
@@ -49,28 +50,40 @@ def read_chemical_component_filename(filename):
   bond_order_rdkitkey = {value:key for key,value in bond_order_ccd.items()}
   ccd = cif.reader(filename).model()
   lookup={}
-  xyzs = get_cc_cartesian_coordinates(ccd)
-  if xyzs is None:
-    xyzs = get_cc_cartesian_coordinates(ccd, label='model_Cartn_x')
-  if xyzs is None:
+  def is_coordinates(x):
+    return x!=('?', '?', '?')
+  xyzs = get_cc_cartesian_coordinates(ccd, ignore_question_mark=True)
+  xyzs = list(filter(is_coordinates, xyzs))
+  if xyzs is None or len(xyzs)==0:
+    xyzs = get_cc_cartesian_coordinates(ccd, label='model_Cartn_x', ignore_question_mark=True)
+    xyzs = list(filter(is_coordinates, xyzs))
+  if xyzs is None or len(xyzs)==0:
     for code, monomer in ccd.items():
       break
     raise Sorry('''
-  Generating H restraints from Chemical Componets for %s failed. Please supply
+  Generating H restraints from Chemical Components for %s failed. Please supply
   restraints.
   ''' % code)
   for i, (code, monomer) in enumerate(ccd.items()):
     molecule = Chem.Mol()
+    desc = monomer.get_loop_or_row('_chem_comp')
     rwmol = Chem.RWMol(molecule)
     atom = monomer.get_loop_or_row('_chem_comp_atom')
     # if atom is None: continue
     conformer = Chem.Conformer(atom.n_rows())
     for j, tmp in enumerate(atom.iterrows()):
+      #print(tmp)
       new = Chem.Atom(tmp.get('_chem_comp_atom.type_symbol').capitalize())
       new.SetFormalCharge(int(tmp.get('_chem_comp_atom.charge')))
+      for prop in ['atom_id', 'type_symbol']:
+        new.SetProp(prop, tmp.get('_chem_comp_atom.%s' % prop, '?'))
       rdatom = rwmol.AddAtom(new)
-      xyz = (float(xyzs[j][0]), float(xyzs[j][1]), float(xyzs[j][2]))
-      conformer.SetAtomPosition(rdatom, xyz)
+      print(xyzs[j])
+      if xyzs[j][0] in ['?']:
+        pass
+      else:
+        xyz = (float(xyzs[j][0]), float(xyzs[j][1]), float(xyzs[j][2]))
+        conformer.SetAtomPosition(rdatom, xyz)
       lookup[tmp.get('_chem_comp_atom.atom_id')]=j
     bond = monomer.get_loop_or_row('_chem_comp_bond')
     if bond:
@@ -81,9 +94,31 @@ def read_chemical_component_filename(filename):
         atom2 = lookup.get(atom2)
         order = tmp.get('_chem_comp_bond.value_order')
         order = bond_order_ccd[order]
+        #print('---')
         rwmol.AddBond(atom1, atom2, order)
   rwmol.AddConformer(conformer)
+  # Chem.SanitizeMol(rwmol)
+  # from rdkit.Chem.PropertyMol import PropertyMol
   molecule = rwmol.GetMol()
+  # molecule = PropertyMol(molecule)
+#  print(dir(molecule))
+#  print(desc)
+#  print(dir(desc))
+#  for key, item in desc.items():
+#    key = key.split('.')[1]
+#    print(key,list(item))
+#    molecule.SetProp(key,item[0])
+#    print(molecule.HasProp(key))
+#    print(molecule.GetProp(key))
+#  print(dir(molecule.GetPropNames()))
+#  print(molecule.GetPropsAsDict())
+  # print(dir(rwmol))
+  return molecule
+
+def mol_from_chemical_component(code):
+  from mmtbx.chemical_components import get_cif_filename
+  rc = get_cif_filename(code)
+  molecule = read_chemical_component_filename(rc)
   return molecule
 
 def convert_model_to_rdkit(cctbx_model):

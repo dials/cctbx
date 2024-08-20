@@ -241,7 +241,7 @@ def populate_qmr_defaults(qmr):
     default_defaults(qmr)
     if qmr.package.method is Auto:
       qmr.package.method='AM1'
-      # qmr.package.method='PBEh-3c'
+      qmr.package.method='PBEh-3c'
   elif program=='mopac':
     default_defaults(qmr)
     if qmr.package.method is Auto:
@@ -250,6 +250,15 @@ def populate_qmr_defaults(qmr):
   else:
     assert 0
   return qmr
+
+def get_working_directory(model, params, prefix=None):
+  rc = 'qm_work_dir'
+  return rc
+  if prefix is None:
+    prefix = getattr(params.output, 'prefix', None)
+  if prefix is not None:
+    rc='%s_%s' % (prefix, rc)
+  return rc
 
 def get_preamble(macro_cycle, i, qmr, old_style=False, compact_selection_syntax=True):
   qmr = populate_qmr_defaults(qmr)

@@ -1,7 +1,9 @@
 from __future__ import absolute_import, division, print_function
 
 import os
+import json
 
+from multiprocessing import Process
 from six.moves import cStringIO as StringIO
 
 from iotbx.cli_parser import run_program
@@ -340,6 +342,146 @@ other_file = %s
   except Sorry as s:
     assert 'duplicate user_selected_labels' in str(s)
 
+# -----------------------------------------------------------------------------
+def test_json():
+  class testProgram(ProgramTemplate):
+    program_name = 'tst_cli_parser'
+    datatypes = ['model', 'phil']
+    def validate(self):
+      pass
+    def run(self):
+      pass
+
+  data_dir = os.path.dirname(os.path.abspath(__file__))
+  model_1yjp = os.path.join(data_dir, 'data', '1yjp.pdb')
+
+  # check for get_results_as_JSON function
+  parser_log = StringIO()
+  logger = multi_out()
+  logger.register('parser_log', parser_log)
+
+  run_program(
+    program_class=testProgram,
+    args=['--overwrite', '--json', model_1yjp],
+    logger=parser_log
+  )
+
+  parser_log.flush()
+  text = parser_log.getvalue()
+  assert 'WARNING: The get_results_as_JSON function has not been defined for this program' in text
+
+  logger.close()
+
+  # check that json file is output
+  expected_result = {'key': 'value'}
+  class testProgram(ProgramTemplate):
+    program_name = 'tst_cli_parser'
+    datatypes = ['model', 'phil']
+    def validate(self):
+      pass
+    def run(self):
+      pass
+    def get_results_as_JSON(self):
+      dummy_results = expected_result
+      return json.dumps(dummy_results, indent=2)
+
+  run_program(
+    program_class=testProgram,
+    args=['--quiet', '--overwrite', '--json', model_1yjp]
+  )
+
+  expected_filename = 'tst_cli_parser_result.json'
+  assert os.path.exists(expected_filename)
+  with open(expected_filename, 'r') as f:
+    result = json.loads(f.read())
+  assert result == expected_result
+  os.remove(expected_filename)
+
+  # check non-default filename
+  expected_filename = 'non-default.json'
+  run_program(
+    program_class=testProgram,
+    args=['--quiet', '--overwrite', '--json',
+          '--json-filename', expected_filename, model_1yjp]
+  )
+  assert os.path.exists(expected_filename)
+  with open(expected_filename, 'r') as f:
+    result = json.loads(f.read())
+  assert result == expected_result
+  os.remove(expected_filename)
+
+  # try only with --json_filename and without .json extension
+  filename = 'non-default'
+  run_program(
+    program_class=testProgram,
+    args=['--quiet', '--overwrite',
+          '--json_filename', filename, model_1yjp]
+  )
+  assert os.path.exists(expected_filename)
+  with open(expected_filename, 'r') as f:
+    result = json.loads(f.read())
+  assert result == expected_result
+  os.remove(expected_filename)
+
+# -----------------------------------------------------------------------------
+# since --diff-params calls sys.exit, run in a separate process
+class testProgram(ProgramTemplate):
+  program_name = 'test_diff_params'
+  master_phil_str = '''
+diff_test_parameter = None
+.type = str
+'''
+  def run():
+    pass
+  def validate(self):
+    pass
+
+def run_diff_program(args):
+  return run_program(program_class=testProgram, args=args)
+
+def run_function_in_process(args):
+  p = Process(target=run_diff_program, args=[args])
+  p.start()
+  p.join()
+
+def test_diff_params():
+
+  expected_filename = 'test_diff_params_modified.eff'
+  if os.path.exists(expected_filename):
+    os.remove(expected_filename)
+
+  # no diff
+  args = ['--quiet', '--diff-params']
+  run_function_in_process(args)
+  assert not os.path.exists(expected_filename)
+
+  # program diff
+  args = ['--quiet', '--diff-params', 'diff_test=abc']
+  run_function_in_process(args)
+  with open(expected_filename, 'r') as f:
+    text = f.read()
+    assert 'diff_test_parameter = abc' in text.strip(), text
+
+  # DataManager diff
+  data_dir = os.path.dirname(os.path.abspath(__file__))
+  model_1yjp = os.path.join(data_dir, 'data', '1yjp.pdb')
+  args = [model_1yjp, '--quiet', '--diff-params']
+  run_function_in_process(args)
+  with open(expected_filename, 'r') as f:
+    text = f.read()
+    assert text.count('1yjp.pdb') == 2, text
+    assert 'diff_test_parameter' not in text.strip(), text
+
+  # both diff
+  args = ['--quiet', '--diff-params', model_1yjp, 'diff_test=abc']
+  run_function_in_process(args)
+  with open(expected_filename, 'r') as f:
+    text = f.read()
+    assert text.count('1yjp.pdb') == 2, text
+    assert 'diff_test_parameter' in text.strip(), text
+
+  if os.path.exists(expected_filename):
+    os.remove(expected_filename)
 
 # =============================================================================
 if __name__ == '__main__':
@@ -347,5 +489,7 @@ if __name__ == '__main__':
   test_label_parsing()
   test_model_type_parsing()
   test_user_selected_labels()
+  test_json()
+  test_diff_params()
 
   print("OK")

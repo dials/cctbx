@@ -217,7 +217,10 @@ class Script(object):
       for key in keysCreatedByMerge:
         if key not in self.params.input.persistent_refl_cols:
           self.params.input.persistent_refl_cols.append(key)
-
+    if "correlation_after_post" not in self.params.input.persistent_refl_cols:
+      self.params.input.persistent_refl_cols.append("correlation_after_post")
+    if "correlation" not in self.params.input.persistent_refl_cols:
+      self.params.input.persistent_refl_cols.append("correlation")
 
 if __name__ == '__main__':
   script = Script()

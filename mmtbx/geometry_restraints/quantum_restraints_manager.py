@@ -358,8 +358,9 @@ def validate_ligand_buffer_models(ligand_model, buffer_model, qmr, log=None):
                                          "ccp4_mon_lib_rna_dna"]:
       raise Sorry('QI cannot protonate RNA/DNA : "%s"' % atom_group.id_str())
 
-def get_ligand_buffer_models(model, qmr, verbose=False, write_steps=False, log=None):
+def get_ligand_buffer_models(model, qmr, verbose=False, write_steps=False, log=None, debug=False):
   if WRITE_STEPS_GLOBAL: write_steps=True
+  if debug: write_steps=True
   ligand_model = select_and_reindex(model, qmr.selection)
   #
   # check for to sparse selections like a ligand in two monomers
@@ -373,6 +374,7 @@ def get_ligand_buffer_models(model, qmr, verbose=False, write_steps=False, log=N
   else:
     buffer_selection_string = 'residues_within(%s, %s)' % (qmr.buffer,
                                                            qmr.selection)
+  if debug: print('buffer_selection_string',buffer_selection_string)
   buffer_model = select_and_reindex(model, buffer_selection_string)
   if write_steps: write_pdb_file(buffer_model, 'pre_remove_altloc.pdb', None)
   if 0: retain_only_one_alternative_conformation(buffer_model, 'B')
@@ -407,7 +409,9 @@ def get_ligand_buffer_models(model, qmr, verbose=False, write_steps=False, log=N
       return True
     return False
   for atom1 in ligand_atoms:
+    if debug: print('ligand',atom1.quote())
     for atom2 in buffer_atoms:
+      if debug: print('buffer',atom2.quote())
       if compare_id_str(atom1.id_str(), atom2.id_str()):
         break
     else:
@@ -465,22 +469,32 @@ def get_specific_atom_charges(qmr):
 
 def get_qm_manager(ligand_model, buffer_model, qmr, program_goal, log=StringIO()):
   program = qmr.package.program
+  default_solvent_model=''
   if program=='test':
     qmm = qm_manager.base_qm_manager.base_qm_manager
   elif program=='orca':
     qmm = orca_manager.orca_manager
+    default_solvent_model='CPCM'
   elif program=='mopac':
     qmm = mopac_manager.mopac_manager
+    default_solvent_model='EPS=78.4'
   else:
     assert 0
   qmr = quantum_interface.populate_qmr_defaults(qmr)
-
+  if qmr.package.solvent_model:
+    default_solvent_model=qmr.package.solvent_model
+  else:
+    if program_goal in ['energy', 'strain']:
+      print(u'  Update solvent model for "%s" ligand %s to "%s"' % (qmr.selection,
+                                                                    program_goal,
+                                                                    default_solvent_model,
+                                                                   )
+      )
   electron_model = None
   solvent_model = qmr.package.solvent_model
   if program_goal in ['energy', 'strain']:
     electron_model = ligand_model
-    solvent_model = 'EPS=78.4 PRECISE NSPA=92' # maybe not the best place as it's
-                                               # not in the input file???
+    solvent_model = default_solvent_model
   elif program_goal in ['opt', 'bound']:
     electron_model = buffer_model
   else:
@@ -492,7 +506,9 @@ def get_qm_manager(ligand_model, buffer_model, qmr, program_goal, log=StringIO()
     specific_atom_charges=specific_atom_charges,
     log=log)
   if total_charge!=qmr.package.charge:
-    print(u'  Update charge %s ~> %s' % (qmr.package.charge, total_charge),
+    print(u'  Update charge for "%s" cluster : %s ~> %s' % (qmr.selection,
+                                                            qmr.package.charge,
+                                                            total_charge),
           file=log)
     qmr.package.charge=total_charge
   qmm = qmm(electron_model.get_atoms(),
@@ -630,12 +646,14 @@ def update_bond_restraints(ligand_model,
       else:
         if not(i_atom.tmp in ligand_i_seqs and j_atom.tmp in ligand_i_seqs):
           continue
-      print('    %-2d %s - %s %5.3f ~> %5.3f' % (
+      Z=(distance_model-bond.distance_ideal)/sigma
+      print('    %-5d %s - %s %5.3f ~> %5.3f (Z=%4.1f)' % (
         i,
         i_atom.id_str().replace('pdb=',''),
         j_atom.id_str().replace('pdb=',''),
         bond.distance_ideal,
-        distance_model), file=log)
+        distance_model,
+        Z), file=log)
       bond.distance_ideal=distance_model
       i_seqs=[i_atom.tmp, j_atom.tmp]
       bond=model_grm.geometry.bond_params_table.lookup(*list(i_seqs))
@@ -643,7 +661,7 @@ def update_bond_restraints(ligand_model,
     else:
       if ( i_atom.element_is_hydrogen() or j_atom.element_is_hydrogen()):
         if distance_model>1.5:
-          print('    %-2d %s - %s %5.3f ~> %5.3f' % (
+          print('    %-5d %s - %s %5.3f ~> %5.3f' % (
             i,
             i_atom.id_str().replace('pdb=',''),
             j_atom.id_str().replace('pdb=',''),
@@ -725,13 +743,15 @@ def update_angle_restraints(ligand_model,
     # ligand_lookup[key]=angle_model
     # key = (int(i_seqs[0]), int(i_seqs[1]), int(i_seqs[2]))
     i+=1
-    print('    %-2d %s - %s - %s %5.1f ~> %5.1f' % (
+    Z=(angle_model-angle_ideal)/sigma
+    print('    %-5d %s - %s - %s %5.1f ~> %5.1f (Z=%4.1f)' % (
       i,
       i_atom.id_str().replace('pdb=',''),
       j_atom.id_str().replace('pdb=',''),
       k_atom.id_str().replace('pdb=',''),
       angle_ideal,
-      angle_model), file=log)
+      angle_model,
+      Z), file=log)
     assert len(intersect)!=0, '%s' % intersect
     # key = (atoms[key[0]].tmp, atoms[key[1]].tmp, atoms[key[2]].tmp)
     # model_lookup[key]=angle_model
@@ -821,7 +841,7 @@ def update_dihedral_restraints( ligand_model,
     else:
       if len(intersect)!=4: continue
     i+=1
-    print('    %-2d %s - %s - %s - %s %5.1f ~> %5.1f' % (
+    print('    %-5d %s - %s - %s - %s %6.1f ~> %6.1f' % (
       i,
       i_atom.id_str().replace('pdb=',''),
       j_atom.id_str().replace('pdb=',''),
@@ -901,19 +921,21 @@ def setup_qm_jobs(model,
     number_of_macro_cycles = 1
     if hasattr(params, 'main'):
       number_of_macro_cycles = params.main.number_of_macro_cycles
+    if macro_cycle==99: number_of_macro_cycles = 99
     if macro_cycle is not None and not running_this_macro_cycle(
         qmr,
         macro_cycle,
         energy_only=energy_only,
         number_of_macro_cycles=number_of_macro_cycles,
         pre_refinement=pre_refinement):
-      # print('    Skipping this selection in this macro_cycle : %s' % qmr.selection,
-      #       file=log)
+      print('    Skipping this selection in this macro_cycle : %s' % qmr.selection,
+            file=log)
       continue
     #
     # get ligand and buffer region models
     #
-    ligand_model, buffer_model = get_ligand_buffer_models(model, qmr)
+    debug=getattr(params.qi, 'debug', False)
+    ligand_model, buffer_model = get_ligand_buffer_models(model, qmr, debug=debug)
     #
     # get appropriate QM manager
     #
@@ -964,24 +986,30 @@ def run_jobs(objects, macro_cycle, nproc=1, log=StringIO()):
       units=''
       if qmm.program_goal in ['opt']:
         energy, units = qmm.read_energy()
+        charge = qmm.read_charge()
         if 0 : #os.getlogin()=='NWMoriarty':
           from mmtbx.geometry_restraints import curve_fit_3d
           key = (ligand_model.get_number_of_atoms(),
                  buffer_model.get_number_of_atoms())
           time_query = qmm.get_timings()
-          curve_fit_3d.load_and_display(key, time_query)
+          curve_fit_3d.load_and_display(qmm.program_goal, key, time_query, show=True)
       elif qmm.program_goal in ['energy', 'strain', 'bound']:
         energy=xyz
         units=xyz_buffer
         xyz=None
         xyz_buffer=None
+        qmm.preamble += '_%s' % qmm.program_goal
+        if qmm.program_goal in ['bound']: qmm.preamble += '_energy'
+        charge = qmm.read_charge()
+        # except: charge=-99
       else:
         assert 0, 'program_goal %s not in list' % qmm.program_goal
       energies.setdefault(qmr.selection,[])
       energies[qmr.selection].append([qmm.program_goal,
                                       energy,
                                       ligand_model.get_number_of_atoms(),
-                                      buffer_model.get_number_of_atoms()
+                                      buffer_model.get_number_of_atoms(),
+                                      charge,
                                       ])
       xyzs.append(xyz)
       xyzs_buffer.append(xyz_buffer)
@@ -1030,16 +1058,20 @@ def run_energies(model,
   #
   # run jobs
   #
+  working_dir = quantum_interface.get_working_directory(model, params)
+  if not os.path.exists(working_dir):
+    try: os.mkdir(working_dir)
+    except Exception as e: pass
+  os.chdir(working_dir)
   xyzs, xyzs_buffer, energies, units = run_jobs(objects,
                                                 macro_cycle=macro_cycle,
                                                 nproc=nproc,
                                                 log=log)
+  os.chdir('..')
   print('  Total time for QM energies: %0.1fs' % (time.time()-t0), file=log)
   print('%s%s' % ('<'*40, '>'*40), file=log)
   return group_args(energies=energies,
                     units=units,
-                    # rmsds=rmsds,
-                    # times=times,
                     )
 
 def update_restraints(model,
@@ -1067,8 +1099,11 @@ def update_restraints(model,
   times=[]
   energy_only=False
   if not model.restraints_manager_available():
-    model.log=null_out()
-    model.process(make_restraints=True)
+    model.log=StringIO()
+    try:
+      model.process(make_restraints=True)
+    except Sorry as e:
+      raise e
   if quantum_interface.is_quantum_interface_active_this_macro_cycle(params,
                                                                     macro_cycle,
                                                                     energy_only=energy_only,
@@ -1084,7 +1119,8 @@ def update_restraints(model,
   #
   assert objects
   if not objects: return None
-  working_dir = 'qm_work_dir'
+  cwd_dir = os.getcwd()
+  working_dir = quantum_interface.get_working_directory(model, params)
   if not os.path.exists(working_dir):
     try: os.mkdir(working_dir)
     except Exception as e: pass
@@ -1159,7 +1195,7 @@ def update_restraints(model,
       write_pdb_file(buffer_model, '%s_cluster_final_%s.pdb' % (prefix, preamble), log)
       final_pdbs[-1].append('%s_cluster_final_%s.pdb' % (prefix, preamble))
     if qmr.do_not_update_restraints:
-      print('  Skipping updating restaints')
+      print('  Skipping updating restaints %s %s' % (prefix, preamble), file=log)
       continue
     #
     # transfer geometry to proxies
@@ -1222,7 +1258,7 @@ Restraints written by QMR process in phenix.refine
       if qmr.restraints_filename is not Auto:
         tmp_cif_filename = qmr.restraints_filename
       else:
-        tmp_cif_filename = '%s.cif' % qmm.preamble
+        tmp_cif_filename = os.path.join(cwd_dir, '%s.cif' % qmm.preamble)
       if not tmp_cif_filename.endswith('.cif'):
         tmp_cif_filename = '%s.cif' % tmp_cif_filename
       write_restraints(ligand_model,

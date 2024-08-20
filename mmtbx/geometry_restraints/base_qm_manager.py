@@ -48,6 +48,7 @@ def process_qm_log_file(log_filename=None,
                         generator=None,
                         error_lines=None,
                         log=None,
+                        verbose=False,
                         ):
   if log_filename is not None: generator=loop_over_file(log_filename)
   error_line = None
@@ -55,7 +56,7 @@ def process_qm_log_file(log_filename=None,
   for i, line in enumerate(generator):
     if line.find('GEOMETRY OPTIMIZATION CYCLE')>-1:
       cycle = int(line.split()[4])
-      if cycle==1: print('  QM minimisation started', file=log)
+      if verbose and cycle==1: print('  QM minimisation started', file=log)
     # if line.find('Max(Improp)')>-1:
     #   conv = process_orca_convergence(last_ten)
       # if cycle%10==0:
@@ -212,6 +213,8 @@ class base_manager():
 
   def read_energy(self, *args, **kwds): return 0, 'dirac'
 
+  def read_charge(self, *args, **kwds): return 99
+
   def get_strain(self, *args, **kwds): return 0, 'dirac'
 
   def get_bound(self, *args, **kwds): return 0, 'dirac'
@@ -232,8 +235,20 @@ class base_manager():
       rc=tmp
     return flex.vec3_double(rc), flex.vec3_double(rc_buffer)
 
+  def get_gradients(self):
+    assert 0
+
   def get_timings(self, energy=False):
     return '-'
+
+  def get_lines(self, filename=None):
+    if filename is None:
+      filename = self.get_log_filename()
+    assert os.path.exists(filename), 'filename not found %s' % filename
+    f=open(filename, 'r')
+    lines=f.read()
+    del f
+    return lines
 
 class base_qm_manager(base_manager):
 
@@ -265,6 +280,13 @@ class base_qm_manager(base_manager):
         for i, (line1, line2) in enumerate(zip(outl.splitlines(),lines.splitlines())):
           if line1!=line2: print(' ! %s "%s" <> "%s"' % (i+1, line1, line2))
         print('='*80)
+        f, ext = os.path.splitext(filename)
+        f=open('old%s' % ext, 'w')
+        f.write(lines)
+        del f
+        f=open('new%s' % ext, 'w')
+        f.write(outl)
+        del f
         raise Sorry('something has changed making the QM input files different')
     return outl==lines
 
@@ -284,7 +306,8 @@ class base_qm_manager(base_manager):
               coordinate_filename_ext='.xyz',
               log_filename_ext='.log',
               redirect_output=True,
-              log=None):
+              log=None,
+              verbose=False):
     if self.program_goal in ['opt', 'strain']:
       optimise_ligand=True
     # elif self.program_goal in ['energy']:
@@ -294,19 +317,22 @@ class base_qm_manager(base_manager):
     coordinates = None
     rc=True
     if check_file_read_safe:
+      if verbose: print('check_file_read_safe',check_file_read_safe)
       rc = self.check_file_read_safe(optimise_ligand=optimise_ligand,
                                      optimise_h=optimise_h,
                                      constrain_torsions=constrain_torsions,
                                      )
+      if verbose: print('rc',rc)
     if file_read and rc:
       filename = self.get_coordinate_filename()
       if os.path.exists(filename):
         lf = self.get_log_filename()
         if os.path.exists(lf):
           process_qm_log_file(lf, log=log)
-        # print('  Reading coordinates from %s\n' % filename, file=log)
+        if verbose: print('  Reading coordinates from %s\n' % filename)
         coordinates = self.read_xyz_output()
     if coordinates is None:
+      if verbose: print('no coordinates')
       self.opt_setup(optimise_ligand=optimise_ligand,
                      optimise_h=optimise_h,
                      constrain_torsions=constrain_torsions,
@@ -396,6 +422,9 @@ class base_qm_manager(base_manager):
     self.preamble = old_preamble
     return energy, units
 
+  def get_gradients(self):
+    assert 0
+
   def get_timings(self, energy=None):
     if not self.times: return '-'
     f='  Timings : %0.2fs (%ss)' % (
@@ -414,7 +443,7 @@ class base_qm_manager(base_manager):
         opt=0
     else:
       opt=0
-    if optimise_h and atom.element in ['H', 'D']:
+    if optimise_h and atom.element_is_hydrogen():
       opt=1
     return opt
 
@@ -425,7 +454,14 @@ class base_qm_manager(base_manager):
       for j, atom2 in enumerate(self.atoms):
         if i==j: continue
         d2 = dist2(atom1.xyz, atom2.xyz)
-        if d2<2.5:
+        d2_limit=2.5
+        if atom1.element_is_hydrogen() and atom2.element_is_hydrogen():
+          continue
+        elif atom1.element_is_hydrogen() or atom2.element_is_hydrogen():
+          d2_limit=1.3
+        elif atom1.element in ['P'] or atom2.element in ['P']:
+          d2_limit=4
+        if d2<d2_limit:
           bonds[i].append(j)
     # for i, atom1 in enumerate(self.atoms):
     #   print(i, atom1.quote())
@@ -436,14 +472,16 @@ class base_qm_manager(base_manager):
   def get_torsion(self, i):
     if not hasattr(self, 'bonds'):
       self.bonds = self.guess_bonds()
+    if self.atoms[i].parent().resname in ['HOH']: return None
     rc = [i]
     next = i
+    j=0
     while len(rc)<4:
-      j=0
       next_i=self.bonds[i][j]
       if next_i not in rc:
         rc.append(next_i)
         i=next_i
+        j=0
       else:
         j+=1
     return rc

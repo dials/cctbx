@@ -187,7 +187,7 @@ void diffBragg_sum_over_steps_cuda(
         //gettimeofday(&t3, 0));
         gpuErr(cudaMallocManaged(&cp.cu_floatimage, db_cu_flags.Npix_to_allocate*sizeof(CUDAREAL) ));
         if (db_flags.wavelength_img){
-            gpuErr(cudaMallocManaged(&cp.cu_wavelenimage, db_cu_flags.Npix_to_allocate*sizeof(CUDAREAL) ));
+            gpuErr(cudaMallocManaged(&cp.cu_wavelenimage, 4*db_cu_flags.Npix_to_allocate*sizeof(CUDAREAL) ));
         }
         if (db_flags.refine_diffuse){
             gpuErr(cudaMallocManaged(&cp.cu_d_diffuse_gamma_images, db_cu_flags.Npix_to_allocate*3*sizeof(CUDAREAL)));
@@ -444,6 +444,12 @@ void diffBragg_sum_over_steps_cuda(
     if (db_cryst.fpfdp.size() == 0){ // note cannot use atom data if fpfdp is 0, make this cleaner
         num_atoms=0;
     }
+
+    if (db_flags.use_diffuse) {
+        if (db_cryst.laue_group_num < 1 || db_cryst.laue_group_num >14 ){
+            throw std::string("Laue group number not in range 1-14");
+        }
+    }
     //int sm_size = number_of_sources*5*sizeof(CUDAREAL);
     //gpu_sum_over_steps<<<numblocks, blocksize, sm_size >>>(
     bool aniso_eta = db_cryst.UMATS_RXYZ.size() != db_cryst.UMATS_RXYZ_prime.size();
@@ -529,7 +535,7 @@ void diffBragg_sum_over_steps_cuda(
         floatimage[i] = cp.cu_floatimage[i];
     }
     if(db_flags.wavelength_img){
-        for (int i=0; i< Npix_to_model; i++){
+        for (int i=0; i< 4*Npix_to_model; i++){
             d_image.wavelength[i] = cp.cu_wavelenimage[i];
         }
     }

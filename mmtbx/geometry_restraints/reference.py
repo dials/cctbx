@@ -25,6 +25,7 @@ def generate_torsion_restraints(
     from another source (reference model) which is not necessary
     of the same size as hierarchy.
   """
+  pdb_hierarchy.atoms().reset_i_seq()
   torsion_proxies = geometry_restraints.shared_dihedral_proxy()
   if pdb_hierarchy.atoms_size() < 4:
     return torsion_proxies
@@ -32,6 +33,7 @@ def generate_torsion_restraints(
   bool_pdbh_selection = flex.bool(pdb_hierarchy.atoms_size(), False)
   if (selection is not None):
     if (isinstance(selection, flex.bool)):
+      assert len(selection) == pdb_hierarchy.atoms_size()
       bool_pdbh_selection = selection
     elif (isinstance(selection, flex.size_t)):
       bool_pdbh_selection.set_selected(selection, True)

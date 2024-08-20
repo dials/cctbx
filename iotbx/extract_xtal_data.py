@@ -289,7 +289,7 @@ class run(object):
                prefer_anomalous = None,
                force_non_anomalous = False,
                allow_mismatch_flags = False,
-               free_r_flags_scope = 'xray_data',
+               free_r_flags_scope = 'miller_array.labels.name',
                ):
     adopt_init_args(self, locals())
     # Buffers for error and log messages.
@@ -336,7 +336,7 @@ class run(object):
     if extract_experimental_phases:
       self.experimental_phases = self._determine_experimental_phases(
         parameters      = experimental_phases_params,
-        parameter_scope = "")
+        parameter_scope = 'miller_array.labels.name')
     # Fill in log
     self._show_summary()
 
@@ -454,8 +454,10 @@ class run(object):
           file_name        = file_name,
           labels           = labels,
           raise_no_array   = False,
+          parameter_name   = "",
           ignore_all_zeros = ignore_all_zeros,
           parameter_scope  = parameter_scope)
+
       if(experimental_phases is None): return None
     except reflection_file_utils.Sorry_No_array_of_the_required_type:
       experimental_phases = None
@@ -494,7 +496,8 @@ class run(object):
       file_name        = self.parameters.file_name,
       labels           = self.parameters.labels,
       ignore_all_zeros = self.parameters.ignore_all_zeros,
-      parameter_scope  = "",
+      parameter_name   = "",
+      parameter_scope  = "miller_array.labels.name",
       prefer_anomalous = self.prefer_anomalous)
     self.parameters.file_name = data.info().source
     self.parameters.labels    = [data.info().label_string()]
@@ -524,7 +527,7 @@ class run(object):
         if(self.parameters.r_free_flags.generate is not None):
           if(not self.keep_going):
             self.err.append(explain_how_to_generate_array_of_r_free_flags(
-              scope = "%s.r_free_flags.generate" %(self.free_r_flags_scope)))
+              scope = "xray_data.r_free_flags.generate"))
             self.err.append("Please try again.")
           return None
         r_free_flags, test_flag_value = None, None

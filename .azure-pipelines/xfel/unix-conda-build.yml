@@ -56,8 +56,9 @@ steps:
     source $(Pipeline.Workspace)/miniforge/etc/profile.d/conda.sh
     conda create -y -n $(PYTHON_VERSION) --file $(Pipeline.Workspace)/modules/dials/.conda-envs/$(OS).txt python=$(PYTHON_FULL_VERSION)
     conda install -y -c conda-forge --no-deps -n $(PYTHON_VERSION) junit-xml
-    conda install -y -c conda-forge cmake pandas distro -n $(PYTHON_VERSION)
+    conda install -y -c conda-forge cmake make pandas distro -n $(PYTHON_VERSION)
   displayName: Create conda environment
+  retryCountOnTaskFailure: 3
 
 - script: |
     set -xe
@@ -65,6 +66,13 @@ steps:
     conda env update -n $(PYTHON_VERSION) --file=$(Pipeline.Workspace)/modules/cctbx_project/xfel/conda_envs/ml.yml
   displayName: Create conda environment
   condition: eq('${{ parameters.distribution }}', 'centos')
+
+- script: |
+    set -xe
+    source $(Pipeline.Workspace)/miniforge/etc/profile.d/conda.sh
+    conda install -y -c conda-forge -n $(PYTHON_VERSION) libcxx=17
+  displayName: Select libcxx on macOS
+  condition: eq(variables.OS, 'macos')
 
 # build
 - script: |
@@ -95,6 +103,7 @@ steps:
       libtbx.configure lunus
       make
     fi
+    rm -fr modules/kokkos/.git/*
   displayName: Configure and Build
 
 # test

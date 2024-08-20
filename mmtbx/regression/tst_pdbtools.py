@@ -865,6 +865,16 @@ loop_
   hierarchy = pdb_inp.construct_hierarchy()
   assert [chain.id for chain in hierarchy.chains()] == ['C', 'B']
 
+  # check target_output_format=pdb
+  cmd = " ".join(["phenix.pdbtools", "\"%s\"" % f.name,
+    "rename_chain_id.old_id=A",
+    "rename_chain_id.new_id=C",
+    "target_output_format=pdb",])
+  print(cmd)
+  run_command(command=cmd, verbose=False)
+  ofn = f.name[:].replace(".cif","_modified.pdb")
+  assert os.path.isfile(ofn)
+
 def exercise_mmcif_support_2(prefix="tst_pdbtools_mmcif2"):
   f = open("%s.pdb" % prefix, 'w')
   f.write("""\
@@ -1040,6 +1050,7 @@ END
 """)
   cmd = "phenix.pdbtools tst_pdbtools_alt_confs.pdb remove_alt_confs=True " +\
     "always_keep_one_conformer=True"
+  print(cmd)
   run_command(command=cmd, verbose=False)
   with open("tst_pdbtools_alt_confs_modified.pdb") as f:
     pdb_new = f.read()
@@ -1054,6 +1065,40 @@ ATOM      7  O   HOH A   4       4.132   9.963   7.800  1.00 15.00           O
 TER
 END
 """)
+  cmd = "phenix.pdbtools tst_pdbtools_alt_confs.pdb remove_alt_confs=True altloc_to_keep='B' "
+  print(cmd)
+  run_command(command=cmd, verbose=False)
+  with open("tst_pdbtools_alt_confs_modified.pdb") as f:
+    pdb_new = f.read()
+
+  assert (pdb_new == """\
+ATOM      1  CA  LYS A  32      10.574   8.177  11.768  1.00 11.49           C
+ATOM      2  CB  LYS A  32       9.193   8.732  12.170  1.00 12.23           C
+ATOM      3  CA  VAL A  33      11.708   5.617  14.332  1.00 11.42           C
+ATOM      4  CB  VAL A  33      11.101   4.227  14.591  1.00 11.47           C
+ATOM      5  O   HOH A   3       1.132   5.963   7.065  1.00 15.00           O
+ATOM      6  O   HOH A   4       4.132   9.963   7.800  1.00 15.00           O
+TER
+END
+""")
+  cmd = "phenix.pdbtools tst_pdbtools_alt_confs.pdb remove_alt_confs=True " +\
+    "always_keep_one_conformer=True altloc_to_keep='B' "
+  print(cmd)
+  run_command(command=cmd, verbose=False)
+  with open("tst_pdbtools_alt_confs_modified.pdb") as f:
+    pdb_new = f.read()
+  assert (pdb_new == """\
+ATOM      1  O   HOH A   2       5.131   5.251   5.823  1.00 10.00           O
+ATOM      2  CA  LYS A  32      10.574   8.177  11.768  1.00 11.49           C
+ATOM      3  CB  LYS A  32       9.193   8.732  12.170  1.00 12.23           C
+ATOM      4  CA  VAL A  33      11.708   5.617  14.332  1.00 11.42           C
+ATOM      5  CB  VAL A  33      11.101   4.227  14.591  1.00 11.47           C
+ATOM      6  O   HOH A   3       1.132   5.963   7.065  1.00 15.00           O
+ATOM      7  O   HOH A   4       4.132   9.963   7.800  1.00 15.00           O
+TER
+END
+""")
+
 
 def exercise_convert_met_to_semet():
   pdb_str_met = """
@@ -1313,6 +1358,7 @@ def exercise(args):
   exercise_mmcif_support()
   exercise_segid_manipulations()
   exercise_result_is_empty()
+  print("OK")
 
 if (__name__ == "__main__"):
   exercise(sys.argv[1:])

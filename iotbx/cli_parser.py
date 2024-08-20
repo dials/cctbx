@@ -20,7 +20,7 @@ from iotbx.file_reader import any_file
 from libtbx import citations
 from libtbx.program_template import ProgramTemplate
 from libtbx.str_utils import wordwrap
-from libtbx.utils import multi_out, show_times, Sorry
+from libtbx.utils import multi_out, null_out, show_times, Sorry
 
 # =============================================================================
 class ParserBase(argparse.ArgumentParser):
@@ -248,8 +248,21 @@ class CCTBXParser(ParserBase):
     # return JSON output from program
     self.add_argument(
       '--json', action='store_true',
-      help='writes or overwrites the JSON output for the program to file (%s)' %
-      self.json_filename
+      help='''\
+writes or overwrites the JSON output for the program to file (%s).
+Use --json-filename to specify a different filename for the output.''' %
+      self.json_filename,
+    )
+
+    # --json-filename
+    # set a non-default filename for JSON output
+    self.add_argument(
+      '--json-filename', '--json_filename', action='store',
+      type=str, default=None,
+      help='''\
+optionally specify a filename for JSON output. If a filename is provided,
+the .json extension will be added automatically if it does not already exist.
+Also, specifying this flag implies that --json is also specified.'''
     )
 
     # --overwrite
@@ -299,11 +312,11 @@ class CCTBXParser(ParserBase):
     )
 
   # ---------------------------------------------------------------------------
-  def parse_args(self, args):
+  def parse_args(self, args, skip_help = False):
     '''
     '''
     # default behavior with no arguments
-    if len(args) == 0:
+    if (len(args) == 0) and (not skip_help):
       self.print_help()
       self.exit()
 
@@ -498,8 +511,10 @@ class CCTBXParser(ParserBase):
     # command-line PHIL arguments override any previous settings and are
     # processed in given order
     if len(phil_list) > 0:
-      interpreter = self.master_phil.command_line_argument_interpreter()
-      data_manager_interpreter = self.data_manager.master_phil.command_line_argument_interpreter()
+      interpreter = self.master_phil.command_line_argument_interpreter(
+        assume_when_ambiguous=self.program_class.assume_when_ambiguous)
+      data_manager_interpreter = self.data_manager.master_phil.command_line_argument_interpreter(
+        assume_when_ambiguous=self.program_class.assume_when_ambiguous)
       print('  Adding command-line PHIL:', file=self.logger)
       print('  -------------------------', file=self.logger)
       for phil in phil_list:
@@ -765,10 +780,10 @@ class CCTBXParser(ParserBase):
 
     # write differences
     if self.namespace.write_modified or self.namespace.diff_params:
-      if phil_is_different:
+      if is_different:
         ow = overwrite or self.namespace.diff_params
         self.data_manager.write_phil_file(
-          phil_diff.as_str(), filename=self.modified_filename,
+          data_diff.as_str() + phil_diff.as_str(), filename=self.modified_filename,
           overwrite=ow)
         print('  Modified PHIL parameters written to %s.' %
               self.modified_filename, file=self.logger)
@@ -939,15 +954,20 @@ def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arg
     pr.dump_stats('profile.out')
 
   # output JSON
-  if namespace.json:
+  if namespace.json or namespace.json_filename:
     result = task.get_results_as_JSON()
     if result is not None:
-      with open(parser.json_filename, 'w') as f:
+      json_filename = parser.json_filename
+      if namespace.json_filename is not None:
+        json_filename = namespace.json_filename
+        if not json_filename.endswith('.json'):
+          json_filename += '.json'
+      with open(json_filename, 'w') as f:
         f.write(result)
     else:
       print('', file=logger)
       print('!'*79, file=logger)
-      print('WARNING: The get_results_as_JSON function has not been defined for this program')
+      print('WARNING: The get_results_as_JSON function has not been defined for this program', file=logger)
       print('!'*79, file=logger)
 
   # stop timer
@@ -966,6 +986,21 @@ def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arg
     result = task.get_results()
 
   return result
+
+# =============================================================================
+def get_program_params(run):
+    """Tool to get parameters object for a program that runs with
+      the program template.
+    params: run:  the program template object
+    returns: parameters for this program as set up by the program template
+    Get the run something like this way:
+     from phenix.programs import map_to_model as run
+    """
+
+    parser = CCTBXParser(program_class=run.Program,
+                         logger=null_out())
+    _ = parser.parse_args([], skip_help = True)
+    return parser.working_phil.extract()
 
 # =============================================================================
 # end

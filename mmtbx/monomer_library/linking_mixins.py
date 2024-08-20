@@ -234,6 +234,7 @@ def possible_cyclic_peptide(atom1,
                             ):
   if verbose:
     print(atom1.quote(),atom2.quote())
+  if atom1.element_is_hydrogen() or atom2.element_is_hydrogen(): return False
   chain1 = atom1.parent().parent().parent()
   chain2 = atom1.parent().parent().parent()
   if not chain1.id == chain2.id:
@@ -313,6 +314,7 @@ class linking_mixins(object):
                                   small_molecule_bond_cutoff  = 2.,
                                   include_selections          = None,
                                   exclude_selections          = None,
+                                  exclude_hydrogens_from_bonding_decisions = False,
                                   log                         = None,
                                   verbose                     = False,
                                   ):
@@ -386,17 +388,7 @@ class linking_mixins(object):
         shell_asu_tables=[pair_asu_table])
       return nonbonded_proxies, sites_cart, pair_asu_table, asu_mappings, i_seqs
     #
-    def _nonbonded_pair_generator_geometry_restraints_sort(
-        nonbonded_proxies,
-        max_bonded_cutoff=3.):
-      rc = nonbonded_proxies.get_sorted(by_value="delta",
-                                        sites_cart=sites_cart,
-                                        include_proxy=True,
-        )
-      if rc is None: return
-      rc, junk = rc
-      for item in rc:
-        yield item
+
     #
     if(log is not None):
       print("""
@@ -440,13 +432,11 @@ class linking_mixins(object):
         _nonbonded_pair_objects(max_bonded_cutoff=max_bonded_cutoff,
           )
     initial_pair_asu_table_table = bond_asu_table.table().deep_copy()
-    for ii, item in enumerate(
-        _nonbonded_pair_generator_geometry_restraints_sort(
-          nonbonded_proxies=nonbonded_proxies,
-          max_bonded_cutoff=max_bonded_cutoff,
-          )
-        ):
-      labels, i_seq, j_seq, distance, vdw_distance, sym_op, rt_mx_ji, proxy = item
+    for ii, item in enumerate(nonbonded_proxies.sorted_value_proxies_generator(
+        by_value="delta",
+        sites_cart=sites_cart,
+        cutoff=max_bonded_cutoff)):
+      i_seq, j_seq, distance, sym_op, rt_mx_ji, proxy = item
       #
       # include & exclude selection
       #
@@ -517,7 +507,8 @@ class linking_mixins(object):
       #
       #
       if verbose:
-        print(i_seq, j_seq, atom1.quote(), end=' ')
+        print('='*80)
+        print('nonbonded', i_seq, j_seq, atom1.quote(), end=' ')
         print(atom2.quote(), end=' ')
         print("Distance: %0.2f" % distance, rt_mx_ji, sym_op)
 
@@ -582,10 +573,11 @@ Residue classes
         key.append(str(rt_mx_ji))
       key = tuple(key)
       # hydrogens
-      if atom1.element.strip() in hydrogens:
-        done[atom2.id_str()] = atom1.id_str()
-      if atom2.element.strip() in hydrogens:
-        done[atom1.id_str()] = atom2.id_str()
+      if not exclude_hydrogens_from_bonding_decisions:
+        if atom1.element.strip() in hydrogens:
+          done[atom2.id_str()] = atom1.id_str()
+        if atom2.element.strip() in hydrogens:
+          done[atom1.id_str()] = atom2.id_str()
       # bond length cutoff & some logic
       aa_rc = linking_utils.is_atom_pair_linked(
           atom1,
@@ -620,6 +612,7 @@ Residue classes
           print('link_metals',link_metals)
         if ( atom1.element.strip().upper() in hydrogens or
              atom2.element.strip().upper() in hydrogens):
+          if verbose: print('hydrogens')
           pass
         else:
           done.setdefault(key, [])
@@ -690,6 +683,7 @@ Residue classes
         if atom2_key:
           if atom2_key in done: continue
           done[atom2_key] = key
+      if verbose: print(done)
       #
       current_number_of_links = len(done.setdefault(key, []))
       if(current_number_of_links >=
