@@ -639,6 +639,7 @@ class test_nonbonded_overlaps(unittest.TestCase):
     outstring = '{0} , expected {1:.2f}, actual {2:.2f}'
     params = mmtbx.model.manager.get_default_pdb_interpretation_params()
     params.pdb_interpretation.allow_polymer_cross_special_position=True
+    params.pdb_interpretation.automatic_linking.link_residues=False
     pdb_inp = iotbx.pdb.input(lines=raw_records3.split("\n"), source_info=None)
     model = mmtbx.model.manager(
       model_input = pdb_inp,
@@ -677,11 +678,14 @@ class test_nonbonded_overlaps(unittest.TestCase):
     Test overlaps when adding and moving scatterers
     Test water scatterers with and without labels
     '''
+    params = mmtbx.model.manager.get_default_pdb_interpretation_params()
+    params.pdb_interpretation.allow_polymer_cross_special_position=True
+    params.pdb_interpretation.automatic_linking.link_residues=False
     pdb_inp = iotbx.pdb.input(lines=raw_records3.split('\n'), source_info=None)
     model = mmtbx.model.manager(
       model_input = pdb_inp,
       log         = null_out())
-    model.process(make_restraints=True)
+    model.process(pdb_interpretation_params=params, make_restraints=True)
     outstring = '{0} , expected {1:.2f}, actual {2:.2f}'
     geometry = model.get_restraints_manager().geometry
     xrs = model.get_xray_structure()
@@ -711,6 +715,7 @@ class test_nonbonded_overlaps(unittest.TestCase):
     pdb_str = model.model_as_pdb()
     params = mmtbx.model.manager.get_default_pdb_interpretation_params()
     params.pdb_interpretation.allow_polymer_cross_special_position=True
+    params.pdb_interpretation.automatic_linking.link_residues=False
     pdb_inp = iotbx.pdb.input(lines=pdb_str.split('\n'), source_info=None)
     model = mmtbx.model.manager(
       model_input = pdb_inp,
@@ -773,7 +778,7 @@ class test_nonbonded_overlaps(unittest.TestCase):
 
     results = results_str.split('\n')
     # check number of lines in output
-    self.assertEqual(len(results),19)
+    self.assertEqual(len(results),21)
     # check general table structure
     self.assertTrue(results[4].startswith('========'))
     self.assertTrue(results[6].startswith('--------'))
@@ -871,13 +876,13 @@ class test_nonbonded_overlaps(unittest.TestCase):
     results = overlaps_count_info.result
     self.assertEqual(len(results.nb_overlaps_proxies_due_to_sym_op),2)
     self.assertEqual(len(results.nb_overlaps_proxies_macro_molecule),3)
-    self.assertEqual(len(results.nb_overlaps_proxies_all),12)
+    self.assertEqual(len(results.nb_overlaps_proxies_all),14)
     # results
     r_overlaps_all = round(results.nb_overlaps_all,2)
     r_overlaps_sym = round(results.nb_overlaps_due_to_sym_op,2)
     r_overlaps_macro_mol = round(results.nb_overlaps_macro_molecule,2)
     # test
-    self.assertEqual(r_overlaps_all,12)
+    self.assertEqual(r_overlaps_all,14)
     self.assertEqual(r_overlaps_sym,2)
     self.assertEqual(r_overlaps_macro_mol,3)
     # results
@@ -885,7 +890,7 @@ class test_nonbonded_overlaps(unittest.TestCase):
     r_overlaps_sym = round(results.normalized_nbo_sym,2)
     r_overlaps_macro_mol = round(results.normalized_nbo_macro_molecule,2)
     #
-    overlaps_all = round(1000*12/n_atoms,2)
+    overlaps_all = round(1000*14/n_atoms,2)
     overlaps_sym = round(1000*2/n_atoms,2)
     overlaps_macro_mol = round(1000*3/n_atoms_macro_mol,2)
     # test
@@ -1078,6 +1083,7 @@ def process_raw_records(
   params = mmtbx.model.manager.get_default_pdb_interpretation_params()
   params.pdb_interpretation.allow_polymer_cross_special_position=True
   params.pdb_interpretation.clash_guard.nonbonded_distance_threshold = None
+  params.pdb_interpretation.automatic_linking.link_residues=False
   pdb_inp = iotbx.pdb.input(lines=records, source_info=None)
   model = mmtbx.model.manager(
     model_input = pdb_inp,

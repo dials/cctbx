@@ -89,6 +89,7 @@ qm_restraints
 
   calculate = *in_situ_opt starting_energy final_energy \
 starting_strain final_strain starting_bound final_bound \
+starting_binding final_binding \
 starting_higher_single_point final_higher_single_point
     .type = choice(multi=True)
     .help = Choose QM calculations to run
@@ -97,6 +98,7 @@ starting_higher_single_point final_higher_single_point
       strain_energy_of_starting_ligand_geometry \
       strain_energy_of_final_ligand_geometry \
       starting_energy_of_bound_ligand_cluster \
+      starting_binding_energy_of)ligand final_binding_energy_of_ligand \
       final_energy_of_bound_ligand_cluster not_implemented not_implemented
 
   write_files = *restraints pdb_core pdb_buffer pdb_final_core pdb_final_buffer
@@ -124,6 +126,10 @@ starting_higher_single_point final_higher_single_point
     .type = choice
   ignore_x_h_distance_protein = False
     .type = bool
+    .help = skip check on transfer of proton during QM optimisation
+  ignore_lack_of_h_on_ligand = False
+    .type = bool
+    .help = skip check on protonation of ligand for entities such as MgF3
   capping_groups = True
     .type = bool
 
@@ -241,7 +247,7 @@ def populate_qmr_defaults(qmr):
     default_defaults(qmr)
     if qmr.package.method is Auto:
       qmr.package.method='AM1'
-      # qmr.package.method='PBEh-3c'
+      qmr.package.method='PBEh-3c'
   elif program=='mopac':
     default_defaults(qmr)
     if qmr.package.method is Auto:
@@ -250,6 +256,15 @@ def populate_qmr_defaults(qmr):
   else:
     assert 0
   return qmr
+
+def get_working_directory(model, params, prefix=None):
+  rc = 'qm_work_dir'
+  return rc
+  if prefix is None:
+    prefix = getattr(params.output, 'prefix', None)
+  if prefix is not None:
+    rc='%s_%s' % (prefix, rc)
+  return rc
 
 def get_preamble(macro_cycle, i, qmr, old_style=False, compact_selection_syntax=True):
   qmr = populate_qmr_defaults(qmr)

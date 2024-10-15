@@ -818,56 +818,29 @@ def sphere_enclosing_model(model):
   model_radius = math.sqrt(dsqrmax)
   return model_centre, model_radius
 
-def sphere_sampling_model(model):
-  sites_cart = model.get_sites_cart()
-  cart_min = flex.double(sites_cart.min())
-  cart_max = flex.double(sites_cart.max())
-  model_midpoint = (cart_max + cart_min) / 2
-  meansqr = flex.mean((sites_cart - tuple(model_midpoint)).norms() ** 2)
-  rms_model_radius = math.sqrt(meansqr)
-  return model_midpoint, rms_model_radius
+def mask_fixed_model_region(mmm, d_min,
+                                 fixed_model=None,
+                                 ordered_mask_id=None,
+                                 fixed_mask_id='mask_around_atoms'):
+  # Flatten the region of the ordered volume mask covered by the fixed model
+  # and keep the mask for the fixed model.
 
-def flatten_model_region(mmm, d_min):
-  # Flatten the region covered by the model
-  # For map_manager, replace it by the mask-weighted mean within this region
-  # For half-maps, replace by the mean and put back the original half-map
-  # map difference to preserve the error signal.
-  mm = mmm.map_manager()
-  mm1 = mmm.map_manager_1()
-  mm2 = mmm.map_manager_2()
-  delta_mm = mm1.customized_copy(map_data = mm1.map_data() - mm2.map_data())
-  model = mmm.model()
-  mmm.create_mask_around_atoms(model=model, soft_mask=True, soft_mask_radius=d_min/2)
-  working_mmm = mmm.deep_copy() # Save a copy before masking to work on later
+  # Do nothing if no fixed model
+  if fixed_model is None:
+    return
 
-  working_mmm.add_map_manager_by_id(delta_mm, map_id = 'delta_map')
+  radius = 3.
+  if d_min is not None:
+    radius = max(radius, d_min)
+  mmm.create_mask_around_atoms(model=fixed_model, mask_atoms_atom_radius=radius, mask_id=fixed_mask_id)
+  fixed_model_mask = mmm.get_map_manager_by_id(map_id=fixed_mask_id)
 
-  # Invert original mask and apply to original maps to flatten density under model
-  mask_mm_inverse = mmm.get_map_manager_by_id('mask')
-  mask_mm_inverse.set_map_data(map_data = 1. - mask_mm_inverse.map_data())
-  mmm.apply_mask_to_maps(set_outside_to_mean_inside = False)
-
-  # Apply original mask to working_mmm to get density and difference density under model
-  mask_mm = working_mmm.get_map_manager_by_id('mask')
-  working_mmm.apply_mask_to_maps(set_outside_to_mean_inside = False)
-
-  # Get mean density for part of each map under model, to add back to
-  # flattened region of each map
-  mask_info = working_mmm.mask_info()
-  weighted_points = mask_info.size*mask_info.mean
-  wmm = working_mmm.map_manager()
-  mean_map = flex.sum(wmm.map_data()) / weighted_points
-  mask_data = mask_mm.map_data()
-  mm.set_map_data(map_data = mm.map_data() + mean_map * mask_data)
-  wmm1 = working_mmm.map_manager_1()
-  mean_map1 = flex.sum(wmm1.map_data()) / weighted_points
-  mm1.set_map_data(map_data = mm1.map_data() +
-      mean_map1 * mask_data + delta_mm.map_data()/2)
-  wmm2 = working_mmm.map_manager_2()
-  mean_map2 = flex.sum(wmm2.map_data()) / weighted_points
-  mm2.set_map_data(map_data = mm2.map_data() +
-      mean_map2 * mask_data - delta_mm.map_data()/2)
-  mmm.remove_map_manager_by_id('mask')
+  if ordered_mask_id is not None:
+    # Invert fixed_model_mask before flattening
+    fixed_model_mask.set_map_data(map_data = 1. - fixed_model_mask.map_data())
+    mmm.apply_mask_to_map(map_id=ordered_mask_id, mask_id=fixed_mask_id)
+    # Invert back so we can use to assess fraction of fixed model in masked sphere
+    fixed_model_mask.set_map_data(map_data = 1. - fixed_model_mask.map_data())
 
 def add_local_squared_deviation_map(
     mmm, coeffs_in, radius, d_min, map_id_out):
@@ -972,7 +945,7 @@ def auto_sharpen_isotropic(mc1, mc2):
 
 def add_ordered_volume_mask(
     mmm, d_min, rad_factor=2, protein_mw=None, nucleic_mw=None,
-    map_id_out='ordered_volume_mask'):
+    ordered_mask_id='ordered_volume_mask'):
   """
   Add map defining mask covering the volume of most ordered density required
   to contain the specified content of protein and nucleic acid, judged by
@@ -987,7 +960,7 @@ def add_ordered_volume_mask(
     sphere, defaults to 2
   protein_mw*: molecular weight of protein expected in map, if any
   nucleic_mw*: molecular weight of nucleic acid expected in map
-  map_id_out: identifier of output map, defaults to ordered_volume_mask
+  ordered_mask_id: identifier of output map, defaults to ordered_volume_mask
 
   * Note that at least one of protein_mw and nucleic_mw must be specified,
     and that the map must be complete
@@ -1062,7 +1035,7 @@ def add_ordered_volume_mask(
 
   # Clean up temporary map, then add ordered volume mask
   mmm.remove_map_manager_by_id('map_variance')
-  mmm.add_map_manager_by_id(new_mm,map_id=map_id_out)
+  mmm.add_map_manager_by_id(new_mm,map_id=ordered_mask_id)
 
 def get_grid_spacings(unit_cell, unit_cell_grid):
   if unit_cell.parameters()[3:] != (90,90,90):
@@ -1415,11 +1388,134 @@ def local_mean_density(mm, radius):
 
   return local_mean_mm
 
+def sigmaA_from_model_in_map(expectE, dobs, Ecalc, over_sampling_factor,
+                             verbosity=0, log=sys.stdout):
+  """
+  Compute sigmaA values needed to explain agreement of model with map given map errors
+
+  Compulsory arguments:
+  expectE: Emean giving expected E for map
+  dobs:    weighting factor for map coefficient accuracy
+  Ecalc:   calculated E-values for placed model
+  over_sampling_factor: account for oversampling in LLG calculation
+                        relevant here for precision of sigmaA estimate
+  Optional arguments:
+  verbosity: levels greater than default of 0 progressively more verbose
+  log:       destination for printing if any
+  """
+  model_sigmaA = expectE.customized_copy(data=flex.double(expectE.size(),0))
+  xdat = []
+  ydat = []
+  wdat = []
+  if expectE.binner() is None:
+    expectE.setup_binner_d_star_sq_bin_size()
+  if verbosity > 1:
+    print("SigmaA curve for placed model contribution",file=log)
+    print(" # of terms   mean(ssqr)  sigmaA   sigma(sigmaA)")
+  for i_bin in expectE.binner().range_used():
+    sel = expectE.binner().selection(i_bin)
+    eEsel = expectE.select(sel)
+    abseE = eEsel.amplitudes().data()
+    p1 = eEsel.phases().data()
+    Ecalc_sel = Ecalc.select(sel)
+    absEc = Ecalc_sel.amplitudes().data()
+    sigmaP = flex.mean_default(flex.pow2(absEc),0.)
+    absEc /= math.sqrt(sigmaP)
+    Ecalc.data().set_selected(sel,
+                  Ecalc.data().select(sel) / math.sqrt(sigmaP))
+    Ecalc_sel /= math.sqrt(sigmaP)
+    p2 = Ecalc_sel.phases().data()
+    cosdphi = flex.cos(p2 - p1)
+    dobssel = dobs.data().select(sel)
+
+    # Solve for sigmaA yielding 1st derivative of LLG approximately equal to zero (assuming only numerator matters)
+    sum0 = flex.sum(2.*dobssel*abseE*absEc*cosdphi)
+    sum1 = flex.sum(2*flex.pow2(dobssel) * (1. - flex.pow2(abseE) - flex.pow2(absEc)))
+    sum2 = flex.sum(2*flex.pow(dobssel,3)*abseE*absEc*cosdphi)
+    sum3 = flex.sum(- 2*flex.pow(dobssel,4))
+    u1 = -2*sum2**3 + 9*sum1*sum2*sum3 - 27*sum0*sum3**2
+    sqrt_arg = u1**2 - 4*(sum2**2 - 3*sum1*sum3)**3
+    if sqrt_arg < 0: # Paranoia: haven't run into this in a wide variety of calculations
+      raise Sorry("Argument of square root in sigmaA calculation is negative")
+    third = 1./3
+    x1 = (u1 + math.sqrt(sqrt_arg))**third
+    sigmaA = ( (2 * 2.**third * sum2**2 - 6 * 2.**third*sum1*sum3
+                - 2*sum2*x1 + 2.**(2*third) * x1**2) /
+              (6 * sum3 * x1) )
+    sigmaA = max(min(sigmaA,0.999),1.E-6)
+    # Now work out approximate e.s.d. of sigmaA estimate from 2nd derivative of LLG at optimal sigmaA
+    denom = flex.pow((1-flex.pow2(dobssel)*sigmaA**2),3)
+    sum0 = flex.sum((2*flex.pow2(dobssel) * (1. - flex.pow2(abseE) - flex.pow2(absEc)))/denom)
+    sum1 = flex.sum((12*flex.pow(dobssel,3)*abseE*absEc*cosdphi)/denom)
+    sum2 = flex.sum((-6*flex.pow(dobssel,4)*(flex.pow2(abseE) + flex.pow2(absEc)))/denom)
+    sum3 = flex.sum((4*flex.pow(dobssel,5)*abseE*absEc*cosdphi)/denom)
+    sum4 = flex.sum((-2*flex.pow(dobssel,6))/denom)
+    d2LLGbydsigmaA = sum0 + sum1*sigmaA + sum2*sigmaA**2 + sum3*sigmaA**3 + sum4*sigmaA**4
+    d2LLGbydsigmaA /= over_sampling_factor
+    sigma_sigmaA = 1./math.sqrt(abs(d2LLGbydsigmaA))
+    ssqr = flex.mean_default(eEsel.d_star_sq().data(),0)
+    ndat = dobssel.size()
+    if verbosity > 1:
+      print(ndat,ssqr,sigmaA,sigma_sigmaA,file=log)
+    xdat.append(ssqr)
+    ydat.append(math.log(sigmaA))
+    wdat.append(abs(d2LLGbydsigmaA)) # Inverse variance estimate
+
+  xdat = flex.double(xdat)
+  ydat = flex.double(ydat)
+  wdat = flex.double(wdat)
+  W = flex.sum(wdat)
+  Wx = flex.sum(wdat * xdat)
+  Wy = flex.sum(wdat * ydat)
+  Wxx = flex.sum(wdat * xdat * xdat)
+  Wxy = flex.sum(wdat * xdat * ydat)
+  slope = (W * Wxy - Wx * Wy) / (W * Wxx - Wx * Wx)
+  intercept = (Wy * Wxx - Wx * Wxy) / (W * Wxx - Wx * Wx)
+  frac_complete = math.exp(2.*intercept)
+  if verbosity > 0:
+    print("Slope and intercept of sigmaA plot for placed model contribution: ",slope,intercept,file=log)
+    print("Approximate fraction of scattering: ",frac_complete,file=log)
+  linlogsiga = flex.double()
+  logsiga_combined = flex.double()
+  sigma_linlog = math.log(1.5) # Allow 50% error in linear fit
+  i_bin_used = 0
+  for i_bin in expectE.binner().range_used():
+    sigmaA = math.exp(ydat[i_bin_used])
+    # For complete model, slope should be negative, but can be positive if the
+    # modelled part is much better ordered than the larger unmodelled part
+    linlog = min(math.log(0.999),(intercept + slope*xdat[i_bin_used]))
+    linlogsiga.append(linlog)
+    sigma_sigmaA = 1./math.sqrt(wdat[i_bin_used])
+    sigma_lnsigmaA = math.exp(-ydat[i_bin_used])*sigma_sigmaA
+    combined_logsiga = ((ydat[i_bin_used]/sigma_lnsigmaA**2 + linlog/sigma_linlog**2) /
+                        (1./sigma_lnsigmaA**2 + 1./sigma_linlog**2) )
+    logsiga_combined.append(combined_logsiga)
+    combined_siga = math.exp(combined_logsiga)
+
+    sel = expectE.binner().selection(i_bin)
+    model_sigmaA.data().set_selected(sel, combined_siga)
+    i_bin_used += 1
+
+  if verbosity > 1:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(2,1)
+    ax[0].plot(xdat,ydat,label="ln(sigmaA)")
+    ax[0].plot(xdat,linlogsiga,label="line fit")
+    ax[0].plot(xdat,logsiga_combined,label="combined")
+    ax[0].legend(loc="upper right")
+    ax[1].plot(xdat,flex.exp(ydat),label="sigmaA")
+    ax[1].plot(xdat,flex.exp(linlogsiga),label="line fit")
+    ax[1].plot(xdat,flex.exp(logsiga_combined),label="combined")
+    ax[1].legend(loc="lower left")
+    plt.show()
+
+  return(model_sigmaA)
+
 def assess_cryoem_errors(
     mmm, d_min,
     determine_ordered_volume=True,
-    ordered_mask_id='ordered_volume_mask', sphere_points=500,
-    sphere_cent=None, radius=None,
+    ordered_mask_id=None, fixed_mask_id=None,
+    sphere_points=500, sphere_cent=None, radius=None,
     verbosity=1, shift_map_origin=True, keep_full_map=False, log=sys.stdout):
   """
   Refine error parameters from half-maps, make weighted map coeffs for region.
@@ -1467,6 +1563,13 @@ def assess_cryoem_errors(
     raise Sorry("Provided maps must be full-size")
   spacings = get_grid_spacings(unit_cell,unit_cell_grid)
   ucpars = unit_cell.parameters()
+  # Determine voxel count for fixed model mask
+  mm_model_mask = mmm.get_map_manager_by_id(fixed_mask_id)
+  voxels_in_fixed_model = 0
+  if mm_model_mask is not None:
+    model_mask_data = mm_model_mask.map_data()
+    mask_sel = model_mask_data > 0
+    voxels_in_fixed_model = mask_sel.count(True)
 
   # Keep track of shifted origin
   origin_shift = mmm.map_manager().origin_shift_grid_units
@@ -1517,15 +1620,27 @@ def assess_cryoem_errors(
 
   # Get map coefficients for maps after spherical masking
   # Define box big enough to hold sphere plus soft masking
+  # Warn if sphere too near edge of full map for soft mask to reach zero
+  # or if less than about 85% of sphere would be within full map
+  # (outside by >= half-radius)
   boundary_to_smoothing_ratio = 2
   soft_mask_radius = d_min
   padding = soft_mask_radius * boundary_to_smoothing_ratio
   cushion = flex.double(3,radius+padding)
   cart_min = flex.double(sphere_cent_map) - cushion
   cart_max = flex.double(sphere_cent_map) + cushion
-  for i in range(3): # Keep within input map
-    cart_min[i] = max(cart_min[i],0)
-    cart_max[i] = min(cart_max[i],ucpars[i]-spacings[i])
+  max_outside = 0.
+  for i in range(3):
+    if cart_min[i] < 0:
+      max_outside = max(max_outside, -cart_min[i])
+    if cart_max[i] > ucpars[i]-spacings[i]:
+      max_outside = max(max_outside, cart_max[i]-(ucpars[i]-spacings[i]))
+  if max_outside > padding + radius/2:
+    print("\nWARNING: substantial fraction of sphere is outside map volume", file=log)
+  elif max_outside > padding:
+    print("\nWARNING: sphere is partially outside map volume", file=log)
+  elif max_outside > 0:
+    print("\nWARNING: sphere too near map edge to allow full extent of smooth masking", file=log)
 
   cs = mmm.crystal_symmetry()
   uc = cs.unit_cell()
@@ -1553,9 +1668,17 @@ def assess_cryoem_errors(
     working_mmm.apply_mask_to_maps()
     mask_info = working_mmm.mask_info()
 
+    working_map_size = working_mmm.map_data().size()
     box_volume = uc.volume() * (
-        working_mmm.map_data().size()/mmm.map_data().size())
+        working_map_size/mmm.map_data().size())
     weighted_masked_volume = box_volume * mask_info.mean
+
+    voxels_in_masked_model = 0
+    if voxels_in_fixed_model > 0:
+      mask_info = working_mmm.mask_info(mask_id=fixed_mask_id)
+      mm_model_mask = working_mmm.get_map_manager_by_id(fixed_mask_id)
+      model_mask_data = mm_model_mask.map_data()
+      voxels_in_masked_model = working_map_size * mask_info.mean
 
     # Calculate an oversampling ratio defined as the ratio between the size of
     # the cut-out cube and the size of a cube that could contain a sphere
@@ -1853,15 +1976,39 @@ def assess_cryoem_errors(
     print("Weighted map noise: ",weighted_map_noise, file=log)
     sys.stdout.flush()
 
-  # Return a map_model_manager with the weighted map
-  wEmean = dobs*expectE
+  # If there is a fixed model and it occupies a significant part of the sphere,
+  # compute the structure factors corresponding to the cutout density for the fixed
+  # model.
+
+  masked_model_contributes = False
+  masked_model_E = None
+  masked_model_sigmaA = None
+  fraction_masked = voxels_in_masked_model/working_map_size
+  if fraction_masked > 0.01:
+    if verbosity > 1:
+      print("Masked voxels from fixed model, total in box, fraction: ",
+            voxels_in_masked_model, working_map_size, fraction_masked, file=log)
+    masked_model_contributes = True
+    mm_masked_model = working_mmm.get_map_manager_by_id(map_id='fixed_atom_map')
+    # mm_masked_model.write_map('masked_model.map')
+    masked_model_E = mm_masked_model.map_as_fourier_coefficients(d_min=d_min,d_max=d_max)
+
+  if masked_model_contributes:
+    masked_model_sigmaA = sigmaA_from_model_in_map(expectE, dobs, masked_model_E, over_sampling_factor, verbosity)
+    # Possibly temporary choice: modify expectE instead of adding fixed contribution in phasertng
+    expectE_mod = expectE.customized_copy(data=expectE.data()
+                  - masked_model_sigmaA.data()*masked_model_E.data())
+  else:
+    expectE_mod = expectE.deep_copy()
+
+  # Return map_model_managers with weighted maps
+  wEmean = dobs*expectE_mod
   working_mmm.add_map_from_fourier_coefficients(map_coeffs=wEmean, map_id='map_manager_wtd')
   sigmaA = 0.9 # Default for likelihood-weighted map
   dosa = sigmaA*dobs.data()
   lweight = dobs.customized_copy(data=(2*dosa)/(1.-flex.pow2(dosa)))
-  wEmean2 = lweight*expectE
+  wEmean2 = lweight*expectE_mod
   working_mmm.add_map_from_fourier_coefficients(map_coeffs=wEmean2, map_id='map_manager_lwtd')
-  # working_mmm.write_map(map_id='map_manager_wtd',file_name='prepmap.map')
   working_mmm.remove_map_manager_by_id('map_manager_1')
   working_mmm.remove_map_manager_by_id('map_manager_2')
 
@@ -1874,24 +2021,32 @@ def assess_cryoem_errors(
     shift_frac = ucwork.fractionalize(shift_cart)
     shift_frac = tuple(-flex.double(shift_frac))
     expectE = expectE.translational_shift(shift_frac)
+    expectE_mod = expectE_mod.translational_shift(shift_frac)
+    if masked_model_contributes:
+      masked_model_E = masked_model_E.translational_shift(shift_frac)
+      # write_mtz(expectE,"expectE.mtz","eE")
+      # write_mtz(expectE_mod,"expectE_mod.mtz","expectEmod")
+      # write_mtz(masked_model_E,"masked_model.mtz","masked_model")
 
   ssqmin = flex.min(mc1.d_star_sq().data())
   ssqmax = flex.max(mc1.d_star_sq().data())
   resultsdict = dict(
-      n_bins = n_bins,
-      ssqr_bins = ssqr_bins,
-      ssqmin = ssqmin,
-      ssqmax = ssqmax,
-      asqr_scale = asqr_scale,
-      sigmaT_bins = sigmaT_bins,
-      asqr_beta = asqr_beta,
-      a_baniso = a_baniso,
-      mapCC_bins = mapCC_bins)
+    n_bins = n_bins,
+    ssqr_bins = ssqr_bins,
+    ssqmin = ssqmin,
+    ssqmax = ssqmax,
+    asqr_scale = asqr_scale,
+    sigmaT_bins = sigmaT_bins,
+    asqr_beta = asqr_beta,
+    a_baniso = a_baniso,
+    mapCC_bins = mapCC_bins)
   return group_args(
     new_mmm = working_mmm,
     shift_cart = shift_cart,
     sphere_center = list(sphere_cent_map),
-    expectE = expectE, dobs = dobs,
+    expectE = expectE_mod, dobs = dobs, # Temporary kludge
+    # expectE = expectE, dobs = dobs,
+    masked_model_E = masked_model_E, masked_model_sigmaA = masked_model_sigmaA,
     over_sampling_factor = over_sampling_factor,
     fraction_scattering = fraction_scattering,
     weighted_map_noise = weighted_map_noise,
@@ -1909,30 +2064,28 @@ def run():
 
   Optional command-line arguments (keyworded):
   --protein_mw*: molecular weight expected for protein component of ordered density
+          in full map
   --nucleic_mw*: same for nucleic acid component
-  --model: PDB file for model that can either be used to flatten the map around
-          the model, to search for the next component, or to cut out a sphere
-          of density to refine and score the fit of the model
-  --flatten_model: Use model to define region where map should be flattened
-  --cutout_model: Use model to define sphere to process for refining and
-          scoring the docking of this model
+  --sphere_points: number of reflections to be used for averaging in Fourier space
+  --model: PDB file for placed model used to define the centre and radius of
+          the cut-out sphere, used as an alternative to sphere_cent and radius
   --sphere_cent: Centre of sphere defining target map region (3 floats)
           defaults to centre of map
   --radius: radius of sphere (1 float)
           must be given if sphere_cent defined, otherwise
-          defaults to narrowest extent of input map divided by 4
+          defaults to either radius enclosing 98% of ordered volume (if determined)
+          or narrowest extent of input map divided by 4
   --no_shift_map_origin: don't shift output mtz file to match input map on its origin
           default False
-  --no_define_ordered_volume: don't define ordered volume for comparison with cutout volume
+  --no_determine_ordered_volume: don't determine ordered volume
           default False
   --file_root: root name for output files
+  --write_maps: write sharpened and likelihood-weighted maps
   --mute (or -m): mute output
   --verbose (or -v): verbose output
   --testing: extra verbose output for debugging
-  * NB: At least one of protein_mw or nucleic_mw must be given
-        Either a model or a sphere can be used to specify a cutout region, but
-        not both
-        The flatten_model option cannot be combined with cutting out a sphere.
+  * NB: At least one of protein_mw or nucleic_mw must be given if sphere
+  parameters are not defined either explicitly or through model
   """
   import argparse
   dm = DataManager()
@@ -1940,33 +2093,39 @@ def run():
 
   parser = argparse.ArgumentParser(
           description='Prepare cryo-EM map for docking')
-  parser.add_argument('map1',help='Map file for half-map 1')
+  parser.add_argument('map1', help='Map file for half-map 1')
   parser.add_argument('map2', help='Map file for half-map 2')
   parser.add_argument('d_min', help='d_min for maps', type=float)
   parser.add_argument('--protein_mw',
-                      help='Molecular weight of protein component of map',
+                      help='Molecular weight of protein component of full map',
                       type=float)
   parser.add_argument('--nucleic_mw',
-                      help='Molecular weight of nucleic acid component of map',
+                      help='Molecular weight of nucleic acid component of full map',
                       type=float)
   parser.add_argument('--sphere_points',help='Target nrefs in averaging sphere',
                       type=float, default=500.)
-  parser.add_argument('--model',help='Placed model')
-  parser.add_argument('--flatten_model',help='Flatten map around model',
-                      action='store_true')
-  parser.add_argument('--cutout_model',help='Cut out sphere around model',
-                      action='store_true')
-  parser.add_argument('--sphere_cent',help='Centre of sphere for docking',
+  parser.add_argument('--model',
+                      help='''Optional roughly-placed model defining size and
+                              position of cut-out sphere for docking.
+                              Orientation of model is ignored.''')
+  parser.add_argument('--fixed_model',
+                      help='Optional fixed model accounting for explained map features')
+  parser.add_argument('--sphere_cent',
+                      help='Centre of sphere for docking, if no model provided',
                       nargs=3, type=float)
-  parser.add_argument('--radius',help='Radius of sphere for docking', type=float)
+  parser.add_argument('--radius',
+                      help='Radius of sphere for docking, if no model provided',
+                      type=float)
   parser.add_argument('--file_root',
                       help='Root of filenames for output')
+  parser.add_argument('--write_maps', help = 'Write sharpened and likelihood-weighted maps',
+                      action = 'store_true')
   parser.add_argument('--no_shift_map_origin', action='store_true')
   parser.add_argument('--no_determine_ordered_volume', action='store_true')
   parser.add_argument('-m', '--mute', help = 'Mute output', action = 'store_true')
   parser.add_argument('-v', '--verbose', help = 'Set output as verbose',
                       action = 'store_true')
-  parser.add_argument('--testing', help='Set output as testing', action='store_true')
+  parser.add_argument('--testing', help='Set output as testing level', action='store_true')
   args = parser.parse_args()
   d_min = args.d_min
   verbosity = 1
@@ -1976,82 +2135,96 @@ def run():
   shift_map_origin = not(args.no_shift_map_origin)
   determine_ordered_volume = not(args.no_determine_ordered_volume)
 
+  sphere_points = args.sphere_points
+
   cutout_specified = False
   sphere_cent = None
   radius = None
+
   model = None
-
-  protein_mw = None
-  nucleic_mw = None
-  if (args.protein_mw is None) and (args.nucleic_mw is None):
-    raise Sorry("At least one of protein_mw or nucleic_mw must be given")
-  if args.protein_mw is not None:
-    protein_mw = args.protein_mw
-  if args.nucleic_mw is not None:
-    nucleic_mw = args.nucleic_mw
-
-  sphere_points = args.sphere_points
-
   if args.model is not None:
-    if not (args.cutout_model or args.flatten_model):
-      raise Sorry('Use for model must be specified (flatten or cut out map')
     model_file = args.model
     model = dm.get_model(model_file)
+    if args.sphere_cent is not None:
+      raise Sorry('Either model or sphere specification may be given but not both')
+    sphere_cent, radius = sphere_enclosing_model(model)
+    radius = radius + d_min # Expand to allow width for density
+    cutout_specified = True
 
-  if (args.sphere_cent is not None) and args.cutout_model:
-    raise Sorry("Only one method to define region to cut out (sphere or model) can be given")
+  fixed_model = None
+  if args.fixed_model is not None:
+    model_file = args.fixed_model
+    fixed_model = dm.get_model(model_file)
+
   if args.sphere_cent is not None:
     if args.radius is None:
       raise Sorry("Radius must be provided if sphere_cent is defined")
     sphere_cent = tuple(args.sphere_cent)
     radius = args.radius
     cutout_specified = True
-  if args.cutout_model:
-    if args.model is None:
-      raise Sorry("Model must be provided if cutout_model is defined")
-    sphere_cent, radius = sphere_enclosing_model(model)
-    radius = radius + d_min # Expand to allow width for density
-    cutout_specified = True
   if (not determine_ordered_volume and not cutout_specified):
     raise Sorry("Must determine ordered volume if cutout not specified")
+
+  protein_mw = None
+  nucleic_mw = None
+  if (args.protein_mw is None) and (args.nucleic_mw is None):
+    if cutout_specified:
+      determine_ordered_volume = False
+    if determine_ordered_volume and not cutout_specified:
+      raise Sorry("At least one of protein_mw or nucleic_mw must be given")
+  if args.protein_mw is not None:
+    protein_mw = args.protein_mw
+  if args.nucleic_mw is not None:
+    nucleic_mw = args.nucleic_mw
 
   # Create map_model_manager containing half-maps
   map1_filename = args.map1
   mm1 = dm.get_real_map(map1_filename)
   map2_filename = args.map2
   mm2 = dm.get_real_map(map2_filename)
-  mmm = map_model_manager(model=model, map_manager_1=mm1, map_manager_2=mm2)
+  mmm = map_model_manager(map_manager_1=mm1, map_manager_2=mm2)
 
-  # Prepare maps by flattening model volume if desired
-  if args.flatten_model:
-    if args.model is None:
-      raise Sorry("Model must be provided if flatten_model is defined")
-    flatten_model_region(mmm, d_min)
+  if (fixed_model):
+    mmm.add_model_by_id(model=fixed_model, model_id='fixed_model')
+    mmm.generate_map(model=fixed_model, d_min=d_min, map_id='fixed_atom_map')
 
+  ordered_mask_id = None
   if determine_ordered_volume:
-    mask_id = 'ordered_volume_mask'
+    ordered_mask_id = 'ordered_volume_mask'
     add_ordered_volume_mask(mmm, d_min,
         protein_mw=protein_mw, nucleic_mw=nucleic_mw,
-        map_id_out=mask_id)
+        ordered_mask_id=ordered_mask_id)
     if verbosity>1:
-      ordered_mm = mmm.get_map_manager_by_id(map_id=mask_id)
+      ordered_mm = mmm.get_map_manager_by_id(map_id=ordered_mask_id)
       if args.file_root is not None:
         map_file_name = args.file_root + "_ordered_volume_mask.map"
       else:
         map_file_name = "ordered_volume_mask.map"
       ordered_mm.write_map(map_file_name)
 
+  fixed_mask_id = None
+  if fixed_model:
+    fixed_mask_id = 'mask_around_atoms'
+    mask_fixed_model_region(mmm, d_min,
+                            fixed_model=fixed_model,
+                            ordered_mask_id=ordered_mask_id,
+                            fixed_mask_id=fixed_mask_id)
+
   # Default to sphere containing most of ordered volume
   if not cutout_specified:
-    target_completeness = 0.98
-    radius = get_mask_radius(mmm.get_map_manager_by_id(mask_id),target_completeness)
     ucpars = mm1.unit_cell().parameters()
     sphere_cent = (ucpars[0]/2,ucpars[1]/2,ucpars[2]/2)
+    if determine_ordered_volume:
+      target_completeness = 0.98
+      radius = get_mask_radius(mmm.get_map_manager_by_id(ordered_mask_id),target_completeness)
+    else:
+      radius = min(ucpars[0],ucpars[1],ucpars[2])/4.
 
   # Refine to get scale and error parameters for docking region
   results = assess_cryoem_errors(mmm, d_min, sphere_points=sphere_points,
     determine_ordered_volume=determine_ordered_volume, verbosity=verbosity,
-    sphere_cent=sphere_cent, radius=radius, shift_map_origin=shift_map_origin)
+    sphere_cent=sphere_cent, radius=radius, shift_map_origin=shift_map_origin,
+    ordered_mask_id=ordered_mask_id, fixed_mask_id=fixed_mask_id)
 
   expectE = results.expectE
   mtz_dataset = expectE.as_mtz_dataset(column_root_label='Emean')
@@ -2062,13 +2235,23 @@ def run():
 
   if args.file_root is not None:
     mtzout_file_name = args.file_root + ".mtz"
+    mapout1_file_name = args.file_root + "_weighted.map"
+    mapout2_file_name = args.file_root + "_likelihood_weighted.map"
   else:
     mtzout_file_name = "weighted_map_data.mtz"
-  print ("Writing mtz for docking as",mtzout_file_name)
+    mapout1_file_name = "weighted.map"
+    mapout2_file_name = "likelihood_weighted.map"
+  print ("Writing mtz for docking as", mtzout_file_name)
   if not shift_map_origin:
     shift_cart = results.shift_cart
     print ("Origin of full map relative to mtz:", shift_cart)
   dm.write_miller_array_file(mtz_object, filename=mtzout_file_name)
+  if args.write_maps:
+    print ("Writing weighted map as", mapout1_file_name)
+    print ("Writing likelihood-weighted map as", mapout2_file_name)
+    new_mmm = results.new_mmm
+    new_mmm.write_map(map_id='map_manager_wtd', file_name = mapout1_file_name)
+    new_mmm.write_map(map_id='map_manager_lwtd', file_name = mapout2_file_name)
   over_sampling_factor = results.over_sampling_factor
   fraction_scattering = results.fraction_scattering
   print ("Over-sampling factor for Fourier terms:",over_sampling_factor)

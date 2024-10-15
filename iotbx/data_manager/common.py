@@ -193,6 +193,8 @@ class fmodel_mixins(object):
       array_type       = array_type,
       crystal_symmetry = crystal_symmetry,
       ignore_intensities_if_amplitudes_present = True)
+    if rfs is None:
+      raise Sorry("No reflection data provided.")
     # Resolve symmetry issues (in-place)
     self._resolve_symmetry_conflicts(
       params                 = crystal_symmetry_phil,
@@ -222,13 +224,20 @@ class fmodel_mixins(object):
     # XXX Temporary hack/work-around (REMOVE later) end
     # XXX
     # Get reflection data
+    dpg = None
+    if(model.crystal_symmetry() is not None):
+      dpg = model.crystal_symmetry().space_group().build_derived_point_group()
+    # if both low_resolution and high_resolution are set, check that low_resolution > high_resolution
+    if parameters.low_resolution is not None and parameters.high_resolution is not None \
+      and parameters.low_resolution < parameters.high_resolution:
+        raise Sorry('The low_resolution parameter is less than the high_resolution parameter. Please swap those values.')
     data = extract_xtal_data.run(
       keep_going                        = not tmp_p.r_free_flags.required,
       extract_r_free_flags              = not tmp_p.r_free_flags.ignore_r_free_flags,
       reflection_file_server            = rfs,
       parameters                        = tmp_p,
       experimental_phases_params        = experimental_phases_params,
-      working_point_group               = model.crystal_symmetry().space_group().build_derived_point_group(),
+      working_point_group               = dpg,
       free_r_flags_scope                = free_r_flags_scope,
       remark_r_free_flags_md5_hexdigest = model.get_header_r_free_flags_md5_hexdigest()).result()
     #
@@ -303,6 +312,7 @@ class map_model_mixins(object):
     map_files=None,
     from_phil=False,
     guess_files=True,
+    files_to_exclude = None,
     **kwargs):
     '''
     A convenience function for constructing a map_model_manager from the
@@ -322,6 +332,9 @@ class map_model_mixins(object):
         If set to True, the model and map names are retrieved from the
         standard PHIL names. The model_file and map_files parameters must
         be None if this parameter is set to True.
+      files_to_exclude: str or list
+        Any files listed will not be used from data_manager. For example,
+          this can be used to exclude a file from being considered a half map
       **kwargs: keyworded arguments
         Extra keyworded arguments for map_model_manager constructor
 
@@ -332,6 +345,9 @@ class map_model_mixins(object):
 
     # get filenames from PHIL
     map_model = None
+    if map_files and (not isinstance(map_files,list)):
+      map_files = [map_files]
+
     if from_phil:
       if model_file is not None or map_files is not None:
         raise Sorry(
@@ -356,14 +372,19 @@ class map_model_mixins(object):
 
       # Catch case where full_map is also present in half_maps as the only
       #   half map
-      if full_map and (len(half_maps) == 1) and (half_maps[0] == full_map):
-        half_maps = []
-
+      maps_to_exclude = [full_map] if full_map else []
+      if files_to_exclude:
+        if isinstance(files_to_exclude,list):
+          maps_to_exclude += files_to_exclude
+        else:
+          maps_to_exclude.append(files_to_exclude)
+      for fn in (maps_to_exclude if maps_to_exclude else []):
+        if fn and (len(half_maps) == 1) and (half_maps[0] == fn):
+          half_maps = []
       if half_maps:
         if len(half_maps) != 2:
           raise Sorry('Please provide 2 half-maps or one full map.')
         map_files += half_maps
-
     # If we didn't get anything, try looking directly at the
     #  available maps and models. If there are 1, 2 or 3 maps and 1 model,
     #  take them
@@ -374,11 +395,16 @@ class map_model_mixins(object):
         map_model.model = model_file
     if guess_files and (not map_files) and self.get_real_map_names():
       if len(self.get_real_map_names()) == 1:
-        map_files = self.get_default_real_map_name()
+        map_files = [self.get_default_real_map_name()]
 
       elif len(self.get_real_map_names()) in [2,3]:
         map_files = self.get_real_map_names()
-
+    if isinstance(map_files, list):
+      new_map_files = []
+      for fn in map_files:
+        if (not files_to_exclude) or (not fn in files_to_exclude):
+          new_map_files.append(fn)
+      map_files = new_map_files
     # check map_files argument
     mm = None
     mm_1 = None

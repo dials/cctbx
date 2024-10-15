@@ -9,7 +9,6 @@ from mmtbx.monomer_library import glyco_utils
 from mmtbx.monomer_library import bondlength_defaults
 from libtbx.utils import Sorry
 from functools import cmp_to_key
-from six.moves import range
 
 origin_ids = geometry_restraints.linking_class.linking_class()
 
@@ -230,32 +229,27 @@ def _apply_link_using_proxies(link,
 
 def possible_cyclic_peptide(atom1,
                             atom2,
+                            atoms_in_first_last_rgs,
                             verbose=False,
                             ):
   if verbose:
     print(atom1.quote(),atom2.quote())
-  chain1 = atom1.parent().parent().parent()
-  chain2 = atom1.parent().parent().parent()
-  if not chain1.id == chain2.id:
-    if verbose: print('chain id differs', chain1.id, chain2.id)
-    return False
-  fl = {}
-  rgs = chain1.residue_groups()
-  for i in range(0,-2,-1):
-    for atom in rgs[i].atoms():
-      if atom.quote()==atom1.quote():
-        fl[i]=atom1
-        break
-      elif atom.quote()==atom2.quote():
-        fl[i]=atom2
-        break
-  return len(fl)==2
+  len_fl = 0
+  len_fl += atoms_in_first_last_rgs.get(atom1.i_seq, -1)
+  len_fl += atoms_in_first_last_rgs.get(atom2.i_seq, -1)
+  if len_fl == 1:
+    chain1 = atom1.parent().parent().parent()
+    chain2 = atom2.parent().parent().parent()
+    if chain1.id == chain2.id:
+      return True
+    elif verbose: print('chain id differs', chain1.id, chain2.id)
+  return False
 
 def check_for_peptide_links(atom1,
                             atom2,
+                            classes1,
+                            classes2,
                             ):
-  classes1 = linking_utils.get_classes(atom1)
-  classes2 = linking_utils.get_classes(atom2)
   atom_group1 = atom1.parent()
   atom_group2 = atom2.parent()
   if classes1.common_amino_acid or classes2.common_amino_acid:
@@ -282,6 +276,10 @@ def check_for_peptide_links(atom1,
   return False
 
 def check_all_classes(pdb_hierarchy, class_type):
+  """ This one is not used anywhere.
+  If start using it, beware of getting classes for all atoms
+  """
+  assert 0
   found = False
   for residue_group in pdb_hierarchy.residue_groups():
     for atom in residue_group.atoms():
@@ -313,6 +311,7 @@ class linking_mixins(object):
                                   small_molecule_bond_cutoff  = 2.,
                                   include_selections          = None,
                                   exclude_selections          = None,
+                                  exclude_hydrogens_from_bonding_decisions = False,
                                   log                         = None,
                                   verbose                     = False,
                                   ):
@@ -352,9 +351,7 @@ class linking_mixins(object):
     from cctbx import crystal
     from cctbx.array_family import flex
     #
-    def _nonbonded_pair_objects(max_bonded_cutoff=3.,
-                                i_seqs=None,
-                                ):
+    def _nonbonded_pair_objects(max_bonded_cutoff=3., i_seqs=None):
       if i_seqs is None:
         atoms = self.pdb_hierarchy.atoms()
         i_seqs = flex.size_t()
@@ -385,18 +382,6 @@ class linking_mixins(object):
         min_cubicle_edge=5,
         shell_asu_tables=[pair_asu_table])
       return nonbonded_proxies, sites_cart, pair_asu_table, asu_mappings, i_seqs
-    #
-    def _nonbonded_pair_generator_geometry_restraints_sort(
-        nonbonded_proxies,
-        max_bonded_cutoff=3.):
-      rc = nonbonded_proxies.get_sorted(by_value="delta",
-                                        sites_cart=sites_cart,
-                                        include_proxy=True,
-        )
-      if rc is None: return
-      rc, junk = rc
-      for item in rc:
-        yield item
     #
     if(log is not None):
       print("""
@@ -435,22 +420,39 @@ class linking_mixins(object):
     custom_links = {}
     exclude_out_lines = {}
 
+    atom_classes = [linking_utils.get_classes(a) for a in atoms]
+    atoms_in_first_last_rgs = {}
+    for c in self.pdb_hierarchy.chains():
+      for i in [0,-1]:
+        if not c.residue_groups(): continue
+        rg = c.residue_groups()[i]
+        abs_i = abs(i)
+        for a in rg.atoms():
+          atoms_in_first_last_rgs[a.i_seq] = abs_i
+    skip_if_longer = linking_setup.update_skip_if_longer(amino_acid_bond_cutoff,
+                                                        rna_dna_bond_cutoff=3.4,
+                                                        intra_residue_bond_cutoff=inter_residue_bond_cutoff,
+                                                        saccharide_bond_cutoff=carbohydrate_bond_cutoff,
+                                                        metal_coordination_cutoff=metal_coordination_cutoff,
+                                                        sulfur_bond_cutoff=2.5,
+                                                        other_bond_cutoff=2,
+                                                        )
+
     # main loop
     nonbonded_proxies, sites_cart, pair_asu_table, asu_mappings, nonbonded_i_seqs = \
         _nonbonded_pair_objects(max_bonded_cutoff=max_bonded_cutoff,
           )
     initial_pair_asu_table_table = bond_asu_table.table().deep_copy()
-    for ii, item in enumerate(
-        _nonbonded_pair_generator_geometry_restraints_sort(
-          nonbonded_proxies=nonbonded_proxies,
-          max_bonded_cutoff=max_bonded_cutoff,
-          )
-        ):
-      labels, i_seq, j_seq, distance, vdw_distance, sym_op, rt_mx_ji, proxy = item
+    for ii, item in enumerate(nonbonded_proxies.sorted_value_proxies_generator(
+        by_value="delta",
+        sites_cart=sites_cart,
+        cutoff=max_bonded_cutoff)):
+      i_seq, j_seq, distance, sym_op, rt_mx_ji, proxy = item
       #
       # include & exclude selection
       #
       origin_id = None
+      updated_skip_if_longer = None
       if ( include_selections and
            distance>=max_bonded_cutoff_standard
            ):
@@ -466,6 +468,15 @@ class linking_mixins(object):
             inter_residue_bond_cutoff=bond_cutoff
             saccharide_bond_cutoff=bond_cutoff
             link_residues=True
+            updated_skip_if_longer = linking_setup.update_skip_if_longer(
+                amino_acid_bond_cutoff,
+                rna_dna_bond_cutoff=3.4,
+                intra_residue_bond_cutoff=inter_residue_bond_cutoff,
+                saccharide_bond_cutoff=saccharide_bond_cutoff,
+                metal_coordination_cutoff=metal_coordination_cutoff,
+                sulfur_bond_cutoff=2.5,
+                other_bond_cutoff=2,
+                )
             break
         else:
           continue # exclude this nonbond from consideration
@@ -486,6 +497,8 @@ class linking_mixins(object):
       if bond_asu_table.contains(i_seq, j_seq, 1): continue
       atom1 = atoms[i_seq]
       atom2 = atoms[j_seq]
+      if atom1.element_is_hydrogen() or atom2.element_is_hydrogen():
+        continue
       if exclude_this_nonbonded:
         key = (selection_1,selection_2)
         if key not in exclude_out_lines:
@@ -517,14 +530,17 @@ class linking_mixins(object):
       #
       #
       if verbose:
-        print(i_seq, j_seq, atom1.quote(), end=' ')
+        print('='*80)
+        print('nonbonded', i_seq, j_seq, atom1.quote(), end=' ')
         print(atom2.quote(), end=' ')
         print("Distance: %0.2f" % distance, rt_mx_ji, sym_op)
 
       # don't link atoms not in the same conformer (works for models also)...
-      if not atom1.is_in_same_conformer_as(atom2):
-        assert 0
-        continue
+      # They will never be in different conformers, we are looping over
+      # nonbonded interactions here! This check takes 14% of this whole function.
+      # if not atom1.is_in_same_conformer_as(atom2):
+      #   assert 0
+      #   continue
       # don't link atoms in same residue group
       if atom1.parent().parent()==atom2.parent().parent(): continue
       atom_group1 = atom1.parent()
@@ -535,8 +551,8 @@ class linking_mixins(object):
       elif atom_group2.altloc.strip()=="": pass
       else: continue
       # don't link some classes
-      classes1 = linking_utils.get_classes(atom1)
-      classes2 = linking_utils.get_classes(atom2)
+      classes1 = atom_classes[i_seq]
+      classes2 = atom_classes[j_seq]
       use_only_bond_cutoff = False
       if verbose:
         print("""
@@ -549,13 +565,13 @@ Residue classes
       if (not link_small_molecules and
           (classes1.common_small_molecule or classes2.common_small_molecule)): continue
       # is_proxy_set between any of the atoms ????????
-      if classes1.common_amino_acid and classes2.common_amino_acid:
+      if linking_utils.allow_cis_trans(classes1, classes2):
         if not link_residues:
           continue
         # special amino acid linking
         #  - cyclic
         #  - beta, delta ???
-        if possible_cyclic_peptide(atom1, atom2): # first & last peptide
+        if possible_cyclic_peptide(atom1, atom2, atoms_in_first_last_rgs): # first & last peptide
           use_only_bond_cutoff = True
       if sym_op:
         if classes1.common_amino_acid and classes2.common_saccharide: continue
@@ -579,35 +595,22 @@ Residue classes
         ]
       key.sort()
       if sym_op:
-        key.append(str(rt_mx_ji))
+        key.append(str(sym_op))
       key = tuple(key)
       # hydrogens
-      if atom1.element.strip() in hydrogens:
-        done[atom2.id_str()] = atom1.id_str()
-      if atom2.element.strip() in hydrogens:
-        done[atom1.id_str()] = atom2.id_str()
+      if not exclude_hydrogens_from_bonding_decisions:
+        if atom1.element.strip() in hydrogens:
+          done[atom2.id_str()] = atom1.id_str()
+        if atom2.element.strip() in hydrogens:
+          done[atom1.id_str()] = atom2.id_str()
       # bond length cutoff & some logic
-      aa_rc = linking_utils.is_atom_pair_linked(
-          atom1,
-          atom2,
-          distance=distance,
-          max_bonded_cutoff=max_bonded_cutoff,
-          amino_acid_bond_cutoff=amino_acid_bond_cutoff,
-          inter_residue_bond_cutoff=inter_residue_bond_cutoff,
-          second_row_buffer=second_row_buffer,
-          saccharide_bond_cutoff=carbohydrate_bond_cutoff,
-          metal_coordination_cutoff=metal_coordination_cutoff,
-          use_only_bond_cutoff=use_only_bond_cutoff,
-          link_metals=link_metals,
-          verbose=verbose,
-          )
       if not linking_utils.is_atom_pair_linked(
           atom1,
           atom2,
+          classes1.important_only,
+          classes2.important_only,
           distance=distance,
-          max_bonded_cutoff=max_bonded_cutoff,
-          amino_acid_bond_cutoff=amino_acid_bond_cutoff,
-          inter_residue_bond_cutoff=inter_residue_bond_cutoff,
+          skip_if_longer=updated_skip_if_longer if updated_skip_if_longer is not None else skip_if_longer,
           second_row_buffer=second_row_buffer,
           saccharide_bond_cutoff=carbohydrate_bond_cutoff,
           metal_coordination_cutoff=metal_coordination_cutoff,
@@ -620,6 +623,7 @@ Residue classes
           print('link_metals',link_metals)
         if ( atom1.element.strip().upper() in hydrogens or
              atom2.element.strip().upper() in hydrogens):
+          if verbose: print('hydrogens')
           pass
         else:
           done.setdefault(key, [])
@@ -635,12 +639,8 @@ Residue classes
           continue
       # got a link....
 
-      class1 = linking_utils.get_classes(atom1, #_group1.resname,
-                                         important_only=True,
-        )
-      class2 = linking_utils.get_classes(atom2, #_group2.resname,
-                                         important_only=True,
-        )
+      class1 = classes1.important_only
+      class2 = classes2.important_only
       class_key = [class1, class2]
       class_key.sort()
       class_key = tuple(class_key)
@@ -651,9 +651,12 @@ Residue classes
       if not link_residues:
         if class_key in [
             ("common_amino_acid", "common_amino_acid"),
-            #("common_amino_acid", "other"),
+            ("common_amino_acid", "d_amino_acid"),
+            ("common_amino_acid", "uncommon_amino_acid"),
            ]:
           continue
+      else:
+        if len(key)>2: continue
       #else:
       #  atoms_must_be.setdefault(("common_amino_acid",
       #                            "common_amino_acid"),["C", "N"])
@@ -690,6 +693,7 @@ Residue classes
         if atom2_key:
           if atom2_key in done: continue
           done[atom2_key] = key
+      if verbose: print(done)
       #
       current_number_of_links = len(done.setdefault(key, []))
       if(current_number_of_links >=
@@ -747,6 +751,8 @@ Residue classes
       if link is None:
         link, swap, key = linking_utils.is_atom_pair_linked_tuple(atom1,
                                                                   atom2,
+                                                                  classes1.important_only,
+                                                                  classes2.important_only,
                                                                   )
         if link=='TRANS':
           key=link
@@ -870,7 +876,7 @@ Residue classes
         continue
       else:
         # possible peptide or rna/dna link
-        rc = check_for_peptide_links(atom1, atom2)
+        rc = check_for_peptide_links(atom1, atom2, classes1, classes2)
         # no peptide links across symmetry
         if len(done_key)==3:
           rc = None
@@ -933,8 +939,8 @@ Residue classes
        (classes2.common_rna_dna or classes2.ccp4_mon_lib_rna_dna)):
         bond_name = "h-dna"
         assert 0
-      elif (linking_utils.get_classes(atom1, important_only=True)=="metal" or
-            linking_utils.get_classes(atom2, important_only=True)=="metal"):
+      elif (class1=="metal" or
+            class2=="metal"):
         origin_id = origin_ids['metal coordination']
       if sym_op:
         sym_bonds += 1
@@ -987,8 +993,8 @@ Residue classes
       atom1 = atoms[i_seq]
       atom2 = atoms[j_seq]
       # check for NA linkage
-      classes1 = linking_utils.get_classes(atom1)
-      classes2 = linking_utils.get_classes(atom2)
+      classes1 = atom_classes[i_seq]
+      classes2 = atom_classes[j_seq]
       ans = bondlength_defaults.run(atom1, atom2)
       equil = 2.3
       weight = 0.02

@@ -286,6 +286,9 @@ class map_manager(map_reader, write_ccp4_map):
     # Initialize that this is not a dummy map_manager
     self._is_dummy_map_manager = False
 
+    # Initialize that there is no output_external_origin
+    self.output_external_origin = None
+
     # Initialize program_name, limitations, labels
     self.file_name = file_name # input file (source of this manager)
     self.program_name = None  # Name of program using this manager
@@ -455,6 +458,10 @@ class map_manager(map_reader, write_ccp4_map):
     # Now apply crystal symmetry and new shift cart to ncs object if any
     if self._ncs_object:
       self._ncs_object = self.shift_ncs_object_to_match_map_and_return_new_ncs_object(self._ncs_object)
+
+  def set_output_external_origin(self, value):
+    assert isinstance(value, tuple) or isinstance(value,list)
+    self.output_external_origin = tuple(value)
 
   def set_original_origin_and_gridding(self,
       original_origin = None,
@@ -693,7 +700,6 @@ class map_manager(map_reader, write_ccp4_map):
 
     current_end = add_tuples_int(current_origin, self.map_data().all())
     new_end = add_tuples_int(desired_origin, self.map_data().all())
-
     shift_to_apply_cart = self.grid_units_to_cart(shift_to_apply)
 
     shift_info = group_args(
@@ -819,6 +825,9 @@ class map_manager(map_reader, write_ccp4_map):
       Output labels are generated from existing self.labels,
       self.program_name, and self.limitations
 
+      If self.output_external_origin is specified, write that value to file
+
+
     '''
 
     # Make sure we have map_data
@@ -859,8 +868,11 @@ class map_manager(map_reader, write_ccp4_map):
         crystal_symmetry = crystal_symmetry, # unit cell and space group
         map_data    = map_data,
         unit_cell_grid = unit_cell_grid,  # optional gridding of full unit cell
-        origin_shift_grid_units = origin_shift_grid_units, # optional origin shift
+        origin_shift_grid_units = origin_shift_grid_units, # origin shift
         labels      = labels,
+        external_origin = self.output_external_origin,
+
+
         out = f)
       self._print(f.getvalue())
     else: # map_data has not been shifted to (0, 0, 0).  Shift it and then write
@@ -1417,18 +1429,38 @@ class map_manager(map_reader, write_ccp4_map):
 
     # Deepcopy this object and then set map_data and origin_shift_grid_units
 
-    mm = deepcopy(self)
 
+    mm = map_manager(
+     file_name = None,
+     map_data = map_data,
+     unit_cell_grid = self.unit_cell_grid,
+     unit_cell_crystal_symmetry = self._unit_cell_crystal_symmetry,
+     origin_shift_grid_units = origin_shift_grid_units,
+     ncs_object = self._ncs_object.deep_copy() if self._ncs_object else None,
+     wrapping = False,
+     experiment_type = self._experiment_type,
+     scattering_table = self._scattering_table,
+     resolution = self._resolution,
+     log = self.log,)
+
+    mm._is_mask = self._is_mask
+    mm._is_dummy_map_manager = self._is_dummy_map_manager
     # Set things that are not necessarily the same as in self:
-    mm.log=self.log
-    mm.origin_shift_grid_units = origin_shift_grid_units  # specified above
-    mm.data = map_data  # using self.data or a deepcopy (specified above)
     mm._created_mask = created_mask  # using self._created_mask or a
-                                     #deepcopy (specified above)
-    if wrapping is not None:
-      mm.set_wrapping(wrapping)
+    mm.file_name = self.file_name
+    mm.program_name = self.program_name
+    mm.limitations = self.limitations
+    mm.labels = self.labels
 
-    if not mm.is_full_size():
+
+    if wrapping is not None:
+      desired_wrapping = wrapping
+    else:
+      desired_wrapping = self._wrapping
+
+    if mm.is_full_size():
+      mm.set_wrapping(desired_wrapping)
+    else: #
       mm.set_wrapping(False)
 
     # Set up _crystal_symmetry for the new object
@@ -2260,7 +2292,7 @@ class map_manager(map_reader, write_ccp4_map):
 
     assert n_real or target_grid_spacing
 
-    if self.origin_shift_grid_units != (0,0,0):
+    if tuple(self.origin_shift_grid_units) != (0,0,0):
       return self._resample_on_different_grid_and_rebox(n_real = n_real,
        target_grid_spacing = target_grid_spacing)
 
@@ -2799,11 +2831,26 @@ def get_sites_cart_from_index(
       sites_frac.append(site_frac)
     sites_cart = crystal_symmetry.unit_cell().orthogonalize(sites_frac)
     return sites_cart
-def subtract_tuples_int(t1, t2):
-  return tuple(flex.int(t1)-flex.int(t2))
+
+def _round_tuple_int(t):
+  new_t = []
+  for x in t:
+    new_t.append(int(round(x)))
+  return new_t
 
 def add_tuples_int(t1, t2):
-  return tuple(flex.int(t1)+flex.int(t2))
+  try:
+    return tuple(flex.int(t1)+flex.int(t2))
+  except Exception as e: # not integers
+    return tuple(
+       flex.int(_round_tuple_int(t1)) + flex.int(_round_tuple_int(t2)))
+
+def subtract_tuples_int(t1, t2):
+  try:
+    return tuple(flex.int(t1)-flex.int(t2))
+  except Exception as e: # not integers
+    return tuple(
+       flex.int(_round_tuple_int(t1)) - flex.int(_round_tuple_int(t2)))
 
 def remove_site_with_most_neighbors(sites_cart):
   useful_norms_list = []

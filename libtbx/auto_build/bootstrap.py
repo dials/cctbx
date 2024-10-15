@@ -452,9 +452,9 @@ class Toolbox(object):
         else:
           branch = False
         remote, rebase = False, False
-      if re.match('remote\s*=', line.strip()):
+      if re.match(r'remote\s*=', line.strip()):
         remote = True
-      if re.match('rebase\s*=', line.strip()):
+      if re.match(r'rebase\s*=', line.strip()):
         rebase = True
     if branch and remote and not rebase:
       insertions.insert(0, (n + 1, branch))
@@ -483,7 +483,19 @@ class Toolbox(object):
     destpath, destdir = os.path.split(destination)
 
     # default to using ssh for private phenix repositories
-    if module in ['phenix', 'solve_resolve', 'phenix_pathwalker', 'labelit']:
+    if module in ['elbow',
+                  'ksdssp',
+                  'labelit',
+                  'muscle',
+                  'opt_resources',
+                  'phenix',
+                  'phenix_pathwalker',
+                  'Plex',
+                  'PyQuante',
+                  'pulchra',
+                  'reel',
+                  'solve_resolve',
+                  ]:
       use_ssh = True
 
     if os.path.exists(destination):
@@ -756,6 +768,13 @@ class amber_library_module(SourceModule):
                'https://github.com/phenix-project/amber_library.git',
                ]
 
+class aimnet2calc_module(SourceModule):
+  module = 'aimnet2calc'
+  anonymous = ['git',
+               'git@github.com:zubatyuk/aimnet2calc.git',
+               'https://github.com/zubatyuk/aimnet2calc.git',
+               ]
+
 class qrefine_module(SourceModule):
   module = 'qrefine'
   anonymous = ['git',
@@ -827,7 +846,7 @@ class gui_resources_module(SourceModule):
 
 class opt_resources_module(SourceModule):
   module = 'opt_resources'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/opt_resources/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/opt_resources.git']
 
 class eigen_module(SourceModule):
   module = 'eigen'
@@ -871,27 +890,29 @@ class phenix_colabs(SourceModule):
 
 class plex_module(SourceModule):
   module = 'Plex'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/Plex/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/Plex.git']
 
 class pyquante_module(SourceModule):
   module = 'PyQuante'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/PyQuante/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/PyQuante.git']
 
 class chem_data_module(SourceModule):
   module = 'chem_data'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/chem_data/trunk']
+  anonymous = ['git',
+               'git@gitlab.com:phenix_project/chem_data.git',
+               'https://gitlab.com/phenix_project/chem_data.git']
 
 class elbow_module(SourceModule):
   module = 'elbow'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/elbow/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/elbow.git']
 
 class ksdssp_module(SourceModule):
   module = 'ksdssp'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/ksdssp/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/ksdssp.git']
 
 class pulchra_module(SourceModule):
   module = 'pulchra'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/pulchra/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/pulchra.git']
 
 class solve_resolve_module(SourceModule):
   module = 'solve_resolve'
@@ -899,11 +920,11 @@ class solve_resolve_module(SourceModule):
 
 class reel_module(SourceModule):
   module = 'reel'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/reel/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/reel.git']
 
 class muscle_module(SourceModule):
   module = 'muscle'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/muscle/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/muscle.git']
 
 class cxi_xdr_xes_module(SourceModule):
   module = 'cxi_xdr_xes'
@@ -911,11 +932,17 @@ class cxi_xdr_xes_module(SourceModule):
 
 class buildbot_module(SourceModule):
   module = 'buildbot'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/buildbot/trunk']
+  authenticated = ['git', 'git@github.com:cci-lbl/buildbot.git']
 
 class phenix_pathwalker_module(SourceModule):
   module = 'phenix_pathwalker'
   anonymous = ['git', 'git@github.com:phenix-project/phenix_pathwalker.git']
+
+class alphafold_module(SourceModule):
+  module = 'alphafold'
+  anonymous = ['git',
+               'git@github.com:google-deepmind/alphafold.git',
+               'https://github.com/google-deepmind/alphafold.git']
 
 # Phaser repositories
 class phaser_module(SourceModule):
@@ -994,8 +1021,9 @@ class msgpack_module(SourceModule):
 
 class xfel_regression_module(SourceModule):
   module = 'xfel_regression'
-  authenticated = ['svn',
-                   'svn+ssh://%(cciuser)s@boa.lbl.gov/xfel_regression/trunk']
+  authenticated = ['git',
+                   'git@gitlab.com:cctbx/xfel_regression.git',
+                   'https://gitlab.com/cctbx/xfel_regression.git']
 
 class xia2_module(SourceModule):
   module = 'xia2'
@@ -1006,17 +1034,17 @@ class xia2_module(SourceModule):
 
 class kokkos_module(SourceModule):
   module = 'kokkos'
-  anonymous = ['git', '-b 3.7.01',
+  anonymous = ['git', '-b 4.2.00',
                'git@github.com:kokkos/kokkos.git',
                'https://github.com/kokkos/kokkos.git',
-               'https://github.com/kokkos/kokkos/archive/refs/tags/3.7.01.zip']
+               'https://github.com/kokkos/kokkos/archive/refs/tags/4.2.00.zip']
 
 class kokkos_kernels_module(SourceModule):
   module = 'kokkos-kernels'
-  anonymous = ['git', '-b 3.7.01',
+  anonymous = ['git', '-b 4.2.00',
                'git@github.com:kokkos/kokkos-kernels.git',
                'https://github.com/kokkos/kokkos-kernels.git',
-               'https://github.com/kokkos/kokkos-kernels/archive/refs/tags/3.7.01.zip']
+               'https://github.com/kokkos/kokkos-kernels/archive/refs/tags/4.2.00.zip']
 
 # Duke repositories
 class probe_module(SourceModule):
@@ -1558,6 +1586,12 @@ class Builder(object):
       workdir = ['modules', module]
       self.add_step(self.shell(command=[sys.executable, os.path.join('libtbx', 'version.py')], workdir=workdir))
 
+    # add geostd to chem_data
+    if module == 'chem_data':
+      action = MODULES.get_module('geostd')().get_url(auth=self.get_auth())
+      method, geostd_parameters = action[0], action[1:]
+      self._add_git('geostd', geostd_parameters, destination=self.opjoin('modules', 'chem_data', 'geostd'))
+
     # Use dials-2.2 branches for Python 2
     if (module == 'dials' or module == 'dxtbx' or module == 'xia2') and not self.python3:
       workdir = ['modules', module]
@@ -2001,7 +2035,7 @@ class MOLPROBITYBuilder(Builder):
   ]
   CODEBASES_EXTRA = [
     'molprobity',
-    #'chem_data', #chem_data removed from molprobity builder until accessible outside cci, -CJW
+    'chem_data',
     'reduce',
     'probe'
   ]
@@ -2418,7 +2452,7 @@ class PhenixBuilder(CCIBuilder):
     super(PhenixBuilder, self).add_module(module, workdir, module_directory)
 
     # update phenix_regression and phenix_examples with git-lfs
-    if module == 'phenix_examples' or module == 'phenix_regression':
+    if module == 'phenix_examples' or module == 'phenix_regression' or module == 'chem_data':
       # prepend path for check
       dev_env = os.path.join('.', 'dev_env', 'bin')
       if sys.platform == 'win32':
@@ -2726,7 +2760,7 @@ class QRBuilder(PhenixBuilder):
     # XXX Do not get JPype1 as it fails. This makes QR work only with
     # XXX fast_interaction=True (=False won't work)
     #
-    pip_installs = ['ase', 'pymongo']
+    pip_installs = ['ase==3.22.1',]
     instructions = []
     # versioning
     cmd = [os.path.join('..', self.python_base),
