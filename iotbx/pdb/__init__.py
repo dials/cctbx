@@ -76,16 +76,6 @@ def is_pdb_mmcif_file(file_name):
   except Exception as e:
     return False
 
-def ent_path_local_mirror(pdb_id, environ_key="PDB_MIRROR_PDB"):
-  if (len(pdb_id) != 4):
-    raise RuntimeError("Invalid PDB ID: %s (must be four characters)" % pdb_id)
-  pdb_id = pdb_id.lower()
-  pdb_mirror = os.environ[environ_key]
-  result = op.join(pdb_mirror, pdb_id[1:3], "pdb%s.ent.gz" % pdb_id)
-  if (not op.isfile(result)):
-    raise RuntimeError("No file with PDB ID %s (%s)" % (pdb_id, result))
-  return result
-
 def systematic_chain_ids():
   import string
   u, l, d = string.ascii_uppercase, string.ascii_lowercase, string.digits
@@ -568,13 +558,15 @@ class combine_unique_pdb_files(object):
     self.md5_registry = {}
     self.unique_file_names = []
     self.raw_records = []
+    self.raw_text_block_list = []
     for file_name in file_names:
       if (file_name in self.file_name_registry):
         self.file_name_registry[file_name] += 1
       else:
         self.file_name_registry[file_name] = 1
         with smart_open.for_reading(file_name=file_name) as f:
-          r = [s.expandtabs().rstrip() for s in f.read().splitlines()]
+          text = f.read()
+          r = [s.expandtabs().rstrip() for s in text.splitlines()]
         m = hashlib_md5()
         m.update(to_bytes("\n".join(r), codec='utf8'))
         m = m.hexdigest()
@@ -585,6 +577,7 @@ class combine_unique_pdb_files(object):
           self.md5_registry[m] = [file_name]
           self.unique_file_names.append(file_name)
           self.raw_records.extend(r)
+          self.raw_text_block_list.append(text)
 
   def report_non_unique(self, out=None, prefix=""):
     if (out is None): out = sys.stdout
@@ -666,7 +659,6 @@ class pdb_input_from_any(object):
                file_name=None,
                source_info=Please_pass_string_or_None,
                lines=None,
-               pdb_id=None,
                raise_sorry_if_format_error=False):
     self.file_format = None
     content = None
@@ -683,7 +675,6 @@ class pdb_input_from_any(object):
           file_name=file_name,
           source_info=source_info,
           lines=lines,
-          pdb_id=pdb_id,
           raise_sorry_if_format_error=raise_sorry_if_format_error)
       except Exception as e:
         # store the first error encountered and re-raise later if can't
@@ -737,11 +728,7 @@ def pdb_input(
     file_name=None,
     source_info=Please_pass_string_or_None,
     lines=None,
-    pdb_id=None,
     raise_sorry_if_format_error=False):
-  if (pdb_id is not None):
-    assert file_name is None
-    file_name = ent_path_local_mirror(pdb_id=pdb_id)
   if (file_name is not None):
     try :
       with smart_open.for_reading(file_name, gzip_mode='rt') as f:
@@ -771,7 +758,6 @@ def input(
     file_name=None,
     source_info=Please_pass_string_or_None,
     lines=None,
-    pdb_id=None,
     raise_sorry_if_format_error=False):
   """
   Main input method for both PDB and mmCIF files; will automatically determine
@@ -782,7 +768,6 @@ def input(
   file_name: path to PDB or mmCIF file
   source_info: string describing source of input (e.g. file name)
   lines: flex.std_string array of input lines
-  pdb_id: PDB ID to automatically retrieve from local mirror
   raise_sorry_if_format_error: re-raise any low-level parser errors as a
     libtbx.utils.Sorry exception instance for clean user feedback
 
@@ -796,7 +781,6 @@ def input(
     file_name=file_name,
     source_info=source_info,
     lines=lines,
-    pdb_id=pdb_id,
     raise_sorry_if_format_error=raise_sorry_if_format_error).file_content()
 
 default_atom_names_scattering_type_const = ["PEAK", "SITE"]
@@ -817,6 +801,11 @@ input_sections = (
 
 class pdb_input_mixin(object):
 
+  def label_to_auth_asym_id_dictionary(self):
+    """ Only avaliable for cif_input
+    """
+    return None
+
   def deposition_date(self, us_style=True):
     """
     Placeholder to match mmCIF functionality. Probably could parse
@@ -836,36 +825,6 @@ class pdb_input_mixin(object):
             if(len(m)==1): m = "0"+m
             result = "%s-%s-%s"%(str(date.yyyy), m, dd)
     return result
-
-  # MARKED_FOR_DELETION_OLEG
-  # REASON: moved to mmtbx.model.manager. Only used in
-  # mmtbx/regression/ncs/tst_minimization_ncs_constraints.py
-  def _expand_hierarchy_helper(self,
-      mtrix_biomt_container,
-      h=None,
-      sort_atoms=True):
-    present = mtrix_biomt_container.validate()
-    if(h is None):
-      h = self.construct_hierarchy(sort_atoms=sort_atoms)
-    if(len(mtrix_biomt_container.r)==0 or present): return h
-    if(len(mtrix_biomt_container.r)==1):
-      r,t = mtrix_biomt_container.r[0], mtrix_biomt_container.t[0]
-      if(r.is_r3_identity_matrix() and t.is_col_zero()): return h
-    return h.apply_rotation_translation(
-      rot_matrices = mtrix_biomt_container.r,
-      trans_vectors = mtrix_biomt_container.t)
-
-  def construct_hierarchy_MTRIX_expanded(self, sort_atoms=True):
-    return self._expand_hierarchy_helper(
-      mtrix_biomt_container = self.process_MTRIX_records(),
-      sort_atoms = sort_atoms)
-
-  def construct_hierarchy_BIOMT_expanded(self, sort_atoms=True):
-    return self._expand_hierarchy_helper(
-      mtrix_biomt_container = self.process_BIOMT_records(),
-      sort_atoms = sort_atoms)
-  # END_MARKED_FOR_DELETION_OLEG
-
 
   def special_position_settings(self,
         special_position_settings=None,
@@ -1353,7 +1312,7 @@ class _():
       chain_ids        = chain_ids)
 
   def extract_f_model_core_constants(self):
-    import iotbx.pdb.remark_3_interpretation
+
     remark_3_records = self.extract_remark_iii_records(3)
     return remark_3_interpretation.extract_f_model_core_constants(remark_3_records)
 

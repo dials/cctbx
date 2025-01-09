@@ -29,7 +29,7 @@ from iotbx.pdb import common_residue_names_get_class
 # @todo See if we can remove the shift and box once reduce_hydrogen is complete
 from cctbx.maptbx.box import shift_and_box_model
 
-version = "2.5.0"
+version = "4.7.0"
 
 master_phil_str = '''
 profile = False
@@ -37,7 +37,7 @@ profile = False
   .short_caption = Profile the run
   .help = Profile the performance of the entire run
 
-source_selection = "(altid a or altid '' or altid ' ') and occupancy > 0.33"
+source_selection = "occupancy > 0.33"
   .type = atom_selection
   .short_caption = Source selection
   .help = Source selection description
@@ -145,11 +145,6 @@ output
     .short_caption = Count dots, don't list
     .help = Count dots rather than listing all contacts (-countdots in probe)
 
-  hydrogen_bond_output = True
-    .type = bool
-    .short_caption = Output hydrogen-bond contacts
-    .help = Output hydrogen-bond contacts (-nohbout in probe)
-
   record_added_hydrogens = False
     .type = bool
     .short_caption = Record Phantom Hydrogens
@@ -243,6 +238,11 @@ output
     .type = bool
     .short_caption = Compute scores rather than counting
     .help = Compute scores rather than just counting dots (-spike, -nospike in probe)
+
+   altid_as_pointmaster = True
+    .type = bool
+    .short_caption = Add alternate IDs as point masters for atoms that are in alternate conformations
+    .help = Add alternate IDs as point masters for atoms that are in alternate conformations
 }
 ''' + Helpers.probe_phil_parameters
 
@@ -559,7 +559,7 @@ def Test():
 
 class Program(ProgramTemplate):
   description = '''
-Probe2 version {}
+probe2 version {}
 
 This program replaces the original "probe" program from the Richarson lab
 at Duke University and was developed by them as part of a supplemental award.
@@ -568,10 +568,12 @@ It computes the MolProbity Probe score for a file, or a subset of the file,
 producing summaries or lists of all contacts, in Kinemage or raw format, depending
 on the Phil parameters.
 
-By default, it compares all atoms in the A alternate that meet an occupancy
+By default, it compares all atoms in all alternates that meet an occupancy
 criterion against themselves and produces a Kinemage-format file showing all of
 the dot interactions.  See below for the Phil parameter equivalents to some
-original probe command-line arguments.
+original probe command-line arguments.  (Note that the original probe selected
+only the a alternate by default, but version 4 of probe2 selects all alternates by default
+because it also adds point masters for all alternates.)
 
 Inputs:
   PDB or mmCIF file containing atomic model
@@ -610,6 +612,9 @@ Note:
 
   The most simple dotkin:
     mmtbx.probe2 approach=self source_selection="all" output.file_name=out.kin input.pdb
+
+  The probe2 command line to test a ligand named TMP against everything else:
+    mmtbx.probe2 approach=both source_selection="resname TMP" target_selection="not resname TMP" PDBfilename
 
   Equivalent PHIL arguments for original Probe command-line options:
     -defaults:
@@ -690,6 +695,15 @@ Note:
       raise Sorry("Invalid radius for atom look-up: "+myFullName+"; rad = "+str(rad))
     return self.params.atom_radius_offset + (rad * self.params.atom_radius_scale)
 
+
+  def _describe_atom_for_debug(self, a):
+      resName = a.parent().resname.strip().upper()
+      resID = str(a.parent().parent().resseq_as_int())
+      chainID = a.parent().parent().parent().id
+      iCode = a.parent().parent().icode
+      alt = a.parent().altloc
+      return "{:>2s}{:>4s}{}{} {}{:1s}".format(chainID, resID, iCode, resName, a.name, alt)
+
 # ------------------------------------------------------------------------------
 
   def _atom_class_for(self, a):
@@ -698,10 +712,14 @@ Note:
       :param a: Atom whose class is to be specified
       :return: If our parameters have been set to color and sort by NA base,
       then it returns the appropriate base name.  Otherwise, it returns the
-      element of the atom.
+      element of the atom with any second letter in the element name lower-case
+      to match the values in the _allAtomClasses list.
     '''
     if not self.params.output.color_by_na_base:
-      return a.element
+      val = a.element
+      if len(val) > 1:
+        val = val[0] + val[1:].lower()
+      return val
     else:
       resName = a.parent().resname
       cl = common_residue_names_get_class(name = resName)
@@ -910,11 +928,11 @@ Note:
             # Main branch if we're reporting other than bad clashes
             if (not spo.only_report_bad_clashes):
               # We are reporting other than bad clashes, see if our type is being reported
-              if spo.report_hydrogen_bonds and overlapType == probeExt.OverlapType.HydrogenBond:
+              if spo.report_hydrogen_bonds and (overlapType == probeExt.OverlapType.HydrogenBond):
                 show = True
-              elif spo.report_clashes and overlapType == probeExt.OverlapType.Clash:
+              elif spo.report_clashes and (overlapType == probeExt.OverlapType.Clash):
                 show = True
-              elif spo.report_vdws and overlapType == probeExt.OverlapType.NoOverlap:
+              elif spo.report_vdws and (overlapType == probeExt.OverlapType.NoOverlap):
                 show = True
             else:
               # We are only reporting bad clashes.  See if we're reporting clashes and this is
@@ -1120,7 +1138,7 @@ Note:
           chainID = a.parent().parent().parent().id
           iCode = a.parent().parent().icode
           alt = a.parent().altloc
-          ret += "{:>2s}{:>3s} {}{} {}{:1s}:".format(chainID, resID, iCode, resName, a.name, alt)
+          ret += "{:>2s}{:>4s}{}{:>3s} {}{:1s}:".format(chainID, resID, iCode, resName, a.name, alt)
 
           # Describe the target atom, if it exists
           t = node.target
@@ -1132,12 +1150,12 @@ Note:
             chainID = t.parent().parent().parent().id
             iCode = t.parent().parent().icode
             alt = t.parent().altloc
-            ret += "{:>2s}{:>4s}{}{} {:<3s}{:1s}:".format(chainID, resID, iCode, resName, t.name, alt)
+            ret += "{:>2s}{:>4s}{}{:>3s} {:<3s}{:1s}:".format(chainID, resID, iCode, resName, t.name, alt)
 
             r1 = self._extraAtomInfo.getMappingFor(a).vdwRadius
             r2 = self._extraAtomInfo.getMappingFor(t).vdwRadius
-            sl = (Helpers.rvec3(a.xyz)-Helpers.rvec3(t.xyz)).length()
-            gap = sl - (r1 + r2)
+            sl = (node.loc-node.spike).length()
+            gap = (Helpers.rvec3(a.xyz)-Helpers.rvec3(t.xyz)).length() - (r1 + r2)
             dtgp = node.gap
             score = 0.0
 
@@ -1153,19 +1171,19 @@ Note:
             else: # Hydrogen bond
               score = hydrogen_bond_weight * sl
 
-            if self.params.output.contact_summary:
+            if self.params.output.condensed:
               ret += "{}:".format(node.dotCount)
 
             ret += "{:.3f}:{:.3f}:{:.3f}:{:.3f}:{:.3f}:{:.3f}:{:.4f}".format(gap, dtgp,
               node.spike[0], node.spike[1], node.spike[2], sl, score/density)
 
           try:
-            tName = t.element
+            tName = self._atomClasses[t]
             tBVal = "{:.2f}".format(t.b)
           except Exception:
             tName = ""
             tBVal = ""
-          ret += ":{}:{}:{:.3f}:{:.3f}:{:.3f}".format(a.element, tName,
+          ret += ":{}:{}:{:.3f}:{:.3f}:{:.3f}".format(self._atomClasses[a], tName,
             node.loc[0], node.loc[1], node.loc[2])
 
           ret += ":{:.2f}:{}\n".format(a.b, tBVal)
@@ -1176,7 +1194,7 @@ Note:
 
   def _writeOutput(self, groupName, masterName):
     '''
-      Describe summary counts for data of various kinds.
+      Describe contacts for data of various kinds.
       :param groupName: Name to give to the group.
       :param masterName: Name for the master command.
       :return: String to be added to the output.
@@ -1232,13 +1250,13 @@ Note:
 
     # Report count legend if any counts are nonzero.
     if _totalInteractionCount(self._MCMCCount) > 0:
-      ret += "@pointmaster 'M' {{McMc contacts}}\n"
+      ret += "@pointmaster 'M' {McMc contacts}\n"
     if _totalInteractionCount(self._SCSCCount) > 0:
-      ret += "@pointmaster 'S' {{ScSc contacts}}\n"
+      ret += "@pointmaster 'S' {ScSc contacts}\n"
     if _totalInteractionCount(self._MCSCCount) > 0:
-      ret += "@pointmaster 'P' {{McSc contacts}}\n"
+      ret += "@pointmaster 'P' {McSc contacts}\n"
     if _totalInteractionCount(self._otherCount) > 0:
-      ret += "@pointmaster 'O' {{Hets contacts}}\n"
+      ret += "@pointmaster 'O' {Hets contacts}\n"
 
     # Report binned gap legend if we're binning gaps
     if self.params.output.bin_gaps:
@@ -1300,7 +1318,7 @@ Note:
           else:
             ptmast = " '{}' ".format(node.ptmaster)
 
-          pointid = "{}{:1s}{} {:>3d} {:1s}{}".format(a.name, a.parent().altloc, a.parent().resname,
+          pointid = "{}{:1s}{:>3s} {:>3d} {:1s}{}".format(a.name, a.parent().altloc, a.parent().resname,
             a.parent().parent().resseq_as_int(), a.parent().parent().icode,
             a.parent().parent().parent().id)
           if pointid != lastPointID:
@@ -1333,6 +1351,21 @@ Note:
               # assign this node, aka dot, to overflow gapbin
               ptmast = ptmast[:3]+gapNames[-1]+ptmast[4:]
               gapcounts[-1] += 1
+
+          # Add alternate conformation masters to the pointmaster unless we've been told not to
+          if self.params.output.altid_as_pointmaster:
+            alt = ''
+            if (not a.parent().altloc in [' ', '']):
+              alt = a.parent().altloc
+            if (not t is None) and (not t.parent().altloc in [' ', '']):
+              alt += t.parent().altloc
+            if alt != '':
+              # Find the index of the second single quote in the ptmaster string
+
+              idx = ptmast.rfind("'")
+              # Insert the alternate conformation into the ptmaster string at this index,
+              # using the lower-case version of the alternate conformation character.
+              ptmast = ptmast[:idx] + alt.lower() + ptmast[idx:]
 
           if interactionType in [probeExt.InteractionType.SmallOverlap, probeExt.InteractionType.Bump,
               probeExt.InteractionType.BadBump]:
@@ -1816,13 +1849,19 @@ Note:
     # Get the bonding information we'll need to exclude our bonded neighbors.
     allAtoms = self.model.get_atoms()
     make_sub_header('Compute neighbor lists', out=self.logger)
+
+    self.model.set_stop_for_unknowns(False)
     p = mmtbx.model.manager.get_default_pdb_interpretation_params()
     p.pdb_interpretation.use_neutron_distances = self.params.use_neutron_distances
     p.pdb_interpretation.allow_polymer_cross_special_position=True
     p.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
     p.pdb_interpretation.proceed_with_excessive_length_bonds=True
+    # We need to turn this on because without it the interpretation is
+    # renaming atoms to be more correct.  Unfortunately, this causes the
+    # dot names to no longer match the input file.
+    p.pdb_interpretation.flip_symmetric_amino_acids=False
     try:
-      self.model.process(make_restraints=True, pdb_interpretation_params=p) # make restraints
+      self.model.process(make_restraints=True, pdb_interpretation_params=p, logger=self.logger) # make restraints
       geometry = self.model.get_restraints_manager().geometry
       sites_cart = self.model.get_sites_cart() # cartesian coordinates
       bondProxies, asu = \
@@ -1886,14 +1925,14 @@ Note:
         self._atomClasses[a] = self._atom_class_for(a)
       else:
         # For hydrogen, assign based on what it is bonded to.
-        if len(self._allBondedNeighborLists[a]) != 1:
-          raise Sorry("Found Hydrogen with number of bonds other than 1: "+
-                      str(len(self._allBondedNeighborLists[a])))
+        if len(self._allBondedNeighborLists[a]) < 1:
+          raise Sorry("Found Hydrogen with no neigbors: " + self._describe_atom_for_debug(a))
         else:
           self._atomClasses[a] = self._atom_class_for(self._allBondedNeighborLists[a][0])
 
     ################################################################################
     # Get the other characteristics we need to know about each atom to do our work.
+    make_sub_header('Getting extra atom characteristics', out=self.logger)
     self._inWater = {}
     self._inHet = {}
     self._inMainChain = {}
@@ -1908,9 +1947,8 @@ Note:
         self._inMainChain[a] = mainchain_sel[a.i_seq]
       else:
         # Check our bonded neighbor to see if it is on the mainchain if we are a Hydrogen
-        if len(self._allBondedNeighborLists[a]) != 1:
-          raise Sorry("Found Hydrogen with number of neigbors other than 1: "+
-                      str(len(self._allBondedNeighborLists[a])))
+        if len(self._allBondedNeighborLists[a]) < 1:
+          raise Sorry("Found Hydrogen with no neigbors: " + self._describe_atom_for_debug(a))
         else:
           self._inMainChain[a] = mainchain_sel[self._allBondedNeighborLists[a][0].i_seq]
       self._inSideChain[a] = sidechain_sel[a.i_seq]
@@ -1918,16 +1956,15 @@ Note:
     ################################################################################
     # Ensure that the model we've been passed has at least one Hydrogen bonded to a Carbon
     # and at least one polar Hydrogen (bonded to N, O, or S).  Otherwise, raise a Sorry.
-    if not (self.params.ignore_lack_of_explicit_hydrogens or self.params.probe.implicit_hydrogens):
+    if not self.params.ignore_lack_of_explicit_hydrogens:
       foundCBonded = False
       foundPolar = False
       for a in allAtoms:
         if Helpers.isPolarHydrogen(a, self._allBondedNeighborLists):
           foundPolar = True
         elif a.element_is_hydrogen():
-          if len(self._allBondedNeighborLists[a]) != 1:
-            raise Sorry("Found Hydrogen with number of neighbors other than 1: "+
-                        str(len(self._allBondedNeighborLists[a])))
+          if len(self._allBondedNeighborLists[a]) < 1:
+            raise Sorry("Found Hydrogen with no neigbors: " + self._describe_atom_for_debug(a))
           else:
             neighbor = self._allBondedNeighborLists[a][0]
             if neighbor.element == 'C':
@@ -1943,6 +1980,7 @@ Note:
     # lists of atoms that are in each selection, a subset of the atoms in the model.
     # If there is no model_id in the selection criteria, these may include atoms from
     # multiple models in the hierarchy.
+    make_sub_header('Getting atom selections', out=self.logger)
     source_sel = self.model.selection(self.params.source_selection)
     allSourceAtoms = set()
     for a in allAtoms:
@@ -1967,6 +2005,7 @@ Note:
     # We get lists of all atoms present in each hierarchy model that we're running.
     # This is a list of one when only one is selected and it is all of the available ones
     # when no particular one is selected.
+    make_sub_header('Getting atom lists', out=self.logger)
     atomLists = [ self.model.get_atoms() ]
     if (self.params.approach == 'self' and
         (self.params.source_selection is None or 'model' not in self.params.source_selection) and
@@ -1977,19 +2016,25 @@ Note:
       for i in range(numModels):
         atomLists.append( self.model.get_hierarchy().models()[i].atoms() )
 
+    make_sub_header('Processing atom lists', out=self.logger)
     for modelIndex, atoms in enumerate(atomLists):
 
       ################################################################################
       # Get the subset of the source selection and target selection for this hierarchy
       # model.
+
+      # Make an acceleration structure for determining whether an atom is in the ones we
+      # are considering in the current list. This is a set rather than a list to make it
+      # rapid to determine membership.
+      atomsInThisModel = set(atoms)
       source_atoms = set()
       for a in allSourceAtoms:
-        if a in atoms:
+        if a in atomsInThisModel:
           source_atoms.add(a)
 
       target_atoms = set()
       for a in allTargetAtoms:
-        if a in atoms:
+        if a in atomsInThisModel:
           target_atoms.add(a)
 
       ###########################
@@ -2016,7 +2061,9 @@ Note:
       # Sort the atoms by an ID that is consistent from run to run so that they end up
       # in our data structures in the same order for each run.
 
+      make_sub_header('Sorting atoms', out=self.logger)
       all_selected_atoms = sorted(source_atoms.union(target_atoms), key=lambda x:atomID(x))
+      make_sub_header('Getting bonded-neighbor lists', out=self.logger)
       bondedNeighborLists = Helpers.getBondedNeighborLists(all_selected_atoms, bondProxies)
 
       ################################################################################
@@ -2035,129 +2082,128 @@ Note:
         selectedAtomsIncludingKept = all_selected_atoms
 
       ################################################################################
-      # If we're not doing implicit hydrogens, add Phantom hydrogens to waters and mark
+      # Add Phantom hydrogens to waters and mark
       # the water oxygens as not being donors in atoms that are in the source or target selection.
       # Also clear the donor status of all N, O, S atoms because we have explicit hydrogen donors.
       self._phantomHydrogenOutput = ""
       phantomHydrogens = []
-      if not self.params.probe.implicit_hydrogens:
-        make_sub_header('Adjusting for explicit hydrogens', out=self.logger)
-        if self.params.output.record_added_hydrogens:
-          self._phantomHydrogenOutput += "@master {water H?}\n"
-          self._phantomHydrogenOutput += '@vectorlist {water H?} color= gray master={water H?}\n'
+      make_sub_header('Adjusting for explicit hydrogens', out=self.logger)
+      if self.params.output.record_added_hydrogens:
+        self._phantomHydrogenOutput += "@master {water H?}\n"
+        self._phantomHydrogenOutput += '@vectorlist {water H?} color= gray master={water H?}\n'
 
-        # @todo Look up the radius of a water Hydrogen.  This may require constructing a model with
-        # a single water in it and asking about the hydrogen radius.  This could also become a
-        # Phil parameter.  Also look up the OH bond distance rather than hard-coding it here.
-        phantomHydrogenRadius = 1.05
-        placedHydrogenDistance = 0.84
-        if self.params.use_neutron_distances:
-          phantomHydrogenRadius = 1.0
-          placedHydrogenDistance = 0.98
+      # @todo Look up the radius of a water Hydrogen.  This may require constructing a model with
+      # a single water in it and asking about the hydrogen radius.  This could also become a
+      # Phil parameter.  Also look up the OH bond distance rather than hard-coding it here.
+      phantomHydrogenRadius = 1.05
+      placedHydrogenDistance = 0.84
+      if self.params.use_neutron_distances:
+        phantomHydrogenRadius = 1.0
+        placedHydrogenDistance = 0.98
 
-        adjustedHydrogenRadius = self.params.atom_radius_offset + (phantomHydrogenRadius * self.params.atom_radius_scale)
+      adjustedHydrogenRadius = self.params.atom_radius_offset + (phantomHydrogenRadius * self.params.atom_radius_scale)
 
-        # Check all selected atoms to see if we need to add Phantom Hydrogens to them.
-        # Don't add Phantom Hydrogens to atoms that are not selected, even if they are kept.
-        maxISeq = Helpers.getMaxISeq(self.model)
-        for a in all_selected_atoms:
+      # Check all selected atoms to see if we need to add Phantom Hydrogens to them.
+      # Don't add Phantom Hydrogens to atoms that are not selected, even if they are kept.
+      maxISeq = Helpers.getMaxISeq(self.model)
+      for a in all_selected_atoms:
 
-          # Ignore Hydrogens whose parameters are out of bounds.
-          if a.element_is_hydrogen():
-            # In the original code, this looks at H atoms with parent N,O,S atoms
-            # and marks them as donors.  This is handled for us below in the call
-            # to Helpers.fixupExplicitDonors().
+        # Ignore Hydrogens whose parameters are out of bounds.
+        if a.element_is_hydrogen():
+          # In the original code, this looks at H atoms with parent N,O,S atoms
+          # and marks them as donors.  This is handled for us below in the call
+          # to Helpers.fixupExplicitDonors().
 
-            # If we are in a water, make sure our occupancy and temperature (b) factor are acceptable.
-            # If they are not, set the class for the atom to 'ignore'.
-            # This handles the case where there were explicit Hydrogens on waters and so
-            # we won't add Phantom Hydrogens.
-            if self._inWater[a] and (a.occ < self.params.minimum_water_hydrogen_occupancy or
-                a.b > self.params.maximum_water_hydrogen_b):
-              self._atomClasses[a] = 'ignore'
+          # If we are in a water, make sure our occupancy and temperature (b) factor are acceptable.
+          # If they are not, set the class for the atom to 'ignore'.
+          # This handles the case where there were explicit Hydrogens on waters and so
+          # we won't add Phantom Hydrogens.
+          if self._inWater[a] and (a.occ < self.params.minimum_water_hydrogen_occupancy or
+              a.b > self.params.maximum_water_hydrogen_b):
+            self._atomClasses[a] = 'ignore'
 
-          # If we are the Oxygen in a water, then add phantom hydrogens pointing towards nearby acceptors
-          elif self._inWater[a] and a.element == 'O':
-            # We're an acceptor and not a donor.
-            # @todo Original Probe code only cleared the donor status if it found a bonded
-            # Hydrogen in the same conformation whose occupancy was > 0.1.  Here, we're turning
-            # it off regardless of the occupancy.
-            ei = self._extraAtomInfo.getMappingFor(a)
-            ei.isDonor = False
-            ei.isAcceptor = True
-            self._extraAtomInfo.setMappingFor(a, ei)
+        # If we are the Oxygen in a water, then add phantom hydrogens pointing towards nearby acceptors
+        elif self._inWater[a] and a.element == 'O':
+          # We're an acceptor and not a donor.
+          # @todo Original Probe code only cleared the donor status if it found a bonded
+          # Hydrogen in the same conformation whose occupancy was > 0.1.  Here, we're turning
+          # it off regardless of the occupancy.
+          ei = self._extraAtomInfo.getMappingFor(a)
+          ei.isDonor = False
+          ei.isAcceptor = True
+          self._extraAtomInfo.setMappingFor(a, ei)
 
-            # If we don't yet have Hydrogens attached, add phantom hydrogen(s)
-            if len(bondedNeighborLists[a]) == 0:
-              # NOTE: The Phantoms have i_seq numbers that are sequential and that are higher than
-              # all other atoms in the model.  Each one has a unique i_seq.
-              newPhantoms = Helpers.getPhantomHydrogensFor(maxISeq, a, self._spatialQuery, self._extraAtomInfo,
-                              0.0, True, adjustedHydrogenRadius, placedHydrogenDistance)
-              maxISeq += len(newPhantoms)
-              for p in newPhantoms:
+          # If we don't yet have Hydrogens attached, add phantom hydrogen(s)
+          if len(bondedNeighborLists[a]) == 0:
+            # NOTE: The Phantoms have i_seq numbers that are sequential and that are higher than
+            # all other atoms in the model.  Each one has a unique i_seq.
+            newPhantoms = Helpers.getPhantomHydrogensFor(maxISeq, a, self._spatialQuery, self._extraAtomInfo,
+                            0.0, True, adjustedHydrogenRadius, placedHydrogenDistance)
+            maxISeq += len(newPhantoms)
+            for p in newPhantoms:
 
-                # Put in our list of Phantom Hydrogens
-                phantomHydrogens.append(p)
+              # Put in our list of Phantom Hydrogens
+              phantomHydrogens.append(p)
 
-                # Add the atom to the general spatial-query data structure
-                self._spatialQuery.add(p)
+              # Add the atom to the general spatial-query data structure
+              self._spatialQuery.add(p)
 
-                # Set the extra atom information for this atom
-                ei = probeExt.ExtraAtomInfo(adjustedHydrogenRadius, False, True, True)
-                self._extraAtomInfo.setMappingFor(p, ei)
+              # Set the extra atom information for this atom
+              ei = probeExt.ExtraAtomInfo(adjustedHydrogenRadius, False, True, True)
+              self._extraAtomInfo.setMappingFor(p, ei)
 
-                # Set the atomClass and other data based on the parent Oxygen.
-                self._atomClasses[p] = self._atom_class_for(a)
-                self._inWater[p] = self._inWater[a]
-                self._inMainChain[p] = self._inMainChain[a]
-                self._inSideChain[p] = self._inSideChain[a]
-                self._inHet[p] = self._inHet[a]
+              # Set the atomClass and other data based on the parent Oxygen.
+              self._atomClasses[p] = self._atom_class_for(a)
+              self._inWater[p] = self._inWater[a]
+              self._inMainChain[p] = self._inMainChain[a]
+              self._inSideChain[p] = self._inSideChain[a]
+              self._inHet[p] = self._inHet[a]
 
-                # Mark the Phantom Hydrogens as being bonded to their Oxygen so that
-                # dots on a Phantom Hydrogen within its Oxygen will be excluded.
-                bondedNeighborLists[p] = [a]
+              # Mark the Phantom Hydrogens as being bonded to their Oxygen so that
+              # dots on a Phantom Hydrogen within its Oxygen will be excluded.
+              bondedNeighborLists[p] = [a]
 
-                # It was thought that in the future, we may add these bonds, but that will cause the
-                # Phantom Hydrogens to mask their water Oxygens from close contacts or
-                # clashes with the acceptors, which is a change in behavior from the
-                # original Probe and would have the undesirable effect of a potential
-                # Hydrogen hiding a true collision.
-                # Not marking these as bonded requires special-case handling
-                # of Phantom Hydrogen interactions in the dot-scoring code.
-                # This means that we have a one-way bond, which is unusual but suits our
-                # purposes.
-                # Not done: bondedNeighborLists[a].append(p)
+              # It was thought that in the future, we may add these bonds, but that will cause the
+              # Phantom Hydrogens to mask their water Oxygens from close contacts or
+              # clashes with the acceptors, which is a change in behavior from the
+              # original Probe and would have the undesirable effect of a potential
+              # Hydrogen hiding a true collision.
+              # Not marking these as bonded requires special-case handling
+              # of Phantom Hydrogen interactions in the dot-scoring code.
+              # This means that we have a one-way bond, which is unusual but suits our
+              # purposes.
+              # Not done: bondedNeighborLists[a].append(p)
 
-                # Add the new atom to any selections that the old atom was in.
-                if a in source_atoms:
-                  source_atoms.add(p)
-                if a in target_atoms:
-                  target_atoms.add(p)
+              # Add the new atom to any selections that the old atom was in.
+              if a in source_atoms:
+                source_atoms.add(p)
+              if a in target_atoms:
+                target_atoms.add(p)
 
-                # Report on the creation if we've been asked to
-                if self.params.output.record_added_hydrogens:
+              # Report on the creation if we've been asked to
+              if self.params.output.record_added_hydrogens:
 
-                  resName = a.parent().resname.strip().upper()
-                  resID = str(a.parent().parent().resseq_as_int())
-                  chainID = a.parent().parent().parent().id
-                  iCode = a.parent().parent().icode
-                  alt = a.parent().altloc
-                  self._phantomHydrogenOutput += '{{{:4.4s}{:1s}{:>3s}{:>2s}{:>4s}{:1s}}}P {:8.3f}{:8.3f}{:8.3f}\n'.format(
-                    a.name, alt, resName, chainID, resID, iCode,
-                    a.xyz[0], a.xyz[1], a.xyz[2])
+                resName = a.parent().resname.strip().upper()
+                resID = str(a.parent().parent().resseq_as_int())
+                chainID = a.parent().parent().parent().id
+                iCode = a.parent().parent().icode
+                alt = a.parent().altloc
+                self._phantomHydrogenOutput += '{{{:4.4s}{:1s}{:>3s}{:>2s}{:>4s}{:1s}}}P {:8.3f}{:8.3f}{:8.3f}\n'.format(
+                  a.name, alt, resName, chainID, resID, iCode,
+                  a.xyz[0], a.xyz[1], a.xyz[2])
 
-                  resName = p.parent().resname.strip().upper()
-                  resID = str(p.parent().parent().resseq_as_int())
-                  chainID = p.parent().parent().parent().id
-                  iCode = p.parent().parent().icode
-                  alt = p.parent().altloc
-                  self._phantomHydrogenOutput += '{{{:4.4s}{:1s}{:>3s}{:>2s}{:>4s}{:1s}}}L {:8.3f}{:8.3f}{:8.3f}\n'.format(
-                    p.name, alt, resName, chainID, resID, iCode,
-                    p.xyz[0], p.xyz[1], p.xyz[2])
+                resName = p.parent().resname.strip().upper()
+                resID = str(p.parent().parent().resseq_as_int())
+                chainID = p.parent().parent().parent().id
+                iCode = p.parent().parent().icode
+                alt = p.parent().altloc
+                self._phantomHydrogenOutput += '{{{:4.4s}{:1s}{:>3s}{:>2s}{:>4s}{:1s}}}L {:8.3f}{:8.3f}{:8.3f}\n'.format(
+                  p.name, alt, resName, chainID, resID, iCode,
+                  p.xyz[0], p.xyz[1], p.xyz[2])
 
-        # Fix up the donor status for all of the atoms now that we've added the final explicit
-        # Phantom Hydrogens.
-        Helpers.fixupExplicitDonors(selectedAtomsIncludingKept, bondedNeighborLists, self._extraAtomInfo)
+      # Fix up the donor status for all of the atoms now that we've added the final explicit
+      # Phantom Hydrogens.
+      Helpers.fixupExplicitDonors(selectedAtomsIncludingKept, bondedNeighborLists, self._extraAtomInfo)
 
       ################################################################################
       # Add ionic bonds to the bonded-neighbor list so that we won't count interactions

@@ -29,6 +29,9 @@ def get_experimental_pdb_info(pdbids, site="rcsb"):
   """
   returns list of tuples (pdb_id, resolution, rwork, rfree) and dict
   pdbid: (resolution, rwork, rfree)
+
+
+  OBSOLETED. New functionality is mmtbx.wwpdb.rcsb_entry_request.get_info
   """
   rlist = []
   rdict = {}
@@ -164,8 +167,8 @@ def tst_pdb_info_local():
   except requests.exceptions.ReadTimeout:
     print("Skipped test: transient read timeout, can't run test right now")
     return
-  assert rlist == ans_list_2
-  assert rdict == ans_dict_2
+  assert rlist == ans_list_2, rlist
+  assert rdict == ans_dict_2, rdict
 
 
 def run(args):

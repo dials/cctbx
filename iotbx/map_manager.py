@@ -286,6 +286,9 @@ class map_manager(map_reader, write_ccp4_map):
     # Initialize that this is not a dummy map_manager
     self._is_dummy_map_manager = False
 
+    # Initialize that there is no output_external_origin
+    self.output_external_origin = None
+
     # Initialize program_name, limitations, labels
     self.file_name = file_name # input file (source of this manager)
     self.program_name = None  # Name of program using this manager
@@ -455,6 +458,10 @@ class map_manager(map_reader, write_ccp4_map):
     # Now apply crystal symmetry and new shift cart to ncs object if any
     if self._ncs_object:
       self._ncs_object = self.shift_ncs_object_to_match_map_and_return_new_ncs_object(self._ncs_object)
+
+  def set_output_external_origin(self, value):
+    assert isinstance(value, tuple) or isinstance(value,list)
+    self.output_external_origin = tuple(value)
 
   def set_original_origin_and_gridding(self,
       original_origin = None,
@@ -693,7 +700,6 @@ class map_manager(map_reader, write_ccp4_map):
 
     current_end = add_tuples_int(current_origin, self.map_data().all())
     new_end = add_tuples_int(desired_origin, self.map_data().all())
-
     shift_to_apply_cart = self.grid_units_to_cart(shift_to_apply)
 
     shift_info = group_args(
@@ -819,6 +825,9 @@ class map_manager(map_reader, write_ccp4_map):
       Output labels are generated from existing self.labels,
       self.program_name, and self.limitations
 
+      If self.output_external_origin is specified, write that value to file
+
+
     '''
 
     # Make sure we have map_data
@@ -859,8 +868,11 @@ class map_manager(map_reader, write_ccp4_map):
         crystal_symmetry = crystal_symmetry, # unit cell and space group
         map_data    = map_data,
         unit_cell_grid = unit_cell_grid,  # optional gridding of full unit cell
-        origin_shift_grid_units = origin_shift_grid_units, # optional origin shift
+        origin_shift_grid_units = origin_shift_grid_units, # origin shift
         labels      = labels,
+        external_origin = self.output_external_origin,
+
+
         out = f)
       self._print(f.getvalue())
     else: # map_data has not been shifted to (0, 0, 0).  Shift it and then write
@@ -1417,18 +1429,38 @@ class map_manager(map_reader, write_ccp4_map):
 
     # Deepcopy this object and then set map_data and origin_shift_grid_units
 
-    mm = deepcopy(self)
 
+    mm = map_manager(
+     file_name = None,
+     map_data = map_data,
+     unit_cell_grid = self.unit_cell_grid,
+     unit_cell_crystal_symmetry = self._unit_cell_crystal_symmetry,
+     origin_shift_grid_units = origin_shift_grid_units,
+     ncs_object = self._ncs_object.deep_copy() if self._ncs_object else None,
+     wrapping = False,
+     experiment_type = self._experiment_type,
+     scattering_table = self._scattering_table,
+     resolution = self._resolution,
+     log = self.log,)
+
+    mm._is_mask = self._is_mask
+    mm._is_dummy_map_manager = self._is_dummy_map_manager
     # Set things that are not necessarily the same as in self:
-    mm.log=self.log
-    mm.origin_shift_grid_units = origin_shift_grid_units  # specified above
-    mm.data = map_data  # using self.data or a deepcopy (specified above)
     mm._created_mask = created_mask  # using self._created_mask or a
-                                     #deepcopy (specified above)
-    if wrapping is not None:
-      mm.set_wrapping(wrapping)
+    mm.file_name = self.file_name
+    mm.program_name = self.program_name
+    mm.limitations = self.limitations
+    mm.labels = self.labels
 
-    if not mm.is_full_size():
+
+    if wrapping is not None:
+      desired_wrapping = wrapping
+    else:
+      desired_wrapping = self._wrapping
+
+    if mm.is_full_size():
+      mm.set_wrapping(desired_wrapping)
+    else: #
       mm.set_wrapping(False)
 
     # Set up _crystal_symmetry for the new object
@@ -1834,6 +1866,44 @@ class map_manager(map_reader, write_ccp4_map):
     #   map (shift of origin is opposite of shift applied)
     model.set_shift_cart(self.shift_cart())
 
+  def check_consistency(self, stop_on_errors = True, print_errors = True,
+        absolute_angle_tolerance = None,
+        absolute_length_tolerance = None,
+        shift_tol = None):
+    """
+
+    Used for overall consistency checks in map_model_manager
+    Note: the stop_on_errors, print_errors, and 3 tolerance kw are used in
+      map_model_manager when checking consistency there
+    """
+
+    if absolute_angle_tolerance is None:
+      absolute_angle_tolerance = 0.01
+    if absolute_length_tolerance is None:
+      absolute_length_tolerance = 0.01
+    if shift_tol is None:
+      shift_tol = 0.001
+
+    # Check crystal_symmetry, unit_cell_crystal_symmetry, shift_cart
+    # For now, only shift_cart and only ncs_object are relevant
+
+    ok = True
+    if self.ncs_object():
+      if (not self.is_compatible_ncs_object(self.ncs_object(),
+         tol = shift_tol)):
+        ok = False
+        text = "NCS object does not have same shift_cart as map_manager" +\
+          " %s vs %s" %(self.ncs_object().shift_cart(),
+           self.shift_cart())
+
+    if (not ok):
+      if print_errors:
+         print("** Mismatch in model object\n%s" %(text))
+      if stop_on_errors:
+        raise AssertionError(text)
+
+    return ok
+
   def is_compatible_ncs_object(self, ncs_object, tol = 0.001):
     '''
       ncs_object is compatible with this map_manager if shift_cart is
@@ -1856,7 +1926,7 @@ class map_manager(map_reader, write_ccp4_map):
     return ok
 
   def is_compatible_model(self, model,
-       require_match_unit_cell_crystal_symmetry=True,
+       require_match_unit_cell_crystal_symmetry = False,
         absolute_angle_tolerance = 0.01,
         absolute_length_tolerance = 0.01,
         shift_tol = 0.001):
@@ -1870,13 +1940,12 @@ class map_manager(map_reader, write_ccp4_map):
         2. model current symmetry does not match map original or current
         3. model has a shift_cart (shift applied) different than map shift_cart
 
-      NOTE: a True result does not mean that the model crystal_symmetry matches
-      the map crystal_symmetry.  It does mean that it is reasonable to set the
-      model crystal_symmetry to match the map ones.
-
       If require_match_unit_cell_crystal_symmetry is True, then they are
-      different if anything is different. If it is False, allow original
-       symmetries do not have to match
+      incompatible if anything is different.
+
+      If require_match_unit_cell_crystal_symmetry is False, original
+       symmetries do not have to match.  Model crystal_symmetry can match
+       the unit_cell_crystal_symmetry or crystal_symmetry of the map.
     '''
 
     ok=None
@@ -1913,6 +1982,8 @@ class map_manager(map_reader, write_ccp4_map):
     text_map_uc=str(map_uc).replace("\n"," ")
     text_map=str(map_sym).replace("\n"," ")
 
+    assert map_sym # map_sym should always should be there. model_sym could be missing
+
     if require_match_unit_cell_crystal_symmetry and map_uc and (
       not model_uc) and (
        not map_sym.is_similar_symmetry(map_uc,
@@ -1928,7 +1999,7 @@ class map_manager(map_reader, write_ccp4_map):
         "\n%s\n. Current map symmetry is: \n%s\n " %(
          text_map_uc,text_map)
 
-    elif  model_uc and map_uc and (
+    elif model_sym and model_uc and map_uc and (
         (not map_uc.is_similar_symmetry(map_sym,
         absolute_angle_tolerance = absolute_angle_tolerance,
         absolute_length_tolerance = absolute_length_tolerance,))
@@ -1944,13 +2015,13 @@ class map_manager(map_reader, write_ccp4_map):
         absolute_angle_tolerance = absolute_angle_tolerance,
         absolute_length_tolerance = absolute_length_tolerance,
          ) ) ):
-       ok=False# model and map_manager symmetries present and do not match
+       ok=False # model and map_manager uc present and some symmetries do not match
        text="Model original symmetry: \n%s\n and current symmetry :\n%s\n" %(
           text_model_uc,text_model)+\
           "do not match map unit_cell symmetry:"+\
          " \n%s\n and map current symmetry: \n%s\n symmetry" %(
            text_map_uc,text_map)
-    elif model_sym and map_uc and (not model_sym.is_similar_symmetry(map_uc,
+    elif map_uc and model_sym and (not model_sym.is_similar_symmetry(map_uc,
         absolute_angle_tolerance = absolute_angle_tolerance,
         absolute_length_tolerance = absolute_length_tolerance,
         )) and (not
@@ -1958,17 +2029,27 @@ class map_manager(map_reader, write_ccp4_map):
         absolute_angle_tolerance = absolute_angle_tolerance,
         absolute_length_tolerance = absolute_length_tolerance,
         )):
-       ok=False# model does not match either map symmetry
+       ok=False # model does not match either map symmetry
        text="Model current symmetry: \n%s\n" %(
           text_model)+\
           " does not match map unit_cell symmetry:"+\
            " \n%s\n or map current symmetry: \n%s\n" %(
            text_map_uc,text_map)
+    elif model_sym and (not model_uc) and (not map_uc) and (
+           not model_sym.is_similar_symmetry(map_sym,
+        absolute_angle_tolerance = absolute_angle_tolerance,
+        absolute_length_tolerance = absolute_length_tolerance,
+        )):
+       ok=False # model has no uc and model symmetry does not match map symmetry
+       text="Model current symmetry: \n%s\n" %(
+          text_model)+\
+          " does not match map symmetry: \n%s\n" %( text_map)
 
     elif require_match_unit_cell_crystal_symmetry and (
         not model_sym) and (not model_uc):
        ok=False # model does not have any symmetry so it does not match
        text="Model has no symmetry and cannot match any map"
+
     elif (not model_sym) and (not model_uc):
        ok=True # model does not have any symmetry so anything is ok
        text="Model has no symmetry and can match any map symmetry"
@@ -2260,7 +2341,7 @@ class map_manager(map_reader, write_ccp4_map):
 
     assert n_real or target_grid_spacing
 
-    if self.origin_shift_grid_units != (0,0,0):
+    if tuple(self.origin_shift_grid_units) != (0,0,0):
       return self._resample_on_different_grid_and_rebox(n_real = n_real,
        target_grid_spacing = target_grid_spacing)
 
@@ -2799,11 +2880,26 @@ def get_sites_cart_from_index(
       sites_frac.append(site_frac)
     sites_cart = crystal_symmetry.unit_cell().orthogonalize(sites_frac)
     return sites_cart
-def subtract_tuples_int(t1, t2):
-  return tuple(flex.int(t1)-flex.int(t2))
+
+def _round_tuple_int(t):
+  new_t = []
+  for x in t:
+    new_t.append(int(round(x)))
+  return new_t
 
 def add_tuples_int(t1, t2):
-  return tuple(flex.int(t1)+flex.int(t2))
+  try:
+    return tuple(flex.int(t1)+flex.int(t2))
+  except Exception as e: # not integers
+    return tuple(
+       flex.int(_round_tuple_int(t1)) + flex.int(_round_tuple_int(t2)))
+
+def subtract_tuples_int(t1, t2):
+  try:
+    return tuple(flex.int(t1)-flex.int(t2))
+  except Exception as e: # not integers
+    return tuple(
+       flex.int(_round_tuple_int(t1)) - flex.int(_round_tuple_int(t2)))
 
 def remove_site_with_most_neighbors(sites_cart):
   useful_norms_list = []

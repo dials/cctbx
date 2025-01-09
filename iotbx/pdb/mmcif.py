@@ -6,8 +6,10 @@ from libtbx import group_args
 from libtbx.utils import Sorry
 from libtbx.str_utils import format_value
 import iotbx.pdb
+import cctbx.crystal
 from iotbx.pdb import hierarchy
 from iotbx.pdb import hy36encode
+from iotbx.pdb import cryst1_interpretation
 from iotbx.pdb.experiment_type import experiment_type
 from iotbx.pdb.remark_3_interpretation import \
      refmac_range_to_phenix_string_selection, tls
@@ -44,6 +46,7 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
     label_asym_id = self._wrap_loop_if_needed(cif_block, "_atom_site.label_asym_id") # chain id
     auth_asym_id = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_asym_id")
     auth_segid = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_segid")
+    auth_break = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_break")
     if label_asym_id is None: label_asym_id = auth_asym_id
     if auth_asym_id is None: auth_asym_id = label_asym_id
     comp_id = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_comp_id")
@@ -53,7 +56,10 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
     seq_id = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_seq_id")
     if seq_id is None:
       seq_id = self._wrap_loop_if_needed(cif_block, "_atom_site.label_seq_id") # residue number
-    assert [atom_labels, alt_id, auth_asym_id, comp_id, entity_id, seq_id].count(None) == 0, "something is not present"
+    error_message = """something is not present - not enough information
+    to make a hierarcy out of this CIF file.
+    It could be because this is restraints or component cif or a corrupted model cif."""
+    assert [atom_labels, alt_id, auth_asym_id, comp_id, entity_id, seq_id].count(None) == 0, error_message
     assert type_symbol is not None
 
     atom_site_fp = cif_block.get('_atom_site.phenix_scat_dispersion_real')
@@ -129,6 +135,7 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
              i_atom > 0 and is_aa_or_rna_dna(comp_id[i_atom-1]))
          ): # insert chain breaks
         chain = hierarchy.chain(id=current_auth_asym_id)
+        is_first_in_chain = None
         model.append_chain(chain)
       else:
         assert current_auth_asym_id == last_auth_asym_id
@@ -155,6 +162,10 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
           resseq=resseq,
           icode=current_ins_code)
         chain.append_residue_group(residue_group)
+        if is_first_in_chain is None:
+          is_first_in_chain = True
+        else:
+          is_first_in_chain = False
         atom_groups = OrderedDict() # reset atom_groups cache
       # atom_group(s)
       # defined by resname and altloc id
@@ -192,6 +203,9 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
         atom.set_segid(auth_segid[i_atom][:4]+(4-len(auth_segid[i_atom]))*" ")
       else:
         atom.set_segid("    ")
+      if auth_break and (not is_first_in_chain) and auth_break[i_atom] == "1":
+        # insert break before this residue
+        residue_group.link_to_previous = False
       if group_PDB is not None and group_PDB[i_atom] == "HETATM":
         atom.hetero = True
       if formal_charge is not None:
@@ -352,11 +366,7 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
                cif_object=None,
                source_info=iotbx.pdb.Please_pass_string_or_None,
                lines=None,
-               pdb_id=None,
                raise_sorry_if_format_error=False):
-    if (pdb_id is not None):
-      assert file_name is None
-      file_name = iotbx.pdb.ent_path_local_mirror(pdb_id=pdb_id)
     if file_name is not None:
       reader = iotbx.cif.reader(file_path=file_name)
       self.cif_model = reader.model()
@@ -378,6 +388,8 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
     return "mmcif"
 
   def construct_hierarchy(self, set_atom_i_seq=True, sort_atoms=True):
+    if self.hierarchy is not None:
+      return self.hierarchy
     self.builder = pdb_hierarchy_builder(self.cif_block)
     self.hierarchy = self.builder.hierarchy
     if sort_atoms:
@@ -385,8 +397,13 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
       if (set_atom_i_seq):
         self.hierarchy.reset_atom_i_seqs()
       self.hierarchy.atoms_reset_serial()
-
     return self.hierarchy
+
+  def label_to_auth_asym_id_dictionary(self):
+    auth_asym = self.cif_block.get('_atom_site.auth_asym_id')
+    label_asym = self.cif_block.get('_atom_site.label_asym_id')
+    assert len(label_asym) == len(auth_asym)
+    return dict(zip(label_asym, auth_asym))
 
   def source_info(self):
     return self._source_info
@@ -416,9 +433,7 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
   def crystal_symmetry(self,
                        crystal_symmetry=None,
                        weak_symmetry=False):
-    if self.hierarchy is None:
-      self.construct_hierarchy()
-    self_symmetry = self.builder.crystal_symmetry
+    self_symmetry = self.crystal_symmetry_from_cryst1()
     if (crystal_symmetry is None):
       return self_symmetry
     if (self_symmetry is None):
@@ -430,7 +445,18 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
   def crystal_symmetry_from_cryst1(self):
     if self.hierarchy is None:
       self.construct_hierarchy()
-    return self.builder.crystal_symmetry
+    builder_cs = self.builder.crystal_symmetry
+    # check for dummy one
+    if (builder_cs.unit_cell() is not None and
+        cryst1_interpretation.dummy_unit_cell(
+            abc = builder_cs.unit_cell().parameters()[:3],
+            abg = builder_cs.unit_cell().parameters()[3:],
+            sg_symbol=str(builder_cs.space_group_info()))):
+      return cctbx.crystal.symmetry(
+        unit_cell=None,
+        space_group_info=None)
+    return builder_cs
+
 
   def extract_cryst1_z_columns(self):
     return self.cif_model.values()[0].get("_cell.Z_PDB")
@@ -462,7 +488,12 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
   def extract_header_year(self):
     yyyymmdd = self.deposition_date()
     if yyyymmdd is not None:
-      return int(yyyymmdd[:4])
+      try:
+        return int(yyyymmdd[:4])
+      except ValueError:
+        pass
+    return None
+
 
   def deposition_date(self, us_style=True):
     # date format: yyyy-mm-dd
@@ -499,7 +530,8 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
         return software_name
     elif software_classification is not None:
       i = flex.first_index(software_classification, 'refinement')
-      if i is not None and i >= 0 and software_name is not None and i < len(software_name):
+      if (i is not None) and (i >= 0) and (software_name is not None) and (
+           i < len(software_name)):
         return software_name[i]
 
   def resolution(self):

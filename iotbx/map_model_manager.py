@@ -109,11 +109,13 @@ class map_model_manager(object):
                wrapping         = None,  # Overwrite wrapping for all maps
                absolute_angle_tolerance = 0.01,  # angle tolerance for symmetry
                absolute_length_tolerance = 0.01,  # length tolerance
+               shift_tol = 0.001,  # shift_cart tolerance
                log              = None,
                stop_file = None,  # if present in working directory, stop
                make_cell_slightly_different_in_abc  = False,
                name = 'map_model_manager',
                verbose = False):
+
 
     # Checks
     if extra_model_list is None: extra_model_list = []
@@ -145,6 +147,9 @@ class map_model_manager(object):
     self._info = group_args(
       group_args_type = 'Information about this map_model_manager',
       )
+    self._absolute_angle_tolerance = absolute_angle_tolerance
+    self._absolute_length_tolerance = absolute_length_tolerance
+    self._shift_tol = shift_tol
 
     # If no map_manager now, do not do anything and make sure there
     #    was nothing else supplied except possibly a model
@@ -943,7 +948,8 @@ class map_model_manager(object):
 
     if model and \
       self.map_manager() and (
-         not self.map_manager().is_compatible_model(model)):
+         not self.map_manager().is_compatible_model(model,
+          require_match_unit_cell_crystal_symmetry=True)):
       # needs shifting
       self.shift_any_model_to_match(model,
          set_unit_cell_crystal_symmetry = True)
@@ -1012,6 +1018,8 @@ class map_model_manager(object):
      file_name,
      model_id = None,
      model = None,
+     data_manager = None,
+     format = None,
      ):
 
     if not model:
@@ -1024,10 +1032,12 @@ class map_model_manager(object):
       self._print ("Need file name to write model")
     else:
       # Write out model
-
-      f = open(file_name, 'w')
-      print(model.model_as_pdb(), file = f)
-      f.close()
+      if not data_manager:
+        from iotbx.data_manager import DataManager
+        data_manager = DataManager()
+        data_manager.set_overwrite(True)
+      file_name = data_manager.write_model_file(model,
+       file_name, format = format)
       self._print("Wrote model with %s residues to %s" %(
          model.get_hierarchy().overall_counts().n_residues,
          file_name))
@@ -1175,7 +1185,6 @@ class map_model_manager(object):
     if extract_box and model: # make sure everything is deep_copy
       model = model.deep_copy()
 
-
     if soft_mask_around_edges: # make the cushion bigger
       pass # Here we fix the bounds based on what is requested
 
@@ -1195,7 +1204,8 @@ class map_model_manager(object):
     # Now box is a copy of map_manager and model that is boxed
 
     # Now apply boxing to other maps and models and then insert them into
-    #  either this map_model_manager object, replacing what is there (extract_box=False)
+    #  either this map_model_manager object, replacing what is there
+    #  (extract_box=False)
     #  or create and return a new map_model_manager object (extract_box=True)
     return self._finish_boxing(box = box, model_info = model_info,
       map_info = map_info,
@@ -2269,10 +2279,10 @@ class map_model_manager(object):
       for mmm in box_info.mmm_list:
         i += 1
         print("Writing files for model and map: %s " %(i), file=self.log)
-        model_file = "model_%s.pdb" %(i)
+        model_file = "model_%s.pdb" %(i) # PDB OK
         map_file = "map_%s.ccp4" %(i)
-        dm.write_model_file(mmm.model(), model_file)
-        dm.write_real_map_file(mmm.map_manager(), map_file)
+        model_file = dm.write_model_file(mmm.model(), model_file)
+        map_file = dm.write_real_map_file(mmm.map_manager(), map_file)
     return box_info
 
   # Methods for masking maps ( creating masks and applying masks to maps)
@@ -4071,7 +4081,7 @@ class map_model_manager(object):
                       [0.15,0], [0.15,5],
              ]
 
-    from cctbx.development.create_models_or_maps import generate_model, \
+    from cctbx.development.create_models_or_maps import \
        generate_map_coefficients
 
     target_map_coeffs = self.get_map_manager_by_id(
@@ -4412,7 +4422,7 @@ class map_model_manager(object):
 
     kw = self.set_map_id_lists(kw)
 
-    print ("Running external map sharpening ", file = self.log)
+    print ("\nRunning external map sharpening ", file = self.log)
 
     kw['map_id_2'] = map_id_external_map
     kw['is_external_based'] = True
@@ -4565,6 +4575,7 @@ class map_model_manager(object):
       coordinate_shift_to_apply_before_tlso = None,
       sharpen_all_maps = False,
       remove_overall_anisotropy = True,
+      save_model_map = False,
     ):
     '''
      Scale map_id with scale factors identified from map_id vs model
@@ -4648,6 +4659,7 @@ class map_model_manager(object):
     del kw['optimize_with_model']  # REQUIRED
     del kw['find_tls_from_model']  # REQUIRED
     del kw['overall_sharpen_before_and_after_local']  # REQUIRED
+    del kw['save_model_map']  # REQUIRED
 
 
     # Make a copy of this map_model manager so we can modify it without
@@ -4741,6 +4753,15 @@ class map_model_manager(object):
       working_mmm._sharpen_map(**kw)
 
     # And set this map_manager
+    if save_model_map:
+      mm = working_mmm.get_map_manager_by_id(map_id_model_map)
+      if mm:
+        print("Copying map '%s' in map_manager '%s' to '%s'" %(
+          map_id_model_map,working_mmm.name,self.name),
+          file = self.log)
+        self.add_map_manager_by_id(
+          map_manager = working_mmm.get_map_manager_by_id(map_id_model_map),
+          map_id = map_id_model_map)
     for id in kw['map_id_scaled_list']:
       if working_mmm.get_map_manager_by_id(id):
         print("Copying map '%s' in map_manager '%s' to '%s'" %(
@@ -5019,7 +5040,6 @@ class map_model_manager(object):
         len(direction_vectors)), file = self.log)
     else:
       print("Estimating scale factors ", file = self.log)
-
     # Analyze spectrum in map_id (will apply it to map_id_to_be_scaled)
     scaling_group_info = working_mmm._get_weights_in_shells(n_bins,
         d_min,
@@ -6264,7 +6284,7 @@ class map_model_manager(object):
              getattr(scaling_group_info.overall_si,key))
 
 
-    if scaling_group_info_list:
+    if scaling_group_info_list and average_scaling_group_info.scaling_info_list:
       for key in ('target_scale_factors','cc_list','rms_fo_list'):
         for si in average_scaling_group_info.scaling_info_list:
           setattr(si,key, getattr(si,key)/max(1,n_used))
@@ -7604,7 +7624,145 @@ class map_model_manager(object):
       found_number_of_samples_with_ncs), file = self.log)
     return all_results
 
+  def local_resolution_map(self,
+      map_id_1 = 'map_manager_1',
+      map_id_2 = 'map_manager_2',
+      d_min = None,
+      n_bins = 20,
+      fsc_cutoff = 0.143,
+      smoothing_radius = None,
+      smoothing_radius_ratio = 1,
+      smooth_at_end = True):
 
+    """
+     Calculate local resolution map by finding resolution where local
+      map correlation is fsc_cutoff at each point in the map.
+     Method:  calculate local map correlation in resolution shells,
+       at each point in map find the resolution where this local map
+       correlation drops below fsc_cutoff.
+
+     parameter: map_id_1:  ID of one half-map
+     parameter: map_id_2:  ID of other half-map
+     parameter: d_min: Finest resolution at which to calculate correlations
+     parameter: n_bins: Number of resolution bins
+     parameter: fsc_cutoff : value of correlation corresponding to
+                             an estimated average map correlation to true map
+                             of 0.5 (normally 0.143 is used)
+     parameter: smoothing_radius:  radius for local correlation calculation
+     parameter: smoothing_radius_ratio:  Ratio of smoothing_radius to map
+                                         resolution (NOTE: to map
+                                         resolution as specified in
+                                         self.resolution, not to d_min).
+                                         Used if smoothing_radius is None.
+     parameter: smooth_at_end: smooth final local resolution map
+    """
+
+    from cctbx.maptbx.segment_and_split_map import get_smoothed_cc_map
+    from cctbx.maptbx.segment_and_split_map import smooth_one_map
+
+    hm1 = self.get_map_manager_by_id(map_id_1)
+    hm2 = self.get_map_manager_by_id(map_id_2)
+    assert hm1 and hm2
+    resolution = self.resolution()
+    if d_min is None:
+      d_min = self._get_d_min_from_resolution(resolution)
+    if smoothing_radius is None:
+      smoothing_radius = smoothing_radius_ratio * self.resolution()
+
+    from cctbx.maptbx.segment_and_split_map import get_f_phases_from_map
+    from cctbx.development.create_models_or_maps import get_map_from_map_coeffs
+
+    crystal_symmetry = hm1.crystal_symmetry()
+    mc_list = []
+    for hm in [hm1, hm2]:
+      mc, dummy = get_f_phases_from_map(map_data = hm.map_data(),
+         crystal_symmetry = crystal_symmetry,
+         d_min = d_min,
+         return_as_map_coeffs = True,
+         out = null_out())
+      mc_list.append(mc)
+
+    base_map_coeffs = mc_list[0]
+    (d_max, d_min) = base_map_coeffs.d_max_min()
+    n_bins = base_map_coeffs.safe_setup_binner(
+        n_bins = n_bins, d_max = d_max, d_min = d_min)
+    dsd = base_map_coeffs.d_spacings().data()
+    all_bins = list(base_map_coeffs.binner().range_used())
+
+    dsd = base_map_coeffs.d_spacings().data()
+
+    just_above_dmin = hm1.map_data().deep_copy()
+    just_above_dmin *= 0  # zero map
+    just_above_cc = just_above_dmin.deep_copy()
+    just_below_dmin = just_above_dmin.deep_copy()
+    just_below_cc = just_above_dmin.deep_copy()
+    sel       = base_map_coeffs.binner().selection(all_bins[0])
+    dd         = dsd.select(sel)
+    local_d_mean     = dd.min_max_mean().mean
+    just_above_dmin += local_d_mean # all at high end
+    just_below_dmin += d_min # all at low end
+    m = hm1.deep_copy()
+
+    n_real = hm1.map_data().all()
+    for i_bin in all_bins:
+      sel       = base_map_coeffs.binner().selection(i_bin)
+      dd         = dsd.select(sel)
+      local_d_mean     = dd.min_max_mean().mean
+      map_data_list = []
+      for mc in mc_list:
+        mc_sel = mc.select(sel)
+        map_data_list.append(get_map_from_map_coeffs(
+           map_coeffs = mc_sel,
+           crystal_symmetry = crystal_symmetry,
+           n_real = n_real,
+           apply_sigma_scaling = False))
+      map_data_1, map_data_2 = map_data_list
+
+      local_cc_map = get_smoothed_cc_map(
+        map_data_1, map_data_2,
+        crystal_symmetry = crystal_symmetry,
+         weighting_radius = smoothing_radius)
+      ss = (local_cc_map.as_1d() >= fsc_cutoff) & (
+         just_above_dmin.as_1d() > local_d_mean)
+      just_above_dmin.as_1d().set_selected(ss, local_d_mean)
+      just_above_cc.as_1d().set_selected(ss, local_cc_map.as_1d())
+
+      ss = (local_cc_map.as_1d() < fsc_cutoff) & (
+         just_below_dmin.as_1d() < local_d_mean)
+      just_below_dmin.as_1d().set_selected(ss, local_d_mean)
+      just_below_cc.as_1d().set_selected(ss, local_cc_map.as_1d())
+
+    # All set
+
+    #  just_above_cc = smallest resolution (d-spacing) where cc >= fsc_cutoff
+    # just_below_cc = largest resolution where cc < fsc_cutoff
+
+    delta = just_above_cc - just_below_cc
+    ss_neg = (delta.as_1d() <= 1.e-10)
+                              # smallest d-spacing with cc >= fsc_cutoff is
+                              # less than largest d_spacing with cc < fsc_cutoff
+                              # happens if cc vs resolution is noisy
+
+    delta.as_1d().set_selected(delta.as_1d() < 1.e-10, 1.e-10)
+    frac = fsc_cutoff - just_below_cc
+    w1 = frac / delta
+    w1.as_1d().set_selected(w1.as_1d() < 0, 0)
+    w1.as_1d().set_selected(w1.as_1d() > 1, 1)
+
+    w1.as_1d().set_selected(ss_neg, 0.5) # just average if overlap
+    w2 = 1 - w1
+    map_data = (w1 * just_below_dmin) + (w2 * just_above_dmin)
+
+    if smooth_at_end:
+      # Finally, smooth the local resolution map
+      map_data = smooth_one_map(map_data,
+        crystal_symmetry = crystal_symmetry,
+        smoothing_radius = smoothing_radius,
+        method='exp')
+
+    m.set_map_data(map_data)
+
+    return m
 
 
   def map_map_fsc(self,
@@ -7737,7 +7895,8 @@ class map_model_manager(object):
      "There is no map with id='%s' available for density_at_model_sites" %(
          map_id))
 
-    assert self.map_manager().is_compatible_model(model) # model must match
+    assert self.map_manager().is_compatible_model(model,
+       require_match_unit_cell_crystal_symmetry=True) # model must match
 
     if selection_string:
       sel = model.selection(selection_string)
@@ -7781,7 +7940,8 @@ class map_model_manager(object):
          map_id))
 
 
-    if not self.map_manager().is_compatible_model(model): # model must match
+    if not self.map_manager().is_compatible_model(model,
+        require_match_unit_cell_crystal_symmetry=True): # model must match
       print("Setting model crystal symmetry to match map", file = self.log)
       model = model.deep_copy()
       model.set_crystal_symmetry(self.map_manager().crystal_symmetry())
@@ -8017,17 +8177,15 @@ class map_model_manager(object):
   def model_from_hierarchy(self,
     hierarchy,
     return_as_model = False,
-    model_id = 'model_from_hierarchy'):
+    model_id = 'model_from_hierarchy',
+    use_pdb_input = False):
     '''
      Convenience method to convert a hierarchy into a model, where the
      model has symmetry and shift cart matching this manager
     '''
+    model = hierarchy.as_model_manager(
+        crystal_symmetry = self.crystal_symmetry())
 
-    from mmtbx.model import manager as model_manager
-    model = model_manager(
-      model_input = hierarchy.as_pdb_input(),
-      crystal_symmetry = self.crystal_symmetry(),
-      log = null_out())
     self.set_model_symmetries_and_shift_cart_to_match_map(model)
     if return_as_model:
       return model
@@ -8117,7 +8275,7 @@ class map_model_manager(object):
        Typical use:
          box_mmm = mmm.extract_all_maps_around_model()
          box_mmm.remove_origin_shift_and_unit_cell_crystal_symmetry()
-         data_manager.write_model_file(box_mmm.model(), model_file)
+         model_file = data_manager.write_model_file(box_mmm.model(), model_file)
          data_manager.write_real_map_file(box_mmm.map_manager(), map_file)
        Now model_file and map_file have no origin shift and the model CRYST1
        matches the crystal_symmetry and map_file unit_cell_crystal_symmetry of
@@ -8477,7 +8635,8 @@ class map_model_manager(object):
         log = null_out())
 
     if have_map_manager:  #  make sure model matches
-      if not self.map_manager().is_compatible_model(model):
+      if not self.map_manager().is_compatible_model(model,
+          require_match_unit_cell_crystal_symmetry=True):
          self.shift_any_model_to_match(model,
          set_unit_cell_crystal_symmetry = True)
 
@@ -8576,6 +8735,67 @@ class map_model_manager(object):
     # And now models to match
     for model in self.models():
       self.get_any_map_manager().shift_model_to_match_map(model)
+
+  def check_consistency(self, stop_on_errors = True, print_errors = True,
+        absolute_angle_tolerance = None,
+        absolute_length_tolerance = None,
+        shift_tol = None):
+    ''' Check that all component objects have the same crystal_symmetry,
+      unit_cell_crystal_symmetry, and shift_cart (if these are part of the
+      objects).'''
+
+    if absolute_angle_tolerance is None:
+      absolute_angle_tolerance = self._absolute_angle_tolerance
+    if absolute_length_tolerance is None:
+      absolute_length_tolerance = self._absolute_length_tolerance
+    if shift_tol is None:
+      shift_tol = self._shift_tol
+
+    object_list = self.models() + self.map_managers()
+    if self.ncs_object():
+      object_list.append(self.ncs_object())
+
+    object_list_with_self = object_list + [self]
+    # Check for consistency among all objects and also include self here
+
+    ok = all_objects_have_same_symmetry_and_shift_cart(object_list_with_self,
+        absolute_angle_tolerance = absolute_angle_tolerance,
+        absolute_length_tolerance = absolute_length_tolerance,
+        shift_tol = shift_tol,
+        print_errors = False)
+
+    target = self.map_manager()
+    if target:
+      for mm in self.map_managers():
+        if (not mm.is_similar(target)):
+          ok = False
+          text = "Map managers %s and %s are not compatible" %(mm, target)
+
+    if (not ok):
+      text = "Consistency check failure in map_model_manager '%s'" %(
+           self.name)
+      if print_errors:
+        self._print(text)
+        all_objects_have_same_symmetry_and_shift_cart(object_list_with_self,
+          absolute_angle_tolerance = absolute_angle_tolerance,
+          absolute_length_tolerance = absolute_length_tolerance,
+          shift_tol = shift_tol,
+          print_errors = True)
+      if (stop_on_errors):
+        raise AssertionError(text)
+
+    # Check for consistency inside each object that has a check_consistency()
+    #   method
+
+    for object in object_list:
+      if hasattr(object, 'check_consistency'):
+        object.check_consistency(stop_on_errors = stop_on_errors,
+          print_errors = print_errors,
+          absolute_angle_tolerance = absolute_angle_tolerance,
+          absolute_length_tolerance = absolute_length_tolerance,
+          shift_tol = shift_tol)
+
+    return ok
 
   def model_building(self,
      nproc = None,
@@ -8753,17 +8973,19 @@ class match_map_model_ncs(object):
       self._map_manager.write_map(file_name = file_name)
 
   def write_model(self,
-     file_name = None):
+     file_name = None, data_manager = None, format = None):
     if not self._model:
       self._print ("No model to write out")
     elif not file_name:
       self._print ("Need file name to write model")
     else:
       # Write out model
-
-      f = open(file_name, 'w')
-      print(self._model.model_as_pdb(), file = f)
-      f.close()
+      if not data_manager:
+        from iotbx.data_manager import DataManager
+        data_manager = DataManager()
+        data_manager.set_overwrite(True)
+      file_name = data_manager.write_model_file(self._model, file_name,
+        format = format)
       self._print("Wrote model with %s residues to %s" %(
          self._model.get_hierarchy().overall_counts().n_residues,
          file_name))
@@ -9062,6 +9284,70 @@ class match_map_model_ncs(object):
     return mam
 
 #   Misc methods
+
+def all_objects_have_same_symmetry_and_shift_cart(object_list,
+        absolute_angle_tolerance = 0.01,
+        absolute_length_tolerance = 0.01,
+        shift_tol = 0.001,
+        print_errors = False):
+
+  '''  Return True if all the objects have same crystal_symmetry(),
+    unit_cell_crystal_symmetry(), and shift_cart() if attributes are present.
+
+    Note: For model, map_model_manager, and map_manager, all of these
+    attributes are present; for ncs_object, only shift_cart'''
+
+  attribute_list = [
+     'crystal_symmetry',
+     'unit_cell_crystal_symmetry',
+     'shift_cart']
+
+  for key in attribute_list:
+
+    value_list = []  # all the values must match
+    for object in object_list:
+      if hasattr(object, key):  # only include values for attributes present
+        value_list.append(getattr(object,key)())
+
+    if None in value_list:  # all must be None or all must be not None
+      if value_list.count(None) != len(value_list):
+        return False  # values do not all match
+
+    target = value_list[0]
+    for other in value_list[1:]:
+      if key in ['crystal_symmetry','unit_cell_crystal_symmetry']:
+        if (not target.is_similar_symmetry(other,
+          absolute_angle_tolerance = absolute_angle_tolerance,
+          absolute_length_tolerance = absolute_length_tolerance,
+            )):
+          if print_errors:
+            print("\nThe attribute '%s' does not match between \n%s and \n%s" %(
+              key, target, other))
+          return False
+
+      elif key in ['shift_cart']:
+        if (not is_same_shift_cart(target, other, tol = shift_tol)):
+          if print_errors:
+            print("\nThe attribute '%s' does not match between \n%s and \n%s" %(
+              key, target, other))
+          return False
+      else:
+        raise AssertionError(
+         "Missing key in all_objects_have_same_symmetry_and_shift_cart")
+  return True
+
+def is_same_shift_cart(shift, other_shift, tol = 0.001):
+    ''' compare shift to other_shift'''
+
+    this_shift=flex.double(shift)
+    other_shift=flex.double(other_shift)
+    delta=this_shift - other_shift
+    mmm=delta.min_max_mean()
+    if mmm.min < -tol or mmm.max > tol: # shifts do not match
+      return False
+    else:
+      return True
+
 
 def convert_tlso_group_info_to_lists(tlso_group_info):
       #tlso_group_info.tlso_selection_list,
@@ -9516,7 +9802,6 @@ def set_nearby_empty_values(
   Set values within radii of xyz_list points to value if not already
       set
   '''
-  from cctbx.maptbx import grid_indices_around_sites
   gias = maptbx.grid_indices_around_sites(
         unit_cell=map_manager.crystal_symmetry().unit_cell(),
         fft_n_real=map_manager.map_data().all(),
@@ -9547,7 +9832,6 @@ def get_split_maps_and_models(
         masked_value = masked_value,
   '''
 
-  from iotbx.map_model_manager import map_model_manager as MapModelManager
   if hasattr(box_info,'tlso_group_info') and box_info.tlso_group_info:
     # cannot pickle tlso values
     box_info.tlso_group_info.tlso_list = None
@@ -9566,24 +9850,53 @@ def get_split_maps_and_models(
   else:
     lower_bounds_list = box_info.lower_bounds_list
     upper_bounds_list = box_info.upper_bounds_list
+
+  # Make a copy of model that does not have grm and use it for
+  #   masking outside model if necessary
+  # Select original model atoms to use before doing boxing
+
+  original_model = map_model_manager.model()
+  if original_model and box_info.mask_around_unselected_atoms:
+    model_no_grm = map_model_manager.model().deep_copy()
+    model_no_grm.unset_restraints_manager()
+  else:
+    model_no_grm = None
+
   for lower_bounds, upper_bounds, selection in zip(
        lower_bounds_list,
        upper_bounds_list,
        box_info.selection_list,):
+    if original_model:
+      working_model = original_model.select(selection)
+      # Just use the good part here, restore just below
+      map_model_manager.set_model(working_model)
+
+      if model_no_grm:
+        # Add in the model_no_grm to carry along and shift
+        map_model_manager.add_model_by_id(
+         model_id='model_no_grm', model = model_no_grm)
 
     mmm=map_model_manager.extract_all_maps_with_bounds(
      lower_bounds, upper_bounds,
      model_can_be_outside_bounds = True)
 
-    if mmm.model():
-      model_to_keep = mmm.model().select(selection)
-    else:
-      model_to_keep = None
-    if box_info.mask_around_unselected_atoms:  # mask everything we didn't keep
+    shifted_model_no_grm_not_used = None
+    if original_model:
+      # Restore original model
+      map_model_manager.set_model(original_model)
+
+      if model_no_grm:
+        # Collect and remove the shifted model_no_grm
+        shifted_model_no_grm = mmm.get_model_by_id(model_id='model_no_grm')
+        map_model_manager.remove_model_by_id(model_id='model_no_grm')
+        mmm.remove_model_by_id(model_id='model_no_grm')
+        shifted_model_no_grm_not_used = shifted_model_no_grm.select(~selection)
+
+    if shifted_model_no_grm_not_used and \
+       box_info.mask_around_unselected_atoms:  # mask everything we didn't keep
       # NOTE: only applies mask to map_manager, not any other map_managers
-      remaining_model=mmm.model().select(~selection)
       nnn=mmm.deep_copy()
-      nnn.set_model(remaining_model)
+      nnn.set_model(shifted_model_no_grm_not_used)
       nnn.remove_model_outside_map(boundary=box_info.mask_radius)
       if nnn.model().get_sites_cart().size() > 0: # do something
         nnn.create_mask_around_atoms(
@@ -9594,11 +9907,9 @@ def get_split_maps_and_models(
         mmm.map_manager().map_data().set_selected(s,box_info.masked_value)
     elif box_info.mask_all_maps_around_edges:  # mask around edges
       mmm.mask_all_maps_around_edges()
-
-    if model_to_keep:
-      mmm.set_model(model_to_keep)
     mmm_list.append(mmm)
   box_info.mmm_list = mmm_list
+
   return box_info
 
 def get_selections_and_boxes_to_split_model(

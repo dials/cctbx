@@ -48,12 +48,12 @@ class restraint(atoms):
     atom_info_list = []
     for atom_inf in self.atoms_info:
       atom_slots_list = [s for s in atom_inf.__slots__]
-      atom_slots_as_dict = ({s: getattr(atom_inf, s) for s in atom_slots_list if s != 'xyz' })
+      atom_slots_as_dict = ({s: getattr(atom_inf, s) for s in atom_slots_list })
       atom_info_list.append(atom_slots_as_dict)
 
     serializable_slots = [s for s in self.__slots__ if s != 'markup' and s != 'atoms_info' and hasattr(self, s)]
     slots_as_dict = ({s: getattr(self, s) for s in serializable_slots})
-    slots_as_dict["xyz"] = slots_as_dict["xyz"].elems
+    #slots_as_dict["xyz"] = slots_as_dict["xyz"].elems
     if callable(getattr(self, "outlier_type", None)):
       slots_as_dict["outlier_type"] = self.outlier_type()
     slots_as_dict["atoms_info"] = atom_info_list
@@ -417,6 +417,10 @@ class bonds(restraint_validation):
        rt_mx) = restraint_info
       bond_atoms = get_atoms_info(pdb_atoms, iselection=i_seqs,
         use_segids_in_place_of_chainids=use_segids_in_place_of_chainids)
+      model_id = bond_atoms[0].model_id
+      if model_id not in self.n_outliers_by_model:
+        # initialize dicts.  covers cases where some structures don't have certain outliers
+        self.n_outliers_by_model[model_id] = 0
       if sym_op_j:
         import scitbx
         m3 = rt_mx.r().as_double()
@@ -439,11 +443,7 @@ class bonds(restraint_validation):
         xyz=get_mean_xyz(bond_atoms))
       if (outlier.score > sigma_cutoff):
         outliers.append(outlier)
-        model_id = bond_atoms[0].model_id
-        if model_id not in self.n_outliers_by_model:
-          self.n_outliers_by_model[model_id] = 1
-        else:
-          self.n_outliers_by_model[model_id] += 1
+        self.n_outliers_by_model[model_id] += 1
       elif (not outliers_only):
         outlier.outlier=False
         outliers.append(outlier)
@@ -479,6 +479,10 @@ class angles(restraint_validation):
       use_segids_in_place_of_chainids=use_segids_in_place_of_chainids)
     outliers = []
     for proxy, proxy_atoms in sorted :
+      model_id = proxy_atoms[0].model_id
+      if model_id not in self.n_outliers_by_model:
+        # initialize dicts.  covers cases where some structures don't have certain outliers
+        self.n_outliers_by_model[model_id] = 0
       restraint = cctbx.geometry_restraints.angle(
         unit_cell=unit_cell,
         proxy=proxy,
@@ -494,11 +498,7 @@ class angles(restraint_validation):
         xyz=proxy_atoms[1].xyz)
       if (outlier.score > sigma_cutoff):
         outliers.append(outlier)
-        model_id = proxy_atoms[0].model_id
-        if model_id not in self.n_outliers_by_model:
-          self.n_outliers_by_model[model_id] = 1
-        else:
-          self.n_outliers_by_model[model_id] += 1
+        self.n_outliers_by_model[model_id] += 1
       elif (not outliers_only):
         outlier.outlier=False
         outliers.append(outlier)
@@ -519,6 +519,9 @@ class dihedrals(restraint_validation):
       pdb_atoms=pdb_atoms)
     outliers = []
     for proxy, proxy_atoms in sorted :
+      model_id = proxy_atoms[0].model_id
+      if model_id not in self.n_outliers_by_model:
+        self.n_outliers_by_model[model_id] = 0
       restraint = cctbx.geometry_restraints.dihedral(
         unit_cell=unit_cell,
         proxy=proxy,
@@ -534,11 +537,7 @@ class dihedrals(restraint_validation):
         outlier=True)
       if (outlier.score > sigma_cutoff):
         outliers.append(outlier)
-        model_id = proxy_atoms[0].model_id
-        if model_id not in self.n_outliers_by_model:
-          self.n_outliers_by_model[model_id] = 1
-        else:
-          self.n_outliers_by_model[model_id] += 1
+        self.n_outliers_by_model[model_id] += 1
       elif (not outliers_only):
         outlier.outlier=False
         outliers.append(outlier)
@@ -589,6 +588,7 @@ class chiralities(restraint_validation):
         self.n_pseudochiral_by_model[model_id] = 0
         self.n_tetrahedral_by_model[model_id] = 0
         self.n_chiral_by_model[model_id] = 0
+        self.n_outliers_by_model[model_id] = 0
       if not outlier.is_pseudochiral():
         self.n_chiral_by_model[model_id] += 1
       if (outlier.score > sigma_cutoff):
@@ -666,6 +666,9 @@ class planarities(restraint_validation):
         outliers.append(outlier)
         model_id = plane_atoms_[0].model_id
         if model_id not in self.n_outliers_by_model:
+          # initialize dicts.  covers cases where some structures don't have certain outliers
+          self.n_outliers_by_model[model_id] = 0
+        if model_id not in self.n_outliers_by_model:
           self.n_outliers_by_model[model_id] = 1
         else:
           self.n_outliers_by_model[model_id] += 1
@@ -694,7 +697,8 @@ def get_mean_xyz(atoms):
   sum = col(atoms[0].xyz)
   for atom in atoms[1:] :
     sum += col(atom.xyz)
-  return sum / len(atoms)
+  mean = sum / len(atoms)
+  return mean.elems
 
 def _get_sorted(O,
         unit_cell,

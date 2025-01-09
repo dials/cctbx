@@ -1,4 +1,3 @@
-
 # TODO reduce to one outlier per residue
 # CDL on by default?
 
@@ -20,7 +19,7 @@ import json
 
 # individual validation results
 class mp_bond(atoms):
-  __slots__ = atoms.__slots__ + ["sigma", "delta", "target", "distance_value"]
+  __slots__ = atoms.__slots__ + ["sigma", "delta", "target", "distance_value", "macromolecule_type"]
 
   @staticmethod
   def header():
@@ -55,7 +54,7 @@ class mp_bond(atoms):
              self.score ]
 
 class mp_angle(atoms):
-  __slots__ = atoms.__slots__ + ["sigma", "delta", "target", "angle_value"]
+  __slots__ = atoms.__slots__ + ["sigma", "delta", "target", "angle_value", "macromolecule_type"]
 
   @staticmethod
   def header():
@@ -95,7 +94,7 @@ class mp_angle(atoms):
 # analysis objects
 class mp_bonds(validation):
   output_header = "#residue:atom_1:atom_2:num_sigmas"
-  label = "Backbone bond lenths"
+  label = "Bond lengths"
   gui_list_headers = ["Residue", "Atom 1", "Atom 2", "Sigmas"]
   gui_formats = ["%s", "%s", "%s", "%.2f"]
   wx_column_widths = [160] * 4
@@ -104,6 +103,23 @@ class mp_bonds(validation):
     validation.__init__(self)
     self.n_outliers_large_by_model = {}
     self.n_outliers_small_by_model = {}
+    self.n_outliers_protein_by_model = {}
+    self.n_outliers_na_by_model = {}
+    self.n_outliers_other_by_model = {}
+    self.n_total_protein_by_model = {}
+    self.n_total_na_by_model = {}
+    self.n_total_other_by_model = {}
+    for m in pdb_hierarchy.models():
+      self.n_total_by_model[m.id] = 0
+      self.n_outliers_by_model[m.id] = 0
+      self.n_outliers_small_by_model[m.id] = 0
+      self.n_outliers_large_by_model[m.id] = 0
+      self.n_total_protein_by_model[m.id] = 0
+      self.n_outliers_protein_by_model[m.id] = 0
+      self.n_total_na_by_model[m.id] = 0
+      self.n_outliers_na_by_model[m.id] = 0
+      self.n_total_other_by_model[m.id] = 0
+      self.n_outliers_other_by_model[m.id] = 0
     cutoff = 4
     sites_cart = pdb_atoms.extract_xyz()
     flags = geometry_restraints.flags.flags(default=True)
@@ -119,19 +135,28 @@ class mp_bonds(validation):
       atom2 = pdb_atoms[proxy.i_seqs[1]].name
       labels = pdb_atoms[proxy.i_seqs[0]].fetch_labels()
       model_id = labels.model_id
-      if model_id not in self.n_total_by_model.keys():
-        self.n_total_by_model[model_id] = 0
-        self.n_outliers_by_model[model_id] = 0
-        self.n_outliers_small_by_model[model_id] = 0
-        self.n_outliers_large_by_model[model_id] = 0
       self.n_total += 1
+      #iotbx.pdb.common_residue_names_get_class
       self.n_total_by_model[model_id] += 1
+      mm_type = utils.get_mmtype_from_resname(pdb_atoms[proxy.i_seqs[0]].parent().resname)
+      if mm_type=="PROTEIN":
+        self.n_total_protein_by_model[model_id] += 1
+      elif mm_type=="NA":
+        self.n_total_na_by_model[model_id] += 1
+      else:
+        self.n_total_other_by_model[model_id] += 1
       sigma = sqrt(1 / restraint.weight)
       num_sigmas = - restraint.delta / sigma
       is_outlier = (abs(num_sigmas) >= cutoff)
       if is_outlier:
         self.n_outliers += 1
         self.n_outliers_by_model[model_id] += 1
+        if mm_type == "PROTEIN":
+          self.n_outliers_protein_by_model[model_id] += 1
+        elif mm_type == "NA":
+          self.n_outliers_na_by_model[model_id] += 1
+        else:
+          self.n_outliers_other_by_model[model_id] += 1
         if num_sigmas < 0:
           self.n_outliers_small_by_model[model_id] += 1
         else:
@@ -145,7 +170,8 @@ class mp_bonds(validation):
           score=num_sigmas,
           delta=restraint.delta,
           xyz=flex.vec3_double([pdb_atoms[proxy.i_seqs[0]].xyz, pdb_atoms[proxy.i_seqs[1]].xyz]).mean(),
-          outlier=is_outlier))
+          outlier=is_outlier,
+          macromolecule_type=mm_type))
 
   def get_result_class(self) : return mp_bond
 
@@ -168,13 +194,19 @@ class mp_bonds(validation):
       summary_results[mod_id] = {"num_outliers": self.n_outliers_by_model[mod_id],
                                  "num_total": self.n_total_by_model[mod_id],
                                  "num_outliers_too_small": self.n_outliers_small_by_model[mod_id],
-                                 "num_outliers_too_large": self.n_outliers_large_by_model[mod_id]}
+                                 "num_outliers_too_large": self.n_outliers_large_by_model[mod_id],
+                                 "num_total_protein": self.n_total_protein_by_model[mod_id],
+                                 "num_outliers_protein": self.n_outliers_protein_by_model[mod_id],
+                                 "num_total_na": self.n_total_na_by_model[mod_id],
+                                 "num_outliers_na": self.n_outliers_na_by_model[mod_id],
+                                 "num_total_other": self.n_total_other_by_model[mod_id],
+                                 "num_outliers_other": self.n_outliers_other_by_model[mod_id]}
     data['summary_results'] = summary_results
     return json.dumps(data, indent=2)
 
   def show_summary(self, out=sys.stdout, prefix=""):
     if (self.n_total == 0):
-      print(prefix + "No atoms found.", file=out)
+      print(prefix + "No bond lengths found.", file=out)
     elif (self.n_outliers == 0):
       print(prefix + "All bonds within 4.0 sigma of ideal values.", file=out)
     else :
@@ -183,7 +215,7 @@ class mp_bonds(validation):
 
 class mp_angles(validation):
   output_header = "#residue:atom_1:atom_2:atom_3:num_sigmas"
-  label = "Backbone bond angles"
+  label = "Bond angles"
   gui_list_headers = ["Residue", "Atom 1", "Atom 2", "Atom 3", "Sigmas"]
   gui_formats = ["%s", "%s", "%s", "%s", "%.2f"]
   wx_column_widths = [160] * 5
@@ -192,6 +224,23 @@ class mp_angles(validation):
     validation.__init__(self)
     self.n_outliers_large_by_model = {}
     self.n_outliers_small_by_model = {}
+    self.n_outliers_protein_by_model = {}
+    self.n_outliers_na_by_model = {}
+    self.n_outliers_other_by_model = {}
+    self.n_total_protein_by_model = {}
+    self.n_total_na_by_model = {}
+    self.n_total_other_by_model = {}
+    for m in pdb_hierarchy.models():
+      self.n_total_by_model[m.id] = 0
+      self.n_outliers_by_model[m.id] = 0
+      self.n_outliers_small_by_model[m.id] = 0
+      self.n_outliers_large_by_model[m.id] = 0
+      self.n_total_protein_by_model[m.id] = 0
+      self.n_outliers_protein_by_model[m.id] = 0
+      self.n_total_na_by_model[m.id] = 0
+      self.n_outliers_na_by_model[m.id] = 0
+      self.n_total_other_by_model[m.id] = 0
+      self.n_outliers_other_by_model[m.id] = 0
     cutoff = 4
     sites_cart = pdb_atoms.extract_xyz()
     flags = geometry_restraints.flags.flags(default=True)
@@ -205,23 +254,32 @@ class mp_angles(validation):
       atom3 = pdb_atoms[proxy.i_seqs[2]].name
       labels = pdb_atoms[proxy.i_seqs[0]].fetch_labels()
       model_id = labels.model_id
-      if model_id not in self.n_total_by_model.keys():
-        self.n_total_by_model[model_id] = 0
-        self.n_outliers_by_model[model_id] = 0
-        self.n_outliers_small_by_model[model_id] = 0
-        self.n_outliers_large_by_model[model_id] = 0
       self.n_total += 1
       self.n_total_by_model[model_id] += 1
+      mm_type = utils.get_mmtype_from_resname(pdb_atoms[proxy.i_seqs[0]].parent().resname)
+      if mm_type=="PROTEIN":
+        self.n_total_protein_by_model[model_id] += 1
+      elif mm_type=="NA":
+        self.n_total_na_by_model[model_id] += 1
+      else:
+        self.n_total_other_by_model[model_id] += 1
       sigma = sqrt(1 / restraint.weight)
       num_sigmas = - restraint.delta / sigma
       is_outlier = (abs(num_sigmas) >= cutoff)
       if is_outlier:
         self.n_outliers += 1
         self.n_outliers_by_model[model_id] += 1
+        if mm_type == "PROTEIN":
+          self.n_outliers_protein_by_model[model_id] += 1
+        elif mm_type == "NA":
+          self.n_outliers_na_by_model[model_id] += 1
+        else:
+          self.n_outliers_other_by_model[model_id] += 1
         if num_sigmas < 0:
           self.n_outliers_small_by_model[model_id] += 1
         else:
           self.n_outliers_large_by_model[model_id] += 1
+
       if (is_outlier or not outliers_only):
         self.results.append(mp_angle(
           atoms_info=get_atoms_info(pdb_atoms, proxy.i_seqs),
@@ -231,7 +289,8 @@ class mp_angles(validation):
           score=num_sigmas,
           delta=restraint.delta,
           xyz=pdb_atoms[proxy.i_seqs[1]].xyz,
-          outlier=is_outlier))
+          outlier=is_outlier,
+          macromolecule_type=mm_type))
 
   def get_result_class(self) : return mp_angle
 
@@ -254,13 +313,19 @@ class mp_angles(validation):
       summary_results[mod_id] = {"num_outliers": self.n_outliers_by_model[mod_id],
                                  "num_total": self.n_total_by_model[mod_id],
                                  "num_outliers_too_small": self.n_outliers_small_by_model[mod_id],
-                                 "num_outliers_too_large": self.n_outliers_large_by_model[mod_id]}
+                                 "num_outliers_too_large": self.n_outliers_large_by_model[mod_id],
+                                 "num_total_protein": self.n_total_protein_by_model[mod_id],
+                                 "num_outliers_protein": self.n_outliers_protein_by_model[mod_id],
+                                 "num_total_na": self.n_total_na_by_model[mod_id],
+                                 "num_outliers_na": self.n_outliers_na_by_model[mod_id],
+                                 "num_total_other": self.n_total_other_by_model[mod_id],
+                                 "num_outliers_other": self.n_outliers_other_by_model[mod_id]}
     data['summary_results'] = summary_results
     return json.dumps(data, indent=2)
 
   def show_summary(self, out=sys.stdout, prefix=""):
     if (self.n_total == 0):
-      print(prefix + "No backbone atoms found.", file=out)
+      print(prefix + "No bond angles found.", file=out)
     elif (self.n_outliers == 0):
       print(prefix + "All angles within 4.0 sigma of ideal values.", file=out)
     else :
@@ -281,7 +346,7 @@ class mp_validate_bonds(slots_getstate_setstate):
       processed_pdb_file = pdb_interpretation.process(
         mon_lib_srv=mon_lib_srv,
         ener_lib=ener_lib,
-        pdb_inp=pdb_hierarchy.as_pdb_input(),
+        pdb_hierarchy=pdb_hierarchy,
         substitute_non_crystallographic_unit_cell_if_necessary=True)
       geometry_restraints_manager = \
         processed_pdb_file.geometry_restraints_manager()

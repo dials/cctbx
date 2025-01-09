@@ -143,6 +143,7 @@ def post_query(query_json=None, xray_only=True, d_max=None, d_min=None,
   # print('r.status_code', r.status_code)
   if r.status_code == 200:
     r_json = r.json()
+    # print(json.dumps(r_json, indent=4))
     for res in r_json["result_set"]:
       res_ids.append(str(res["identifier"].replace('_', ':')))
   return res_ids
@@ -199,6 +200,52 @@ def sequence_search(
   sqr = sequence_query % (e_value_cutoff, identity_cutoff/100, target, sequence)
   jsq = json.loads(sqr)
   return post_query(query_json=jsq, **kwds)
+
+
+def reference_chain_search(sequence, identity_cutoff=0.9, include_csm=False, **kwds):
+  """ Searches sequence optionally include computed models,
+  returns pdb_id with chain id that matches.
+
+  Args:
+      sequence (str): _description_
+      identity_cutoff (float, optional): _description_. Defaults to 0.9.
+  """
+  model_choice = '"experimental"'
+  if include_csm:
+    model_choice += ', "computational"'
+
+  # "sort_by": "score",
+
+  query= """
+{
+  "query": {
+    "type": "terminal",
+    "service": "sequence",
+    "parameters": {
+      "evalue_cutoff": 0.1,
+      "identity_cutoff": %s,
+      "sequence_type": "protein",
+      "value": "%s"
+    }
+  },
+  "return_type": "polymer_instance",
+  "request_options": {
+    "return_all_hits": true,
+    "results_content_type": [ %s ],
+    "scoring_strategy": "combined",
+    "sort": [
+      {
+        "sort_by": "reflns.d_resolution_high",
+        "direction": "asc"
+      }
+    ]
+  }
+}
+"""
+  sqr = query % (identity_cutoff, sequence, model_choice)
+  # print(sqr)
+  jsq = json.loads(sqr)
+  return post_query(query_json=jsq, xray_only=False, **kwds)
 
 
 def chemical_id_search(resname, **kwds):
@@ -394,3 +441,36 @@ def get_ligand_info_for_structures(pdb_ids):
         c_id = str(chain_id)
         result.append([pdb_id, c_id, lig_id, lig_mw, lig_formula, lig_name, smiles])
   return result
+
+def get_emdb_id_for_pdb_id(pdb_id):
+  """ Find out EMDB ID given PDB ID by quering RCSB portal.
+
+  Args:
+      pdb_id (str): pdb id
+  Returns:
+    list of emdb ids, e.g. ['EMD-37438'] or None if X-ray or not defined
+  """
+
+  graphql_query = '''
+query
+{
+  entry(entry_id:"%s") {
+    exptl {
+      method
+    }
+    rcsb_entry_container_identifiers {
+      emdb_ids
+    }
+  }
+}
+''' % pdb_id
+  r = requests.post(report_base_url, json={"query":graphql_query})
+  data_entry = r.json()['data']['entry']
+  if not data_entry:
+    return None
+  if data_entry['exptl'][0]['method'] != 'ELECTRON MICROSCOPY':
+    return None
+  emdb_ids = data_entry['rcsb_entry_container_identifiers']['emdb_ids']
+  if len(emdb_ids)==0:
+    return None
+  return emdb_ids

@@ -24,10 +24,9 @@ from iotbx.cif import category_sort_function
 from cctbx.array_family import flex
 from cctbx import xray
 from cctbx import adptbx
-from cctbx import geometry_restraints
+
 from cctbx import adp_restraints
 from cctbx import crystal
-from cctbx import uctbx
 
 import mmtbx.restraints
 import mmtbx.hydrogens
@@ -37,8 +36,8 @@ import mmtbx.monomer_library.server
 from mmtbx.geometry_restraints.torsion_restraints.utils import check_for_internal_chain_ter_records
 import mmtbx.tls.tools as tls_tools
 from mmtbx import ias
-from mmtbx import utils
-from mmtbx import ncs
+
+
 from mmtbx.ncs.ncs_utils import apply_transforms
 from mmtbx.command_line import find_tls_groups
 from mmtbx.monomer_library.pdb_interpretation import grand_master_phil_str
@@ -192,7 +191,7 @@ class manager(object):
   """
 
   def __init__(self,
-      model_input,
+      model_input               = None,
       pdb_hierarchy             = None,
       crystal_symmetry          = None,
       restraint_objects         = None,
@@ -201,13 +200,12 @@ class manager(object):
       log                       = None,
       expand_with_mtrix         = True,
       process_biomt             = True,
-      skip_ss_annotations       = False,
-      reset_crystal_symmetry_to_box_with_buffer = None):
+      skip_ss_annotations       = False):
     # Assert basic assumptions
     if(model_input is not None): assert pdb_hierarchy is None
     if(pdb_hierarchy is not None):
       assert model_input is None
-      assert crystal_symmetry is not None
+      # assert crystal_symmetry is not None
     # Internals
     self._processed         = False
     self._xray_structure    = None
@@ -307,15 +305,6 @@ class manager(object):
     self.get_hierarchy().atoms().reset_i_seq()
     ########### Allow access to methods from pdb_hierarchy directly ######
     self.set_up_methods_from_hierarchy() # Allow methods from hierarchy
-    # !!! This must be the last call !!!
-    # This forces to use P1 box as crystal symmetry with specified buffer
-    # This needs to use BIOMT expanded model for the box to be meaningful
-    if(reset_crystal_symmetry_to_box_with_buffer is not None):
-      box = uctbx.non_crystallographic_unit_cell_with_the_sites_in_its_center(
-        sites_cart   = self.get_hierarchy().atoms().extract_xyz(),
-        buffer_layer = reset_crystal_symmetry_to_box_with_buffer)
-      self._crystal_symmetry = box.crystal_symmetry()
-      self.get_hierarchy().atoms().set_xyz(box.sites_cart)
 
   @classmethod
   def from_sites_cart(cls,
@@ -471,6 +460,24 @@ class manager(object):
     if not filename:
       filename = None
     return filename
+
+  def distances_symmetric(self, other):
+    """
+    Min distances between matching atoms accounting for pseudo-symmetric
+    residues. Slow.
+    """
+    assert self.size() == other.size()
+    atoms_1 = self.get_hierarchy().atoms()
+    atoms_2 = other.get_hierarchy().atoms()
+    result = flex.double()
+    for i, ai in enumerate(atoms_1):
+      dbest = 1.e9
+      for j, aj in enumerate(atoms_2):
+        d = ai.distance(aj)
+        if d<dbest:
+          dbest=d
+      result.append(dbest)
+    return result
 
   def get_xray_structure(self):
     if(self._xray_structure is None):
@@ -652,8 +659,8 @@ class manager(object):
       sc = (0, 0, 0)
 
     return "Model manager "+\
-      "%s" %(self.model_number()) if self.model_number() is not None else "" + \
-      "\n%s\nChains: %s Residues %s (%s - %s)\nWorking coordinate shift %s)" %(
+      ("%s" %(self.model_number()) if self.model_number() is not None else "") + \
+      "\nSymmetry: %s Chains: %s Residues: %s (%s - %s)\nWorking coordinate shift %s)" %(
       str(self.unit_cell_crystal_symmetry()).replace("\n"," "),
       str(nchains),
       str(nres),
@@ -673,7 +680,10 @@ class manager(object):
   #  params.pdb_interpretation.nonbonded_weight = value
   #  self.set_pdb_interpretation_params(params = params)
 
-  def check_consistency(self):
+  def check_consistency(self, stop_on_errors = True, print_errors = True,
+        absolute_angle_tolerance = None,
+        absolute_length_tolerance = None,
+        shift_tol = None):
     """
     Primarilly for debugging
     """
@@ -1062,6 +1072,9 @@ class manager(object):
   def set_refinement_flags(self, flags):
     self.refinement_flags = flags
 
+  def get_refinement_flags(self):
+    return self.refinement_flags
+
   def get_number_of_atoms(self):
     return self.get_hierarchy().atoms().size()
 
@@ -1080,11 +1093,18 @@ class manager(object):
     return self._site_symmetry_table
 
   def altlocs_present(self):
-    result = False
-    conformer_indices = self.get_hierarchy().get_conformer_indices()
-    if(len(list(set(list(conformer_indices))))>1):
-      result = True
-    return result
+    return self.get_hierarchy().altlocs_present()
+
+  def altlocs_present_only_hd(self):
+    """ True when model has H/D exchangeable sites and does not have
+    other alternative conformations. False otherwise.
+    """
+    noh_selection = self.selection("not (element H or element D)")
+    hierarchy_no_hd = self.get_hierarchy().select(noh_selection)
+    altlocs = hierarchy_no_hd.altlocs_present()
+    hd = self.get_hierarchy().exchangeable_hd_selections()
+    if not altlocs and len(hd)>0: return True
+    return False
 
   def aa_residues_with_bound_sidechains(self):
     """
@@ -1493,6 +1513,11 @@ class manager(object):
       self._ener_lib = mmtbx.monomer_library.server.ener_lib()
     return self._ener_lib
 
+  def get_states_collector(self):
+    return mmtbx.utils.states(
+      xray_structure = self.get_xray_structure(),
+      pdb_hierarchy  = self.get_hierarchy())
+
   def rotamer_outlier_selection(self):
     rm = self.get_rotamer_manager()
     result = flex.bool(self.size(), False)
@@ -1552,6 +1577,7 @@ class manager(object):
       hierarchy_to_output = hierarchy_to_output.deep_copy()
     if (self._shift_cart is not None) and (not do_not_shift_back):
       self._shift_back(hierarchy_to_output)
+    hierarchy_to_output.clear_label_asym_id_lookups()
     return hierarchy_to_output
 
   def can_be_output_as_pdb(self):
@@ -1682,6 +1708,93 @@ class manager(object):
       return False
     return True
 
+  def as_pdb_or_mmcif_string(self,
+       target_format = None,
+       segid_as_auth_segid = True,
+       remark_section = None,
+       **kw):
+    '''
+     Shortcut for pdb_or_mmcif_string_info with write_file=False, returning
+       only the string representing this hierarchy. The string may be in
+       PDB or mmCIF format, with target_format used if it is feasible.
+
+     Method to allow shifting from general writing as pdb to
+     writing as mmcif, with the change in two places (here and model.py)
+     Use default of segid_as_auth_segid=True here (different than
+       as_mmcif_string())
+     :param target_format: desired output format, pdb or mmcif
+     :param segid_as_auth_segid: use the segid in hierarchy as the auth_segid
+          in mmcif output
+     :param remark_section: if supplied and format is pdb, add this text
+     :param **kw:  any keywords suitable for as_pdb_string()
+        and as_mmcif_string()
+     :returns text string representing this hierarchy
+    '''
+
+    info = self.pdb_or_mmcif_string_info(
+       target_format = target_format,
+       segid_as_auth_segid = segid_as_auth_segid,
+       remark_section = remark_section,
+       write_file = False,
+       **kw)
+    return info.pdb_string
+
+  def pdb_or_mmcif_string_info(self,
+      target_filename = None,
+      target_format = None,
+      segid_as_auth_segid = True,
+      write_file = False,
+      data_manager = None,
+      overwrite = True,
+      remark_section = None,
+      **kw):
+    # Method to allow shifting from general writing as pdb
+    # to writing as mmcif, with the change in two places (here and hierarchy.py)
+
+    # NOTE: Normally use the data_manager to write any files and use
+    #  tools in the hierarchy to manipulate any aspects of a hierarchy.
+
+    #  If you need a pdb string, normally use as_pdb_or_mmcif_string
+    #   instead of this general function
+    #  Note default of segid_as_auth_segid = True, different from
+    #     as_mmcif_string()
+
+    if target_format in ['None',None]:  # set the default format here
+      target_format = 'pdb'
+    assert target_format in ['pdb','mmcif']
+
+    if target_format == 'pdb':
+      if self.get_hierarchy().fits_in_pdb_format():
+        pdb_str = self.model_as_pdb(**kw)
+        is_mmcif = False
+        if remark_section:
+          pdb_str = "%s\n%s" %(remark_section, pdb_str)
+      else:
+        pdb_str = self.model_as_mmcif(
+          segid_as_auth_segid = segid_as_auth_segid,**kw)
+        is_mmcif = True
+    else:
+      pdb_str = self.model_as_mmcif(segid_as_auth_segid = segid_as_auth_segid,**kw)
+      is_mmcif = True
+    if target_filename:
+      import os
+      path,ext = os.path.splitext(target_filename)
+      if is_mmcif:
+        ext = ".cif"
+      else:
+        ext = ".pdb"
+      target_filename = "%s%s" %(path,ext)
+    if write_file and target_filename:
+      if not data_manager:
+        from iotbx.data_manager import DataManager
+        data_manager = DataManager()
+      target_filename = data_manager.write_model_file(pdb_str, target_filename,
+        overwrite = overwrite)
+    return group_args(group_args_type = 'pdb_string and filename',
+      pdb_string = pdb_str,
+      file_name = target_filename,
+      is_mmcif = is_mmcif)
+
   def model_as_mmcif(self,
       cif_block_name = "default",
       output_cs = True,
@@ -1785,7 +1898,7 @@ class manager(object):
     cif_block.sort(key=category_sort_function)
     cif[cif_block_name] = cif_block
 
-    if not skip_restraints:
+    if not skip_restraints and self.restraints_manager_available():
       restraints = self.extract_restraints_as_cif_blocks()
       cif.update(restraints)
 
@@ -1828,13 +1941,6 @@ class manager(object):
   def input_model_format_pdb(self):
     return self._original_model_format == "pdb"
 
-  def model_as_str(self, output_cs=True):
-    if(  self.input_model_format_cif()):
-      return self.model_as_mmcif(output_cs=output_cs)
-    elif(self.input_model_format_pdb()):
-      return self.model_as_pdb(output_cs=output_cs)
-    else: raise RuntimeError("Model source is unknown.")
-
   def get_current_pdb_interpretation_params(self):
     if(self._pdb_interpretation_params is not None):
       return self._pdb_interpretation_params
@@ -1858,9 +1964,11 @@ class manager(object):
     #
     if(not self._pdb_interpretation_params.pdb_interpretation.sort_atoms and
        self._pdb_hierarchy is not None):
-      self._xray_structure = None
-      self._pdb_hierarchy = None
-      assert not self._mtrix_expanded
+      if self._model_input is not None:
+        # otherwise it fails here: = processed_pdb_files_srv.process_pdb_files(
+        self._xray_structure = None
+        self._pdb_hierarchy = None
+        assert not self._mtrix_expanded
     #
     if(self._pdb_interpretation_params.pdb_interpretation.sort_atoms and
        self._pdb_hierarchy is not None):
@@ -3236,7 +3344,9 @@ class manager(object):
       b_isos                      = bs)
 
   def deep_copy(self):
-    return self.select(selection = flex.bool(self.size(), True))
+    new_model = self.select(selection = flex.bool(self.size(), True))
+    new_model.set_ss_annotation(self.get_ss_annotation())
+    return new_model
 
   def add_ias(self, fmodel=None, ias_params=None, file_name=None,
                                                              build_only=False):
@@ -3562,18 +3672,19 @@ class manager(object):
     out.flush()
     time_model_show += timer.elapsed()
 
-  def remove_alternative_conformations(self, always_keep_one_conformer):
+  def remove_alternative_conformations(self, always_keep_one_conformer, altloc_to_keep=None):
     # XXX This is not working correctly when something was deleted.
     # Need to figure out a way to update everything so GRM
     # construction will not fail.
     self.geometry_restraints = None
+    n_old_atoms = self.get_number_of_atoms()
     self._pdb_hierarchy.remove_alt_confs(
-        always_keep_one_conformer=always_keep_one_conformer)
+        always_keep_one_conformer=always_keep_one_conformer,
+        altloc_to_keep=altloc_to_keep)
     self._pdb_hierarchy.sort_atoms_in_place()
     self._pdb_hierarchy.atoms_reset_serial()
     self.update_xrs()
     self._atom_selection_cache = None
-    n_old_atoms = self.get_number_of_atoms()
     n_new_atoms = self.get_number_of_atoms()
     return n_old_atoms - n_new_atoms
 
@@ -3617,6 +3728,7 @@ class manager(object):
     time_model_show += timer.elapsed()
 
   def add_solvent(self, solvent_xray_structure,
+                        conformer_indices=None,
                         atom_name    = "O",
                         residue_name = "HOH",
                         chain_id     = " ",
@@ -3634,6 +3746,7 @@ class manager(object):
     if (i_seq is None or i_seq < 0): i_seq = 0
     self.append_single_atoms(
       new_xray_structure=solvent_xray_structure,
+      conformer_indices=conformer_indices,
       atom_names=atom_names,
       residue_names=residue_names,
       nonbonded_types=nonbonded_types,
@@ -3649,6 +3762,7 @@ class manager(object):
 
   def append_single_atoms(self,
       new_xray_structure,
+      conformer_indices,
       atom_names,
       residue_names,
       nonbonded_types,
@@ -3668,11 +3782,13 @@ class manager(object):
     number_of_new_atoms = new_xray_structure.scatterers().size()
     self._xray_structure = \
       self._xray_structure.concatenate(new_xray_structure)
+    # Occupancy
     occupancy_flags = None
     if(refine_occupancies):
       occupancy_flags = []
       for i in range(1, new_xray_structure.scatterers().size()+1):
         occupancy_flags.append([flex.size_t([ms+i-1])])
+    #
     if(self.refinement_flags is not None and
        self.refinement_flags.individual_sites):
       ssites = flex.bool(new_xray_structure.scatterers().size(), True)
@@ -3709,23 +3825,27 @@ class manager(object):
     #
     self._append_pdb_atoms(
       new_xray_structure=new_xray_structure,
+      conformer_indices=conformer_indices,
       atom_names=atom_names,
       residue_names=residue_names,
       chain_id=chain_id,
       segids=segids,
       i_seq_start=i_seq_start,
       reset_labels=reset_labels)
-   #
     if(self.restraints_manager is not None):
       geometry = self.restraints_manager.geometry
       if (geometry.model_indices is None):
         model_indices = None
       else:
         model_indices = flex.size_t(number_of_new_atoms, 0)
-      if (geometry.conformer_indices is None):
+      if(geometry.conformer_indices is None):
         conformer_indices = None
       else:
-        conformer_indices = flex.size_t(number_of_new_atoms, 0)
+        if conformer_indices is not None:
+          assert conformer_indices.conformer_indices.size() == number_of_new_atoms
+          conformer_indices = conformer_indices.conformer_indices
+        else:
+          conformer_indices = flex.size_t(number_of_new_atoms, 0)
       if (geometry.sym_excl_indices is None):
         sym_excl_indices = None
       else:
@@ -3768,6 +3888,7 @@ class manager(object):
       atom_names,
       residue_names,
       chain_id,
+      conformer_indices=None,
       segids=None,
       i_seq_start=0,
       reset_labels=False):
@@ -3782,6 +3903,13 @@ class manager(object):
     i_seq = i_seq_start
     for j_seq, sc in enumerate(new_xray_structure.scatterers()):
       i_seq += 1
+      altloc=""
+      if conformer_indices is not None:
+        ci = conformer_indices.conformer_indices[j_seq]
+        cm = conformer_indices.index_altloc_mapping
+        if not ci in cm.values() and ci==0: altloc = ""
+        else:
+          altloc = list(cm.keys())[list(cm.values()).index(ci)]
       element, charge = sc.element_and_charge_symbols()
       new_atom = (iotbx.pdb.hierarchy.atom()
         .set_serial(new_serial=iotbx.pdb.hy36encode(width=5, value=n_seq+i_seq))
@@ -3794,7 +3922,7 @@ class manager(object):
         .set_hetero(new_hetero=True))
       if (segids is not None):
         new_atom.segid = segids[j_seq]
-      new_atom_group = iotbx.pdb.hierarchy.atom_group(altloc="",
+      new_atom_group = iotbx.pdb.hierarchy.atom_group(altloc=altloc,
         resname=residue_names[j_seq])
       new_atom_group.append_atom(atom=new_atom)
       new_residue_group = iotbx.pdb.hierarchy.residue_group(
@@ -4006,7 +4134,12 @@ class manager(object):
     self.adp_statistics().show(log = out, prefix = prefix)
 
   def energies_adp(self, iso_restraints, compute_gradients, use_hd):
+    if self.restraints_manager is None: return None
     assert self.refinement_flags is not None
+    if iso_restraints is None:
+      import mmtbx.refinement.adp_refinement
+      iso_restraints = mmtbx.refinement.adp_refinement.\
+        adp_restraints_master_params.extract().iso
     xrs = self._xray_structure
     sel_ = xrs.use_u_iso() | xrs.use_u_aniso()
     selection = sel_

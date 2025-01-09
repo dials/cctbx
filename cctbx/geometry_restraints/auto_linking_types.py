@@ -25,9 +25,25 @@ class origins(list):
   def __repr__(self):
     return list.__repr__(self) + ' is %s' % self.internals
 
+covalent_headers = ['Bond',
+                    "Bond angle",
+                    "Dihedral angle",
+                    "Chirality",
+                    "Planarity",
+                    "Parallelity",
+                    ]
+
+internal_labels = ['bonds',
+                   'angles',
+                   'dihedrals',
+                   'chirals',
+                   'planes',
+                   'parallelities',
+                   ]
+
 starting_id = 0
 for link_info in [
-    ['covalent geometry', [0,1,2,3,4,5]],
+    ['covalent geometry', 'covalent geometry', [0,1,2,3,4,5]], # 0
     ['SS BOND', # short desc.
      # complete desc.
      'Disulphide bond for CYS-like sulphur atoms within 3A (default) using '
@@ -83,8 +99,14 @@ for link_info in [
      [None, None, None, None, None, 'Basepair parallelity'],
      [5],
     ],
+    ['side-chain parallelity',
+     'Enforces parallel between two alt conf side-chains',
+     'JH',
+     [None, None, None, None, None, 'Side-chain parallelity'],
+     [5],
+    ],
     ['basepair planarity',
-     'Enforces planrity of two base pairs in paired bases',
+     'Enforces planarity of two base pairs in paired bases',
      'J. Appl. Cryst. 48, 1130-1141 (2015).',
      [None, None, None, 'xxx', 'Basepair planarity'],
      [3],
@@ -95,13 +117,13 @@ for link_info in [
     # ['Trans Peptide']*3+[None],
     # [0,1,2,4]
     # ]
-    ['Misc. bond',
+    ['Misc. bond', # 9
      'Bond created based on atom type and distance.',
      '',
      ['Misc.']*5,
      [0,1,2,3,4]
     ],
-    ['User supplied cif_link',
+    ['User supplied cif_link', # 10
      'Internal coordinates supplied by the user in cif_link format',
      '',
      ['User cif_link']*5,

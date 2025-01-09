@@ -9,6 +9,7 @@ def get_c_beta_torsion_proxies(pdb_hierarchy,
                                selection=None,
                                sigma=2.5):
   origin_ids = cctbx.geometry_restraints.linking_class.linking_class()
+  c_beta_origin_id = origin_ids.get_origin_id('C-beta')
   if (selection is not None):
     if (isinstance(selection, flex.bool)):
       actual_bselection = selection
@@ -48,6 +49,11 @@ def get_c_beta_torsion_proxies(pdb_hierarchy,
                 continue
               # check for correct chiral volume
               sites_cart = [N_atom.xyz, C_atom.xyz, CA_atom.xyz, CB_atom.xyz]
+              CAC_dist = C_atom.distance(CA_atom)
+              if CAC_dist>2.:
+                c_beta_residues_skipped.setdefault('CA---C', [])
+                c_beta_residues_skipped['CA---C'].append(CB_atom)
+                continue
               chiral = cctbx.geometry_restraints.chirality(
                 sites_cart,
                 volume_ideal=0.,
@@ -66,7 +72,7 @@ def get_c_beta_torsion_proxies(pdb_hierarchy,
                 i_seqs=i_seqs,
                 angle_ideal=dihedralNCAB,
                 weight=1/sigma**2,
-                origin_id=origin_ids.get_origin_id('C-beta'))
+                origin_id=c_beta_origin_id)
               c_beta_dihedral_proxies.append(dp_add)
               #CNAB
               i_seqs = [C_atom.i_seq,N_atom.i_seq,CA_atom.i_seq,CB_atom.i_seq]
@@ -74,7 +80,7 @@ def get_c_beta_torsion_proxies(pdb_hierarchy,
                 i_seqs=i_seqs,
                 angle_ideal=dihedralCNAB,
                 weight=1/sigma**2,
-                origin_id=origin_ids.get_origin_id('C-beta'))
+                origin_id=c_beta_origin_id)
               c_beta_dihedral_proxies.append(dp_add)
   return c_beta_dihedral_proxies, c_beta_residues_skipped # BAD
 

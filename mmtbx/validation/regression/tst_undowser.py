@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 from mmtbx.validation import undowser
 from libtbx.easy_pickle import loads
 from iotbx.data_manager import DataManager
+from libtbx.test_utils import convert_pdb_to_cif_for_pdb_str
 import libtbx.load_env
 import time
 import json
@@ -175,11 +176,11 @@ A clashing HOH is very unlikely be be a real water, unless the clashing atom pos
 <br><br>
 <b>Clash with polar</b> - HOH that clashes with polar groups may actually be a coordinated ion.
 <br>
-<b>Clash with nonpolar</b> - HOH that clashes with nonpolar groups may be a missing or displaced atom&ast;.
+<b>Clash with nonpolar</b> - HOH that clashes with nonpolar groups may be a missing or displaced atom&ast;. Or it may be the first atom of an unmodeled alternate.
 <br>
 <b>Clash with both polar and nonpolar</b> - HOH that clashes with both polar and non-polar groups is unlikely to be an ion. If clashes are severe, a displaced atom is likely. If clashes and map are weak, the HOH may be entirely removable.
 <br>
-<b>Clash with water</b> - HOH-HOH clashes may be real waters that need to be modeled as alternates of compatible occupancy. Or they may indicate missing or displaced atoms.
+<b>Clash with water</b> - HOH-HOH clashes may be real waters that need to be modeled as alternates of compatible occupancy. Or they may be in the density of a sidechain alternate or a larger ligand.
 <br>
 <b>Clash with altloc</b> - HOH clashes involving one or more alternate conformations may be resolved by renaming some of the alternates.
 <br><br>
@@ -191,7 +192,7 @@ A clashing HOH is very unlikely be be a real water, unless the clashing atom pos
 <br>
 <i>Missing atoms</i> have been entirely replaced by HOH. Removed atoms may be restored by modeling alternate conformations (especially sidechains), modeling ligands, or continuing a macromolecular mainchain.
 <br><br>
-These categories are general suggestions. Check your electron density; trust your intuition and experience.
+These categories are general suggestions. Check your electron density; trust your intuition and experience. Prisant 2020 Prot Sci 29:315 (<a href="https://doi.org/10.1002/pro.3786">https://doi.org/10.1002/pro.3786</a>) illustrates 10 examples of clashing HOH cases.
 <br>
 <hr>
 <br>
@@ -252,7 +253,7 @@ def exercise_undowser_json():
   uz = undowser.undowserlyze(pdb_hierarchy=m.get_hierarchy())
   uz_dict = json.loads(uz.as_JSON())
   #import pprint
-  #pprint.pprint(csjson_dict)
+  #pprint.pprint(uz_dict)
   assert len(uz_dict['flat_results']) == 11, "tst_undowser json output not returning correct number of water clashes, now: "+str(len(uz_dict['flat_results']))
   assert uz_dict['flat_results'][0]["src_atom_id"] == " A 503 HOH  O   ", "tst_undowser json output first src_atom_id value changed, now: "+uz_dict['flat_results'][0]["src_atom_id"]
   from mmtbx.validation import test_utils
@@ -270,4 +271,9 @@ if (__name__ == "__main__"):
     t0 = time.time()
     exercise_undowser()
     exercise_undowser_json()
+    print("Undowser using PDB OK.")
+    convert_pdb_to_cif_for_pdb_str(locals(), chain_addition="LONGCHAIN", hetatm_name_addition = "", key_str="pdb_", print_new_string = False)
+    #this won't work until undowser is swapped to use probe2
+    #exercise_undowser_json()
+    #print("Undowser using mmCIF OK.")
     print("OK. Time: %8.3f"%(time.time()-t0))

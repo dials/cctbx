@@ -45,6 +45,7 @@ import mmtbx.restraints
 import mmtbx.tls.tools
 from mmtbx.scaling import outlier_rejection
 import mmtbx.command_line.fmodel
+import mmtbx.programs.fmodel
 import libtbx.callbacks # import dependency
 from libtbx.math_utils import ifloor, iceil
 from cctbx import maptbx
@@ -265,8 +266,6 @@ class process_pdb_file_srv(object):
         use_neutron_distances=use_neutron_distances,
         )
     else: self.ener_lib = ener_lib
-    if(self.log is None): self.log = sys.stdout
-    if(self.log == False): self.log = None
 
   def process_pdb_files(self, pdb_file_names = None, raw_records = None,
                         pdb_inp=None,
@@ -555,58 +554,8 @@ def assert_water_is_consistent(model):
       assert doh >0.35 and doh < 1.45, doh
 
 # MARKED_FOR_DELETION_OLEG
-# Reason: Another custom-build method to 'quickly' get more or less
-# correct xray structure(s). Should be handled by mmtbx.model.
-# Used in:
-# mmtbx/refinement/ensemble_refinement/__init__.py
-class xray_structures_from_processed_pdb_file(object):
-
-  def __init__(self, processed_pdb_file, scattering_table, d_min, log = None):
-    self.xray_structures = []
-    self.model_selections = []
-    self.neutron_scattering_dict = None
-    self.xray_scattering_dict = None
-    self.xray_structure_all = \
-        processed_pdb_file.xray_structure(show_summary = False)
-    # XXX ad hoc manipulation
-    for sc in self.xray_structure_all.scatterers():
-      lbl=sc.label.split()
-      if("IAS" in lbl and sc.scattering_type=="?" and lbl[1].startswith("IS")):
-        sc.scattering_type = lbl[1]
-    #
-    if(self.xray_structure_all is None):
-      raise Sorry("Cannot extract xray_structure.")
-    if(self.xray_structure_all.scatterers().size()==0):
-      raise Sorry("Empty xray_structure.")
-    all_chain_proxies = processed_pdb_file.all_chain_proxies
-    self.xray_scattering_dict, self.neutron_scattering_dict = \
-      setup_scattering_dictionaries(
-        scattering_table  = scattering_table,
-        all_chain_proxies = all_chain_proxies,
-        xray_structure    = self.xray_structure_all,
-        d_min             = d_min,
-        log               = log)
-    model_indices = all_chain_proxies.pdb_inp.model_indices()
-    if(len(model_indices)>1):
-       model_indices_padded = flex.size_t([0])
-       model_indices_padded.extend(model_indices)
-       ranges = []
-       for i, v in enumerate(model_indices_padded):
-         try: ranges.append([model_indices_padded[i],
-                             model_indices_padded[i+1]])
-         except IndexError: pass
-       for ran in ranges:
-         sel = flex.size_t(range(ran[0],ran[1]))
-         self.model_selections.append(sel)
-         self.xray_structures.append(self.xray_structure_all.select(sel))
-    else:
-      self.model_selections.append(
-        flex.size_t(range(self.xray_structure_all.scatterers().size())) )
-      self.xray_structures.append(self.xray_structure_all)
-# END_MARKED_FOR_DELETION_OLEG
-
-# MARKED_FOR_DELETION_OLEG
 # Reason: Moved to mmtbx.model.manager
+# used in cctbx_project/mmtbx/command_line/maps.py
 def setup_scattering_dictionaries(scattering_table,
                                   xray_structure,
                                   d_min,
@@ -1255,23 +1204,35 @@ class fmodel_from_xray_structure(object):
                      twin_fraction = None,
                      target = "ml",
                      out = None,
-                     merge_r_free_flags = None):
+                     merge_r_free_flags = None,
+                     use_custom_scattering_dictionary = False):
     if(out is None): out = sys.stdout
     self.add_sigmas = add_sigmas
     if(params is None):
-      params = mmtbx.command_line.fmodel.\
-        fmodel_from_xray_structure_master_params.extract()
+      params = mmtbx.programs.fmodel.master_phil.extract()
     if(r_free_flags_fraction is None):
       if(params.r_free_flags_fraction is not None):
         r_free_flags_fraction = params.r_free_flags_fraction
       else:
         r_free_flags_fraction = 0.1
+
+    new_scattering_dictionary = None
+    if use_custom_scattering_dictionary:
+      from cctbx.eltbx import read_custom_scattering_dict
+      new_scattering_dictionary = read_custom_scattering_dict.run(
+        filename = params.custom_scattering_factors, log = out)
+
     if(f_obs is None):
       hr = None
       try: hr = params.high_resolution
       except Exception: self.Sorry_high_resolution_is_not_defined()
       if(params.scattering_table == "neutron"):
-        xray_structure.switch_to_neutron_scattering_dictionary()
+        if(new_scattering_dictionary):
+          xray_structure.scattering_type_registry(
+            custom_dict = new_scattering_dictionary)
+          xray_structure.scattering_type_registry().show(out = out)
+        else:
+          xray_structure.switch_to_neutron_scattering_dictionary()
       else:
         xray_structure.scattering_type_registry(
           table = params.scattering_table, d_min = hr)
@@ -1303,7 +1264,12 @@ class fmodel_from_xray_structure(object):
       except Exception: lr = None
       f_obs = f_obs.resolution_filter(d_max = lr, d_min = hr)
       if(params.scattering_table == "neutron"):
-        xray_structure.switch_to_neutron_scattering_dictionary()
+        if(new_scattering_dictionary):
+          xray_structure.scattering_type_registry(
+            custom_dict = new_scattering_dictionary)
+          xray_structure.scattering_type_registry().show(out = out)
+        else:
+          xray_structure.switch_to_neutron_scattering_dictionary()
       else:
         xray_structure.scattering_type_registry(
           table = params.scattering_table, d_min = f_obs.d_min())
@@ -1533,54 +1499,6 @@ def equivalent_sigma_from_cumulative_histogram_match(
   if(verbose): print(tmp1, tmp2)
   #
   return tmp2
-
-# MARKED_FOR_DELETION_OLEG
-# REASON: not used, not tested.
-def limit_frac_min_frac_max(frac_min,frac_max):
-      new_frac_min=[]
-      new_frac_max=[]
-      for lb,ub in zip(frac_min,frac_max):
-        new_frac_min.append(max(0,lb))
-        new_frac_max.append(min(1,ub))
-      return new_frac_min,new_frac_max
-def optimize_h(fmodel, mon_lib_srv, pdb_hierarchy=None, model=None, log=None,
-      verbose=True):
-  assert 0
-  assert [pdb_hierarchy, model].count(None)==1
-  if(log is None): log = sys.stdout
-  if(fmodel.xray_structure.hd_selection().count(True)==0): return
-  if(verbose):
-    print(file=log)
-    print("Optimizing scattering from H...", file=log)
-    print("  before optimization: r_work=%6.4f r_free=%6.4f"%(
-    fmodel.r_work(), fmodel.r_free()), file=log)
-  if(model is not None):
-    assert_xray_structures_equal(
-      x1 = fmodel.xray_structure,
-      x2 = model.get_xray_structure())
-    model.reset_occupancies_for_hydrogens()
-  if(model is not None): pdb_hierarchy = model.get_hierarchy()
-  import mmtbx.hydrogens
-  rmh_sel = mmtbx.hydrogens.rotatable(pdb_hierarchy = pdb_hierarchy,
-    mon_lib_srv=mon_lib_srv, restraints_manager=model.restraints_manager)
-  # XXX inefficient
-  rmh_sel_i_seqs = flex.size_t()
-  for i in rmh_sel:
-    for ii in i[1]:
-      rmh_sel_i_seqs.append(ii)
-  fmodel.xray_structure.set_occupancies(value = 0, selection = rmh_sel_i_seqs)
-  fmodel.update_f_hydrogens(log=log)
-  if(model is not None):
-    model.set_xray_structure(fmodel.xray_structure)
-  fmodel.xray_structure.set_occupancies(value = 0,
-    selection = fmodel.xray_structure.hd_selection())
-  if(model is not None):
-    model.set_xray_structure(fmodel.xray_structure)
-  if(verbose):
-    print("  after optimization:  r_work=%6.4f r_free=%6.4f"%(
-      fmodel.r_work(), fmodel.r_free()), file=log)
-  #
-# END_MARKED_FOR_DELETION_OLEG
 
 class set_map_to_value(object):
   def __init__(self, map_data, xray_structure, atom_radius, value):
@@ -2140,46 +2058,6 @@ class detect_hydrogen_nomenclature_problem(object):
         else :
           self.n_other += 1
 
-# MARKED_FOR_DELETION_OLEG
-# REASON: moved to be classmethod of mmtbx.model.manager.from_sites_cart()
-def model_from_sites_cart(sites_cart,
-    atom_name='CA',
-    resname='GLY',
-    chain_id='A',
-    b_iso=30.,
-    occ=1.,
-    scatterer='C',
-    crystal_symmetry=None):
-  assert sites_cart is not None
-  hierarchy = iotbx.pdb.hierarchy.root()
-  m = iotbx.pdb.hierarchy.model()
-  c = iotbx.pdb.hierarchy.chain()
-  c.id=chain_id
-  hierarchy.append_model(m)
-  m.append_chain(c)
-  count=0
-  for sc in sites_cart:
-    count+=1
-    rg=iotbx.pdb.hierarchy.residue_group()
-    c.append_residue_group(rg)
-    ag=iotbx.pdb.hierarchy.atom_group()
-    rg.append_atom_group(ag)
-    a=iotbx.pdb.hierarchy.atom()
-    ag.append_atom(a)
-    rg.resseq=str(count)
-    ag.resname=resname
-    a.set_b(b_iso)
-    a.set_element(scatterer)
-    a.set_occ(occ)
-    a.set_name(atom_name)
-    a.set_xyz(sc)
-    a.set_serial(count)
-
-  from mmtbx.model import manager
-  return mmtbx.model.manager(model_input = None, pdb_hierarchy=hierarchy,
-     crystal_symmetry=crystal_symmetry)
-# END_MARKED_FOR_DELETION_OLEG
-
 class run_reduce_with_timeout(easy_run.fully_buffered):
   def __init__(self,
       stdin_lines,
@@ -2193,12 +2071,20 @@ class run_reduce_with_timeout(easy_run.fully_buffered):
     if stdin_lines is not None and parameters.split()[-1] != '-':
       raise Sorry(" - should appear at the end of parameters when using stdin_lines mode.")
 
+    # Verify that we're not trying to run on an mMCIF file.
+    if file_name is not None:
+      if ".cif".lower() in file_name.lower():
+        raise Sorry("Reduce cannot read mmCIF files. Please convert to PDB format or use mmtbx.reduce2.")
+    else:
+      if "data_" == stdin_lines[0:5]:
+        raise Sorry("Reduce cannot read mmCIF files. Please convert to PDB format or use mmtbx.reduce2.")
+
     size_bytes = len(stdin_lines) if stdin_lines is not None else 0
     command_to_run="molprobity.reduce "
     if file_name is not None:
       assert os.path.isfile(file_name), 'no file_name : %s' % file_name
       size_bytes = os.path.getsize(file_name)
-      command_to_run += file_name + " "
+      command_to_run += '"%s"' % file_name + " "
     command_to_run += parameters
     size_in_mb = size_bytes / 1024 / 1024
 

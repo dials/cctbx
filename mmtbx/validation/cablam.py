@@ -231,12 +231,18 @@ class cablam_chain():
     self.conf_names = []
     self.confs = {}
 
+  def __repr__(self):
+    return str(self.conf_names)+str(self.confs)
+
 class cablam_conf():
   #conformer-level organization for cablam results
   def __init__(self):
     self.conf_name = None
     self.results = {}
     self.sec_struc_records = []
+
+  def __repr__(self):
+    return str(self.conf_name)+str(self.results)+str(self.sec_struc_records)
 
 class secondary_structure_segment():
   #holds a secondary structure element identified by cablam
@@ -331,6 +337,9 @@ class cablam_result(residue):
   #-----------------------------------------------------------------------------
   #}}}
 
+  def __repr__(self):
+    return self.as_string()
+
   #{{{ mp_id
   #-----------------------------------------------------------------------------
   def mp_id(self):
@@ -372,9 +381,11 @@ class cablam_result(residue):
   #-----------------------------------------------------------------------------
   #returns the desired atom from a hierarchy residue object
   def get_atom(self, atom_name):
-    for atom in self.residue.atoms():
-      if atom.name == atom_name: return atom
-    else: return None
+    #for atom in self.residue.atoms():
+    #  if atom.name == atom_name: return atom
+    atom = self.residue.find_atom_by(atom_name)
+    return atom
+    #else: return None
   #-----------------------------------------------------------------------------
   #}}}
 
@@ -919,9 +930,11 @@ class cablamalyze(validation):
           if conf.is_protein(): break #at least one conformer must be protein
         else: continue
         if use_segids:
-          chain_id = utils.get_segid_as_chainid(chain=chain).rjust(2)
+          chain_id = utils.get_segid_as_chainid(chain=chain)
         else:
-          chain_id = chain.id.rjust(2)
+          chain_id = chain.id
+        if len(chain_id) < 2:
+          chain_id = chain_id.rjust(2)
         #The above .rjust(2)'s are to force 2-char chain ids
         current_chain = cablam_chain()
         self.all_results[model.id][chain_id] = current_chain
@@ -1449,11 +1462,10 @@ class cablamalyze(validation):
     sites_cart=self.pdb_hierarchy.atoms().extract_xyz()
     mon_lib_srv = monomer_library.server.server()
     ener_lib = monomer_library.server.ener_lib()
-    pdb_io=self.pdb_hierarchy.as_pdb_input()
     processed_pdb_file = pdb_interpretation.process(
         mon_lib_srv=mon_lib_srv,
         ener_lib=ener_lib,
-        pdb_inp=pdb_io,
+        pdb_hierarchy=self.pdb_hierarchy,
         #params=work_params.kinemage.pdb_interpretation,
         substitute_non_crystallographic_unit_cell_if_necessary=True)
     geometry = processed_pdb_file.geometry_restraints_manager()

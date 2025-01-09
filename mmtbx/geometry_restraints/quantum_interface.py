@@ -84,11 +84,25 @@ qm_restraints
       .type = atom_selection
       .input_size = 400
     charge = None
-      .type = float
+      .type = int
+  }
+  specific_atom_multiplicities
+    .optional = True
+    .multiple = True
+    .short_caption = Specify the multiplicity for a specific atom (mostly metal ions). \
+    Selection is not needed but is great for bookkeeping.
+    .style = auto_align
+  {
+    atom_selection = None
+      .type = atom_selection
+      .input_size = 400
+    multiplicity = None
+      .type = int
   }
 
   calculate = *in_situ_opt starting_energy final_energy \
 starting_strain final_strain starting_bound final_bound \
+starting_binding final_binding \
 starting_higher_single_point final_higher_single_point
     .type = choice(multi=True)
     .help = Choose QM calculations to run
@@ -97,6 +111,7 @@ starting_higher_single_point final_higher_single_point
       strain_energy_of_starting_ligand_geometry \
       strain_energy_of_final_ligand_geometry \
       starting_energy_of_bound_ligand_cluster \
+      starting_binding_energy_of)ligand final_binding_energy_of_ligand \
       final_energy_of_bound_ligand_cluster not_implemented not_implemented
 
   write_files = *restraints pdb_core pdb_buffer pdb_final_core pdb_final_buffer
@@ -124,6 +139,10 @@ starting_higher_single_point final_higher_single_point
     .type = choice
   ignore_x_h_distance_protein = False
     .type = bool
+    .help = skip check on transfer of proton during QM optimisation
+  ignore_lack_of_h_on_ligand = False
+    .type = bool
+    .help = skip check on protonation of ligand for entities such as MgF3
   capping_groups = True
     .type = bool
 
@@ -177,13 +196,17 @@ starting_higher_single_point final_higher_single_point
 
 master_phil_str = get_qm_restraints_scope()
 
-def electrons(model, specific_atom_charges=None, log=None):
+def electrons(model,
+              specific_atom_charges=None,
+              specific_atom_multiplicities=None,
+              log=None):
   from libtbx.utils import Sorry
   from mmtbx.ligands import electrons
   atom_valences = electrons.electron_distribution(
     model.get_hierarchy(), # needs to be altloc free
     model.get_restraints_manager().geometry,
     specific_atom_charges=specific_atom_charges,
+    specific_atom_multiplicities=specific_atom_multiplicities,
     log=log,
     verbose=False,
   )
@@ -202,9 +225,14 @@ def electrons(model, specific_atom_charges=None, log=None):
         print('    %s' % i[0], file=log)
     # raise Sorry('Unusual charges found')
   charged_atoms = atom_valences.get_charged_atoms()
+  print('''
+  Complete valence picture
+%s
+  '''% (atom_valences.show()), file=log)
   return atom_valences.get_total_charge()
 
 def get_safe_filename(s, compact_selection_syntax=True):
+  import string
   assert compact_selection_syntax
   if compact_selection_syntax:
     s=s.replace('chain', '')
@@ -216,12 +244,18 @@ def get_safe_filename(s, compact_selection_syntax=True):
     s=s.replace('  ',' ')
   if s[0]==' ': s=s[1:]
   s=s.replace(' ','_')
+  for i in range(26):
+    a=string.ascii_uppercase[i]
+    s=s.replace("'%s'"%a, a)
   s=s.replace("'",'_prime_')
   s=s.replace('*','_star_')
   s=s.replace('(','_lb_')
   s=s.replace(')','_rb_')
   s=s.replace('=', '_equals_')
   s=s.replace(':', '_colon_')
+  s=s.replace('"', '_quote_')
+  while s.find('__')>-1:
+    s=s.replace('__','_')
   return s
 
 def populate_qmr_defaults(qmr):
@@ -241,7 +275,7 @@ def populate_qmr_defaults(qmr):
     default_defaults(qmr)
     if qmr.package.method is Auto:
       qmr.package.method='AM1'
-      # qmr.package.method='PBEh-3c'
+      qmr.package.method='PBEh-3c'
   elif program=='mopac':
     default_defaults(qmr)
     if qmr.package.method is Auto:
@@ -250,6 +284,22 @@ def populate_qmr_defaults(qmr):
   else:
     assert 0
   return qmr
+
+def get_working_directory(model, params, prefix=None):
+  rc = 'qm_work_dir'
+  return rc
+  if prefix is None:
+    prefix = getattr(params.output, 'prefix', None)
+  if prefix is not None:
+    rc='%s_%s' % (prefix, rc)
+  return rc
+
+def get_total_multiplicity(qmr):
+  tm = 0
+  macs = qmr.specific_atom_multiplicities
+  for mac in macs:
+    tm += mac.multiplicity
+  return max(tm,1)
 
 def get_preamble(macro_cycle, i, qmr, old_style=False, compact_selection_syntax=True):
   qmr = populate_qmr_defaults(qmr)
@@ -282,6 +332,9 @@ def get_preamble(macro_cycle, i, qmr, old_style=False, compact_selection_syntax=
     s+='_%s' % get_safe_filename(qmr.package.basis_set)
   if qmr.package.solvent_model is not Auto and qmr.package.solvent_model:
     s+='_%s' % get_safe_filename(qmr.package.solvent_model)
+  multiplicity=get_total_multiplicity(qmr)
+  if multiplicity!=1:
+    s+='_%s' % (multiplicity)
   return s
 
 def is_any_quantum_package_installed(env):

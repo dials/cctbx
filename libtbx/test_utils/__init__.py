@@ -4,6 +4,10 @@ from libtbx.utils import Sorry
 from libtbx.str_utils import show_string
 from libtbx import easy_run
 from libtbx import introspection
+try:
+  from contextlib import AbstractContextManager
+except ImportError:
+  AbstractContextManager = object
 import difflib
 import libtbx.load_env
 import math
@@ -62,6 +66,23 @@ class pickle_detector(object):
 
 Exception_expected = RuntimeError("Exception expected.")
 Exception_not_expected = RuntimeError("Exception not expected.")
+
+class raises(AbstractContextManager):
+  def __init__(self, expected_exception):
+    self.expected_exception = expected_exception
+    self.type = None
+    self.value = None
+    self.traceback = None
+
+  def __enter__(self):  # this is only needed for Python 2
+    return self
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    self.type = exc_type
+    self.value = exc_value
+    self.traceback = traceback
+    if isinstance(self.type(), self.expected_exception):
+      return self
 
 class Default: pass
 
@@ -531,9 +552,9 @@ def contains_lines(lines, expected):
   return contains_substring(
     actual=lines, expected=expected, failure_prefix="contains_lines() ")
 
-def assert_lines_in_text(text, lines,
+def assert_lines_text(text, lines, present=True,
     remove_white_spaces=True, remove_newline=True):
-  """Tests if lines present in the text.
+  """Tests if lines present or absent in the text.
 
   Args:
       text (str): source text
@@ -550,8 +571,41 @@ def assert_lines_in_text(text, lines,
   if remove_newline:
     text = text.replace(os.linesep,"")
     filtered_lines = filtered_lines.replace(os.linesep,"")
-  assert text.find(filtered_lines) >= 0, \
-      "Lines:\n %s\n are not found" % (lines)
+  if present:
+    assert text.find(filtered_lines) >= 0, \
+        "Lines:\n %s\n are not found" % (lines)
+  else:
+    assert text.find(filtered_lines) < 0, \
+        "Lines:\n %s\n are found, but they should not be there." % (lines)
+
+
+def assert_lines_in_text(text, lines,
+    remove_white_spaces=True, remove_newline=True):
+  """Tests if lines present in the text.
+
+  Args:
+      text (str): source text
+      lines (str): lines to search for
+      remove_white_spaces (bool, optional): Remove whitespaces for more robust search.
+          Defaults to True.
+      remove_newline (bool, optional): Remove newlines for more robust search.
+          Defaults to True.
+  """
+  assert_lines_text(text, lines, True, remove_white_spaces, remove_newline)
+
+def assert_lines_not_in_text(text, lines,
+    remove_white_spaces=True, remove_newline=True):
+  """Ensures that lines are NOT present in the text.
+
+  Args:
+      text (str): source text
+      lines (str): lines to search for
+      remove_white_spaces (bool, optional): Remove whitespaces for more robust search.
+          Defaults to True.
+      remove_newline (bool, optional): Remove newlines for more robust search.
+          Defaults to True.
+  """
+  assert_lines_text(text, lines, False, remove_white_spaces, remove_newline)
 
 def assert_lines_in_file(file_name, lines,
     remove_white_spaces=True, remove_newline=True):
@@ -563,6 +617,17 @@ def assert_lines_in_file(file_name, lines,
   f.close()
   assert_lines_in_text(f_lines, lines=lines,
       remove_white_spaces=remove_white_spaces, remove_newline=remove_newline)
+
+def assert_lines_not_in_file(file_name, lines,
+    remove_white_spaces=True, remove_newline=True):
+  """
+  lines here is a text, not a list of lines.
+  """
+  with open(file_name,'r') as f:
+    f_lines = f.read()
+    assert_lines_not_in_text(f_lines, lines=lines,
+        remove_white_spaces=remove_white_spaces, remove_newline=remove_newline)
+
 
 class RunCommandError(RuntimeError): pass
 
@@ -848,5 +913,113 @@ ERROR: is_above_limit(value=None, limit=3, eps=1)
   assert precision_approx_equal(0.799999,0.800004,precision=18)==False
   print("OK")
 
+def convert_pdb_to_cif_for_pdb_str(locals, chain_addition = "ZXLONG",
+   key_str="pdb_str", hetatm_name_addition = "ZY", print_new_string = True):
+  #  Converts all the strings that start with "pdb_str" from PDB to mmcif
+  #  format, adding chain_addition to chain names
+  #  If hetatm_name_addition is set, add to hetatm names
+  #  If print_new_string is set, print the new strings
+  keys = list(locals.keys())
+  for key in keys:
+    if (not key.startswith(key_str)) or (type(locals[key]) != type("abc")):
+      continue
+
+    original_string = locals[key]
+
+    new_string = convert_string_to_cif_long(original_string,
+      chain_addition = chain_addition,
+      hetatm_name_addition = hetatm_name_addition)
+    locals[key] = new_string
+    if print_new_string:
+       print("\n",79*"=","\n",
+          "ORIGINAL STRING '%s':\n%s" %(key, original_string))
+       print("\n",79*"=","\n",
+          "MODIFIED STRING '%s':\n%s" %(key, new_string),
+          "\n",79*"=","\n")
+
+def convert_string_to_cif_long(original_string,  chain_addition = "ZXLONG",
+   hetatm_name_addition = "ZY"):
+    from iotbx.pdb.utils import get_pdb_input
+    pdb_inp = get_pdb_input(original_string)
+    ph = pdb_inp.construct_hierarchy()
+    if ph.overall_counts().n_residues < 1:
+      return ""
+    for model in ph.models():
+     for chain in model.chains():
+       chain.id = "%s%s" %(chain.id.strip(),chain_addition)
+       if hetatm_name_addition:
+         for rg in chain.residue_groups():
+           for ag in rg.atom_groups():
+             for at in ag.atoms():
+               if at.hetero and len(ag.resname)<=3:
+                 ag.resname = "%s%s" %(ag.resname.strip(), hetatm_name_addition)
+                 break
+    new_string = ph.as_mmcif_string(
+      crystal_symmetry = pdb_inp.crystal_symmetry())
+    return new_string
+def tst_convert():
+  text = """
+ATOM      1  N   VAL A   1      -5.111   0.049  13.245  1.00  9.36           N
+"""
+  assert convert_string_to_cif_long(text).strip() == """
+data_phenix
+loop_
+  _atom_site.group_PDB
+  _atom_site.id
+  _atom_site.label_atom_id
+  _atom_site.label_alt_id
+  _atom_site.label_comp_id
+  _atom_site.auth_asym_id
+  _atom_site.auth_seq_id
+  _atom_site.pdbx_PDB_ins_code
+  _atom_site.Cartn_x
+  _atom_site.Cartn_y
+  _atom_site.Cartn_z
+  _atom_site.occupancy
+  _atom_site.B_iso_or_equiv
+  _atom_site.type_symbol
+  _atom_site.pdbx_formal_charge
+  _atom_site.label_asym_id
+  _atom_site.label_entity_id
+  _atom_site.label_seq_id
+  _atom_site.pdbx_PDB_model_num
+  ATOM  1  N  .  VAL  AZXLONG  1  ?  -5.11100  0.04900  13.24500  1.000  9.36000  N  ?  A  ?  1  1
+
+loop_
+  _chem_comp.id
+  VAL
+
+loop_
+  _struct_asym.id
+  A
+""".strip()
+
+def tst_raises():
+  # check passing behavior
+  with raises(AssertionError) as e:
+    raise AssertionError('abc')
+  assert str(e.value) == 'abc'
+
+  # check failing behavior
+  try:
+    with raises(RuntimeError) as e:
+      raise AssertionError('def')
+  except AssertionError as e:
+    assert str(e) == 'def'
+
+  # catch subclass
+  with raises(Exception) as e:
+    raise AssertionError('ghi')
+  assert str(e.value) == 'ghi'
+
+  # reject parent class
+  try:
+    with raises(ValueError) as e:
+      raise Exception('jkl')
+  except Exception as e:
+    assert str(e) == 'jkl'
+
 if (__name__ == "__main__"):
+  tst_convert()
+  tst_raises()
   exercise()

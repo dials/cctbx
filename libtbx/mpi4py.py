@@ -9,6 +9,9 @@ class mpiEmulator(object):
   SUM = "SUM"
   MAX = "MAX"
   MIN = "MIN"
+  LAND = "LAND"
+  LOR = "LOR"
+  LXOR = "LXOR"
   # TODO: implement more operations as needed
 
   def Wtime(self):
@@ -23,10 +26,15 @@ class mpiCommEmulator(object):
     return 1
   def barrier(self):
     pass
+  def Barrier(self):
+    pass
   def bcast(self, obj, root=0):
     return obj
+  def Bcast(self, buf, root=0):
+    pass
   def reduce(self, sendobj, op=mpiEmulator.SUM, root=0):
-    if op == mpiEmulator.SUM or op == mpiEmulator.MAX or op == mpiEmulator.MIN:
+    if op in {mpiEmulator.SUM, mpiEmulator.MAX, mpiEmulator.MIN,
+              mpiEmulator.LAND, mpiEmulator.LOR, mpiEmulator.LXOR}:
       return sendobj
     else:
       assert False, "Unsupported MPI reduce operation %s"%(op)
@@ -41,6 +49,19 @@ class mpiCommEmulator(object):
     items = []
     items.append(sendobj)
     return items
+  def Gatherv(self, sendbuf, recvbuf, root=0):
+    assert len(recvbuf) == 2, "Other ways of using Gatherv are not implemented"
+    rbuff, counts = recvbuf
+    if len(counts) == 1:
+      sendbuf = (sendbuf,)
+    counter = 0
+    for item, count in zip(sendbuf, counts):
+      rbuff[counter:counter+count] = item
+      counter += count
+  def allgather(self, sendobj):
+    return [sendobj]
+  def Allgatherv(self, sendbuf, recvbuf):
+    return self.Gatherv(sendbuf, recvbuf)
   def Abort(self,errorcode=0):
     import sys
     sys.exit()
@@ -54,13 +75,23 @@ class mpiCommEmulator(object):
 
 mpiEmulator.COMM_WORLD = mpiCommEmulator()
 
+class MpiDisabledError(Exception):
+  pass
+
 try:
+  import libtbx
+  if libtbx.mpi_import_guard.disable_mpi:
+    raise MpiDisabledError
   from mpi4py import MPI
   using_mpi = True
 except ImportError:
   print ("\nWarning: could not import mpi4py. Running as a single process.\n")
   MPI = mpiEmulator()
   using_mpi = False
+except MpiDisabledError:
+  MPI = mpiEmulator()
+  using_mpi = False
+
 
 def mpi_abort_on_exception(func):
   """

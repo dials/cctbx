@@ -5,7 +5,7 @@ from scitbx.array_family import flex
 from scitbx import matrix
 import mmtbx.ncs.ncs_utils as nu
 import scitbx.rigid_body
-from libtbx.utils import Sorry
+from libtbx.utils import null_out, Sorry
 from libtbx.test_utils import approx_equal
 import iotbx.cif.model
 from six.moves import zip
@@ -28,7 +28,7 @@ class NCS_copy():
     self.rmsd = rmsd
 
   def __eq__(self, other):
-    return approx_equal(self.r, other.r) and approx_equal(self.t, other.t)
+    return approx_equal(self.r, other.r, out=null_out()) and approx_equal(self.t, other.t, out=null_out())
 
   def deep_copy(self):
     res = NCS_copy(
@@ -69,6 +69,10 @@ class NCS_restraint_group(object):
     for sc, oc in zip(self.copies, other.copies):
       result &= sc == oc
     return result
+
+  def setup_selection_set(self):
+    self.set_master_iselection = set(self.master_iselection)
+    self.list_master_iselection = list(self.master_iselection)
 
   def get_iselections_list(self):
     """
@@ -233,6 +237,40 @@ class class_ncs_restraints_group_list(list):
       result &= (sg == og)
     return result
 
+  def setup_sets(self):
+    for g in self:
+      g.setup_selection_set()
+
+  def get_copy_iseqs(self, iseqs):
+    """get iseqs from copies for proxy. E.g. for bond:
+    iseqs = [1,2]
+
+    Args:
+        iseqs (iterable): iseqs of original proxy
+
+    Returns:
+        [[3,4], [5,6], [7,8]]
+    """
+    result = []
+    # self.setup_sets()
+    # print("iseqs in get_copy_iseqs:", iseqs)
+    for gr in self:
+      if iseqs[0] in gr.set_master_iselection:
+        # check the rest are in:
+        for iseq in iseqs[1:]:
+          assert iseq in gr.set_master_iselection
+        # now iterate over input iseqs and populate the result
+        for i in range(gr.get_number_of_copies()):
+          result.append([])
+        for in_iseq in iseqs:
+          # find the index:
+          iseq_idex = gr.list_master_iselection.index(in_iseq)
+          for i, c in enumerate(gr.copies):
+            result[i].append(c.iselection[iseq_idex])
+        return result
+
+
+
   def get_n_groups(self):
     return len(self)
 
@@ -301,8 +339,7 @@ class class_ncs_restraints_group_list(list):
     This leads to undesired artefacts in refinement.
     """
     def whole_chain_in_ncs(whole_h, master_iselection):
-      m_c = whole_h.select(master_iselection)
-      m_c_id = m_c.only_model().chains()[0].id
+      m_c_id = whole_h.atoms()[master_iselection[0]].parent().parent().parent().id
       for chain in ncs_obj.truncated_hierarchy.only_model().chains():
         if chain.id == m_c_id:
           if chain.atoms_size() <= master_iselection.size():

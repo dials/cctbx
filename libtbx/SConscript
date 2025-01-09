@@ -369,13 +369,20 @@ if (sys.platform == "win32" or
         ENV=os.environ, MSVC_VERSION="14.3", TARGET_ARCH=target_arch, tools=['msvc','mslink', 'mslib'])
       env_etc.have_manifest_tool = True
       env_etc.msvc_version = 17
+    elif visual_studio_version.startswith("19.4"):
+      env_base = Environment(
+        ENV=os.environ, MSVC_VERSION="14.4", TARGET_ARCH=target_arch, tools=['msvc','mslink', 'mslib'])
+      env_etc.have_manifest_tool = True
+      env_etc.msvc_version = 17
     else:
       raise RuntimeError("""\
 Unknown or unsupported cl.exe version.
 
 Minimum version is 7.1 (Visual Studio 2003).
 For newer versions, please adjust this SConscript.
-""")
+
+%s
+""" % cl_info)
     print("MSVC_VERSION:", env_base["MSVC_VERSION"])
     env_base.Replace(
       SHCC="cl",
@@ -446,9 +453,9 @@ libtbx.scons: Warning: compiling with /MDd:
     if sys.version_info.major == 3 and sys.version_info.minor <= 8:
       env_etc.ccflags_base.append('/DHAVE_SNPRINTF')
       env_etc.cxxflags_base.append('/DHAVE_SNPRINTF')
-    # needed for latest versions of Visual Studio 2022 so that type
+    # needed for latest versions of Visual Studio 2019 and C++14 so that type
     # limits are available
-    if env_etc.msvc_version == 17:
+    if env_etc.msvc_version >= 16:
       env_etc.ccflags_base.append('/D__STDC_LIMIT_MACROS')
       env_etc.cxxflags_base.append('/D__STDC_LIMIT_MACROS')
   elif (env_etc.compiler == "win32_icc"):
@@ -971,6 +978,12 @@ int main() {
     if platform.mac_ver()[-1] == 'arm64':
       min_macos = 11.0
     base_macos_flags = ['-stdlib=libc++', '-mmacosx-version-min=%s' % min_macos]
+
+    # Boost issue with newer versions of clang
+    # include/boost/mpl/aux_/integral_wrapper.hpp:73:31: error: integer value -1 is outside the valid range of values [0, 3] for this enumeration type
+    # https://reviews.llvm.org/D150226
+    if env_etc.clang_version[0] >= 15:
+      base_macos_flags.append('-Wno-enum-constexpr-conversion')
 
     link_flags = ["-w"] # suppress "source/lib does not exist" warning
     link_flags.extend(base_macos_flags)

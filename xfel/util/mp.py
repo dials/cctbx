@@ -37,6 +37,10 @@ mp_phil_str = '''
       .type = int
       .help = If defined, use this many nodes for indexing and integration. \
               Currently only works for mp.method=shifter or slurm.
+    nnodes_tder = None
+      .type = int
+      .help = If defined, use this many nodes for ensemble refinement. \
+              Currently only works for mp.method=shifter or slurm.
     nnodes_scale = None
       .type = int
       .help = If defined, use this many nodes for scaling. \
@@ -174,7 +178,7 @@ class get_submit_command(object):
     @param err_name Filename for stderr (if None, combined with the stdout).
     @param job_name For applicable queueing systems, identifier for the job (optional).
     """
-    self.shell_path = "/bin/sh"
+    self.shell_path = "/bin/bash"
     self.source_env_scripts = []
     self.options_inside_submit_script = []
     self.submit_head = "qsub"

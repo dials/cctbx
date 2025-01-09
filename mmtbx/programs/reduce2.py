@@ -20,23 +20,23 @@ from datetime import datetime
 from libtbx.program_template import ProgramTemplate
 from libtbx import group_args, phil
 from libtbx.str_utils import make_sub_header
-from libtbx.utils import Sorry
+from libtbx.utils import Sorry, null_out
 import mmtbx
 from mmtbx.probe import Helpers
-from iotbx import pdb
+from iotbx import pdb, cli_parser
 # @todo See if we can remove the shift and box once reduce_hydrogen is complete
 from cctbx.maptbx.box import shift_and_box_model
 from mmtbx.hydrogens import reduce_hydrogen
 from mmtbx.reduce import Optimizers
 from scitbx.array_family import flex
-from iotbx.pdb import common_residue_names_get_class, amino_acid_codes
+from iotbx.pdb import common_residue_names_get_class, amino_acid_codes, nucleic_acid_codes
 from mmtbx.programs import probe2
 import copy
 import tempfile
 from iotbx.data_manager import DataManager
 import csv
 
-version = "2.1.0"
+version = "2.6.0"
 
 master_phil_str = '''
 approach = *add remove
@@ -66,7 +66,7 @@ alt_id = None
 model_id = None
   .type = int
   .short_caption = Model ID to optimize
-  .help = Model ID to optimize.  The default is to optimize all of them.
+  .help = Model ID to optimize.  The default is to optimize all of them.  If one is selected, the others are removed from the output file.
 add_flip_movers = False
   .type = bool
   .short_caption = Add flip movers
@@ -310,16 +310,17 @@ def _DescribeMainchainLink(a0s, a1s, group):
         ret += _AddPosition(a0, 'P', group) + ' ' + _AddPosition(a1, 'L', group, a0) + '\n'
   return ret
 
-def _IsStandardResidue(resname):
-  amino_acid_resnames = sorted(amino_acid_codes.one_letter_given_three_letter.keys())
-  return resname.strip().upper() in amino_acid_resnames
 
+_amino_acid_resnames = sorted(amino_acid_codes.one_letter_given_three_letter.keys())
+def _IsStandardResidue(resname):
+  return resname.strip().upper() in _amino_acid_resnames
+
+
+_nucleic_acid_resnames = set(nucleic_acid_codes.rna_one_letter_code_dict.keys()).union(
+  set(nucleic_acid_codes.dna_one_letter_code_dict.keys()))
 def _IsNucleicAcidResidue(resname):
-  nucleic_acids = [
-        "A", "C", "G", "T",  # DNA bases
-        "U", "I",            # RNA bases (I for inosine, a modified RNA base)
-  ]
-  return resname.strip().upper() in nucleic_acids
+  return resname.strip().upper() in _nucleic_acid_resnames
+
 
 def _MainChainAtomsWithHydrogen(resname):
   # Find the main chain atoms with hydrogen bonds
@@ -857,11 +858,21 @@ def _AddFlipkinMovers(states, fileBaseName, name, color, model, alts, bondedNeig
 
   return ret
 
+def _RemoveModelsExceptIndex(model_manager, model_index):
+    hierarchy = model_manager.get_hierarchy()
+    models = hierarchy.models()
+    if model_index < len(models):
+        selected_model = models[model_index]
+        for model in models:
+            if model != selected_model:
+                hierarchy.remove_model(model=model)
+    return model_manager
+
 # ------------------------------------------------------------------------------
 
 class Program(ProgramTemplate):
   description = '''
-Reduce2 version {}
+reduce2 version {}
 Add Hydrogens to a model and optimize their placement by adjusting movable groups and
 flippable groups of atoms.
 
@@ -960,7 +971,11 @@ NOTES:
     return views
 # ------------------------------------------------------------------------------
 
-  def _MakeProbePhil(self, movers_to_check, temp_output_file_name):
+  # Create a parser for Probe2 PHIL parameters, overriding specific defaults.
+  # Use it to parse the parameters we need to change and return the parser so we
+  # can extract values from it.
+  def _MakeProbePhilParser(self, movers_to_check, temp_output_file_name, extraArgs = []):
+
     # Determine the source and target selections based on the Movers
     # that we are checking being tested against everything else.
     source_selection = 'sidechain and ('
@@ -974,50 +989,24 @@ NOTES:
     source_selection += ')'
     target_selection = 'all'
 
-    # Set default parameters and then only overwrite the ones we need
-    newParams = copy.deepcopy(self.params)
-    newParams.__inject__('source_selection', source_selection)      # Not default
-    newParams.__inject__('target_selection', target_selection)      # Not default
-    newParams.approach = 'both'                                     # Not default
-    newParams.__inject__('excluded_bond_chain_length', self._bondedNeighborDepth) # Not default
-    newParams.__inject__('minimum_water_hydrogen_occupancy', 0.66)  # Not default
-    newParams.__inject__('maximum_water_hydrogen_b', 40.0)          # Not default
-    newParams.__inject__('include_mainchain_mainchain', True)
-    newParams.__inject__('include_water_water', False)
-    newParams.__inject__('keep_unselected_atoms', True)
-    newParams.__inject__('atom_radius_scale', 1.0)
-    newParams.__inject__('atom_radius_offset', 0.0)
-    newParams.__inject__('minimum_occupancy', 0.01)                 # Not default
-    newParams.__inject__('overlap_scale_factor', 0.5)
-    newParams.__inject__('ignore_lack_of_explicit_hydrogens', True)
+    parser = cli_parser.CCTBXParser(program_class=probe2.Program, logger=null_out())
+    args = [
+      "source_selection='{}'".format(source_selection),
+      "target_selection='{}'".format(target_selection),
+      "use_neutron_distances={}".format(self.params.use_neutron_distances),
+      "approach=both",
+      "excluded_bond_chain_length={}".format(self._bondedNeighborDepth),
+      "minimum_water_hydrogen_occupancy=0.66",
+      "maximum_water_hydrogen_b=40.0",
+      "minimum_occupancy=0.01",
+      "output.filename='{}'".format(temp_output_file_name),
+      "ignore_lack_of_explicit_hydrogens=True",
+      "output.add_group_line=False"
+    ]
+    args.extend(extraArgs)
+    parser.parse_args(args)
 
-    newParams.output.filename = temp_output_file_name               # Not default
-    newParams.output.__inject__('dump_file_name', None)
-    newParams.output.__inject__('format', 'kinemage')
-    newParams.output.__inject__('contact_summary', False)
-    newParams.output.__inject__('condensed', False)
-    newParams.output.__inject__('count_dots', False)
-    newParams.output.__inject__('hydrogen_bond_output', True)
-    newParams.output.__inject__('record_added_hydrogens', False)
-    newParams.output.__inject__('report_hydrogen_bonds', True)
-    newParams.output.__inject__('report_clashes', True)
-    newParams.output.__inject__('report_vdws', True)
-    newParams.output.__inject__('separate_worse_clashes', False)
-    newParams.output.__inject__('group_name', '')
-    newParams.output.__inject__('add_group_name_master_line', False)
-    newParams.output.__inject__('add_group_line', False)            # Not default
-    newParams.output.__inject__('add_kinemage_keyword', False)
-    newParams.output.__inject__('add_lens_keyword', False)
-    newParams.output.__inject__('color_by_na_base', False)
-    newParams.output.__inject__('color_by_gap', True)
-    newParams.output.__inject__('group_label', '')
-    newParams.output.__inject__('bin_gaps', False)
-    newParams.output.__inject__('merge_contacts', True)
-    newParams.output.__inject__('only_report_bad_clashes', False)
-    newParams.output.__inject__('atoms_are_masters', False)
-    newParams.output.__inject__('default_point_color', 'gray')
-    newParams.output.__inject__('compute_scores', True)
-    return newParams
+    return parser
 
 # ------------------------------------------------------------------------------
 
@@ -1031,7 +1020,7 @@ NOTES:
       keep_existing_H=self.params.keep_existing_H
     )
     reduce_add_h_obj.run()
-    reduce_add_h_obj.show(None)
+    reduce_add_h_obj.show(self.logger)
     missed_residues = set(reduce_add_h_obj.no_H_placed_mlq)
     if len(missed_residues) > 0:
       bad = ""
@@ -1053,11 +1042,10 @@ NOTES:
     # :param make_restraints: Should we compute restraints during the interpretation?
     self.model.get_hierarchy().sort_atoms_in_place()
     self.model.get_hierarchy().atoms().reset_serial()
-    p = mmtbx.model.manager.get_default_pdb_interpretation_params()
-    p.pdb_interpretation.allow_polymer_cross_special_position=True
-    p.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
-    p.pdb_interpretation.use_neutron_distances = self.params.use_neutron_distances
-    p.pdb_interpretation.proceed_with_excessive_length_bonds=True
+
+    p = reduce_hydrogen.get_reduce_pdb_interpretation_params(
+      self.params.use_neutron_distances)
+    p.pdb_interpretation.disable_uc_volume_vs_n_atoms_check=True
     # We need to turn this on because without it 1zz0.txt kept flipping the ring
     # in A TYR 214 every time we re-interpreted. The original interpretation done
     # by Hydrogen placement will have flipped them, so we don't need to do it again.
@@ -1089,9 +1077,8 @@ NOTES:
         inMainChain[a] = mainchain_sel[a.i_seq]
       else:
         # Check our bonded neighbor to see if it is on the mainchain if we are a Hydrogen
-        if len(bondedNeighborLists[a]) != 1:
-          raise Sorry("Found Hydrogen with number of neigbors other than 1: "+
-                      str(len(bondedNeighborLists[a])))
+        if len(bondedNeighborLists[a]) < 1:
+          raise Sorry("Found Hydrogen with no neigbors.")
         else:
           inMainChain[a] = mainchain_sel[bondedNeighborLists[a][0].i_seq]
       inSideChain[a] = sidechain_sel[a.i_seq]
@@ -1147,7 +1134,7 @@ NOTES:
     return '{} {} {} {} {}{} {} {}'.format(flipMover.modelId+1, altId.lower(), flipMover.chain,
       flipMover.resName, flipMover.resId, flipMover.iCode, flipStateString, adjustedString)
 
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
 
   def validate(self):
     # Set the default output file name if one has not been given.
@@ -1166,7 +1153,8 @@ NOTES:
     if self.params.output.description_file_name is None:
       self.params.output.description_file_name=self.params.output.filename.replace('.pdb',
                                                                                    '.txt')
-      # raise Sorry("Must specify output.description_file_name")
+      self.params.output.description_file_name=self.params.output.description_file_name.replace('.cif',
+                                                                                   '.txt')
 
     # Check the model ID to make sure they didn't set it to 0
     if self.params.model_id == 0:
@@ -1178,7 +1166,7 @@ NOTES:
       self._pr = cProfile.Profile()
       self._pr.enable()
 
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
 
   def run(self):
 
@@ -1200,7 +1188,32 @@ NOTES:
     # @todo reduce_hydrogens.py:run() says: TODO temporary fix until the code is moved to model class
     cs = self.model.crystal_symmetry()
     if (cs is None) or (cs.unit_cell() is None):
-      self.model = shift_and_box_model(model = self.model)
+      self.model = shift_and_box_model(model = self.model, shift_model=False)
+
+    # If we've been asked to only to a single model index from the file, strip the model down to
+    # only that index.
+    if self.params.model_id is not None:
+      make_sub_header('Selecting Model ID ' + str(self.params.model_id), out=self.logger)
+
+      # Select only the current submodel from the hierarchy
+      submodel = self.model.deep_copy()
+      _RemoveModelsExceptIndex(submodel, self.params.model_id)
+
+      # Construct a hierarchy for the current submodel
+      r = pdb.hierarchy.root()
+      mdc = submodel.get_hierarchy().models()[0].detached_copy()
+      r.append_model(mdc)
+
+      # Make yet another model for the new hierarchy
+      subset_model_manager = mmtbx.model.manager(
+        model_input       = None,
+        pdb_hierarchy     = r,
+        stop_for_unknowns = False,
+        crystal_symmetry  = submodel.crystal_symmetry(),
+        restraint_objects = None,
+        log               = None)
+
+      self.model = subset_model_manager
 
     # Stores the initial coordinates for all of the atoms and the rest of the information
     # about the original model for use by Kinemages.
@@ -1213,10 +1226,12 @@ NOTES:
       self._AddHydrogens()
       doneAdd = time.time()
 
+      # NOTE: We always optimize all models (leave modelIndex alone) because we've removed all
+      # but the desired model ID structure from the model.
       make_sub_header('Optimizing', out=self.logger)
       startOpt = time.time()
       opt = Optimizers.Optimizer(self.params.probe, self.params.add_flip_movers,
-        self.model, altID=self.params.alt_id, modelIndex=self.params.model_id,
+        self.model, altID=self.params.alt_id,
         preferenceMagnitude=self.params.preference_magnitude,
         bondedNeighborDepth = self._bondedNeighborDepth,
         nonFlipPreference=self.params.non_flip_preference,
@@ -1224,7 +1239,7 @@ NOTES:
         flipStates = self.params.set_flip_states,
         verbosity=self.params.verbosity,
         cliqueOutlineFileName=self.params.output.clique_outline_file_name,
-        keepExistingH = self.params.keep_existing_H)
+        fillAtomDump = self.params.output.print_atom_info)
       doneOpt = time.time()
       outString += opt.getInfo()
       outString += 'Time to Add Hydrogen = {:.3f} sec'.format(doneAdd-startAdd)+'\n'
@@ -1294,16 +1309,18 @@ NOTES:
         # filled in with values that we want for our summaries.
         source = [ m ]
         tempName = tempfile.mktemp()
-        newParams = self._MakeProbePhil(source, tempName)
-        newParams.approach = 'once'       # Reduce2/Reduce only check Mover atom to other
-        newParams.output.format = 'raw'
-        newParams.output.contact_summary = True
-        newParams.output.condensed = True
-        newParams.output.count_dots = True
+        extraArgs = [
+          "approach=once",
+          "output.format=raw",
+          "output.contact_summary=True",
+          "output.condensed=True",
+          "output.count_dots=True"
+          ]
+        probeParser = self._MakeProbePhilParser(source, tempName, extraArgs)
 
         # Run Probe2
-        p2 = probe2.Program(self.data_manager, newParams, master_phil=probe2.master_phil_str,
-          logger=self.logger)
+        p2 = probe2.Program(self.data_manager, probeParser.working_phil.extract(),
+                            master_phil=probeParser.master_phil, logger=self.logger)
         p2.overrideModel(self.model)
         dots, output = p2.run()
 
@@ -1332,16 +1349,18 @@ NOTES:
         # Make the Probe2 Phil parameters, then overwrite the ones that were
         # filled in with values that we want for our summaries.
         tempName = tempfile.mktemp()
-        newParams = self._MakeProbePhil(source, tempName)
-        newParams.approach = 'once'       # Reduce2/Reduce only check Mover atom to other
-        newParams.output.format = 'raw'
-        newParams.output.contact_summary = True
-        newParams.output.condensed = True
-        newParams.output.count_dots = True
+        extraArgs = [
+          "approach=once",
+          "output.format=raw",
+          "output.contact_summary=True",
+          "output.condensed=True",
+          "output.count_dots=True"
+          ]
+        probeParser = self._MakeProbePhilParser(source, tempName, extraArgs)
 
         # Run Probe2
-        p2 = probe2.Program(dm, newParams, master_phil=probe2.master_phil_str,
-          logger=self.logger)
+        p2 = probe2.Program(self.data_manager, probeParser.working_phil.extract(),
+                            master_phil=probeParser.master_phil, logger=self.logger)
         p2.overrideModel(dm.get_model(self.params.comparison_file))
         dots, output = p2.run()
 
@@ -1467,14 +1486,15 @@ NOTES:
 
           # Optimize the model and then reinterpret it so that we can get all of the information we
           # need for the resulting set of atoms (which may be fewer after Hydrogen removal).
+          # NOTE: We always optimize all models (leave modelIndex alone) because we've removed all
+          # but the desired model ID structure from the model.
           opt = Optimizers.Optimizer(self.params.probe, self.params.add_flip_movers,
-            self.model, altID=self.params.alt_id, modelIndex=self.params.model_id,
+            self.model, altID=self.params.alt_id,
             preferenceMagnitude=self.params.preference_magnitude,
             nonFlipPreference=self.params.non_flip_preference,
             skipBondFixup=self.params.skip_bond_fix_up,
             flipStates = flipStates,
-            verbosity=3,
-            keepExistingH = self.params.keep_existing_H)
+            verbosity=3)
           print('Results of optimization:', file=self.logger)
           print(opt.getInfo(), file=self.logger)
           self._ReinterpretModel()
@@ -1505,12 +1525,13 @@ NOTES:
           # Specify a temporary file for the output of Probe2, which we'll
           # delete after running.
           tempName = tempfile.mktemp()
-          newParams = self._MakeProbePhil(amides, tempName)
+          probeParser = self._MakeProbePhilParser(amides, tempName)
 
           # Run the program and append its Kinemage output to ours, deleting
           # the temporary file that it produced.
-          p2 = probe2.Program(self.data_manager, newParams, master_phil=probe2.master_phil_str,
-            logger=self.logger)
+          p2 = probe2.Program(self.data_manager, probeParser.working_phil.extract(),
+                              master_phil=probeParser.master_phil, logger=self.logger)
+
           p2.overrideModel(self.model)
           dots, kinString = p2.run()
           flipkinText += kinString
@@ -1589,14 +1610,15 @@ NOTES:
 
           # Optimize the model and then reinterpret it so that we can get all of the information we
           # need for the resulting set of atoms (which may be fewer after Hydrogen removal).
+          # NOTE: We always optimize all models (leave modelIndex alone) because we've removed all
+          # but the desired model ID structure from the model.
           opt = Optimizers.Optimizer(self.params.probe, self.params.add_flip_movers,
-            self.model, altID=self.params.alt_id, modelIndex=self.params.model_id,
+            self.model, altID=self.params.alt_id,
             preferenceMagnitude=self.params.preference_magnitude,
             nonFlipPreference=self.params.non_flip_preference,
             skipBondFixup=self.params.skip_bond_fix_up,
             flipStates = flipStates,
-            verbosity=3,
-            keepExistingH = self.params.keep_existing_H)
+            verbosity=3)
           print('Results of optimization:', file=self.logger)
           print(opt.getInfo(), file=self.logger)
           self._ReinterpretModel()
@@ -1627,12 +1649,12 @@ NOTES:
           # Specify a temporary file for the output of Probe2, which we'll
           # delete after running.
           tempName = tempfile.mktemp()
-          newParams = self._MakeProbePhil(hists, tempName)
+          probeParser = self._MakeProbePhilParser(hists, tempName)
 
           # Run the program and append its Kinemage output to ours, deleting
           # the temporary file that it produced.
-          p2 = probe2.Program(self.data_manager, newParams, master_phil=probe2.master_phil_str,
-            logger=self.logger)
+          p2 = probe2.Program(self.data_manager, probeParser.working_phil.extract(),
+                              master_phil=probeParser.master_phil, logger=self.logger)
           p2.overrideModel(self.model)
           dots, kinString = p2.run()
           flipkinText += kinString

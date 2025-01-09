@@ -184,7 +184,7 @@ def adjust_amplitudes_linear(f_array,b1,b2,b3,resolution=None,
   data_array=data_array*scale_array
   return f_array.customized_copy(data=data_array)
 
-def get_model_map_coeffs_normalized(pdb_inp=None,
+def get_model_map_coeffs_normalized(pdb_hierarchy=None,
    si=None,
    f_array=None,
    overall_b=None,
@@ -193,7 +193,7 @@ def get_model_map_coeffs_normalized(pdb_inp=None,
    target_b_iso_model_scale=0,
    target_b_iso_ratio = 5.9,  # empirical, see params for segment_and_split_map
    out=sys.stdout):
-  if not pdb_inp: return None
+  if not pdb_hierarchy: return None
   if not si:
     from cctbx.maptbx.segment_and_split_map import sharpening_info
     si=sharpening_info(resolution=resolution,
@@ -212,7 +212,7 @@ def get_model_map_coeffs_normalized(pdb_inp=None,
   from cctbx.maptbx.segment_and_split_map import get_f_phases_from_model
   try:
     model_map_coeffs=get_f_phases_from_model(
-     pdb_inp=pdb_inp,
+     pdb_hierarchy=pdb_hierarchy,
      f_array=f_array,
      overall_b=overall_b,
      k_sol=si.k_sol,
@@ -668,7 +668,8 @@ def calculate_fsc(**kw):
 
     if remove_anisotropy_before_analysis and aniso_scale_factor_as_u_cart:
       rms_fo_values = len(direction_vectors) * [None]
-    elif direction_vectors and direction_vectors[0] != None:
+    elif (direction_vectors and direction_vectors[0] != None) and (
+        aniso_scale_factor_array is not None):
       # Let's fit rms fo in just this shell
       rms_fo_values = get_rms_fo_values(
        fo = fo,
@@ -686,7 +687,8 @@ def calculate_fsc(**kw):
       if dv:
         weights_para_sel = weights_para.select(sel)
         weights_para_sel_sqrt = flex.sqrt(weights_para_sel)
-        if remove_anisotropy_before_analysis and aniso_scale_factor_as_u_cart:
+        if remove_anisotropy_before_analysis and aniso_scale_factor_as_u_cart\
+            and aniso_scale_factor_array and aniso_scale_factor_array.data():
           scale_sel = aniso_scale_factor_array.data().select(sel)
         else:
           scale_sel = None

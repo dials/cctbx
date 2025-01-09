@@ -1,7 +1,6 @@
 from __future__ import absolute_import, division, print_function
 from operator import itemgetter
 import iotbx.phil
-import iotbx.pdb
 import iotbx.mrcfile
 from cctbx import crystal
 from cctbx import maptbx
@@ -1957,7 +1956,7 @@ class sharpening_info:
       d_min_list = None,
       verbose = None,
       resolve_size = None,
-      pdb_inp = None,  # XXX probably do not need this
+      pdb_hierarchy = None,  # XXX just used to set params
       local_solvent_fraction = None,
       wang_radius = None,
       buffer_radius = None,
@@ -1970,7 +1969,6 @@ class sharpening_info:
     adopt_init_args(self, locals())
     del self.tracking_data  # don't need it as part of the object
     del self.box_sharpening_info_obj# don't need it as part of the object
-    del self.pdb_inp # don't need it as part of the object
 
     if tracking_data:  # use tracking data information
       self.update_with_tracking_data(tracking_data = tracking_data)
@@ -1991,7 +1989,7 @@ class sharpening_info:
     if self.sharpening_method == 'b_iso' and self.k_sharpen is not None:
       self.k_sharpen = None
 
-    if pdb_inp:
+    if pdb_hierarchy:
         self.sharpening_method = 'model_sharpening'
         self.box_in_auto_sharpen = True
         self.density_select_in_auto_sharpen = False
@@ -2059,7 +2057,7 @@ class sharpening_info:
      solvent_fraction = None,
      auto_sharpen = None,
      sharpening_method = None,
-     pdb_inp = None,
+     pdb_hierarchy = None,
      half_map_data_list = None,
      n_residues = None, ncs_copies = None):
       self.crystal_symmetry = crystal_symmetry
@@ -2179,7 +2177,7 @@ class sharpening_info:
         self.sharpening_method = 'half_map_sharpening'
         self.sharpening_target = 'half_map'
 
-      elif pdb_inp or self.sharpening_method == 'model_sharpening':
+      elif pdb_hierarchy or self.sharpening_method == 'model_sharpening':
         self.sharpening_method = 'model_sharpening'
         self.box_in_auto_sharpen = True
         self.density_select_in_auto_sharpen = False
@@ -2204,7 +2202,8 @@ class sharpening_info:
         self.k_sharpen = None
       return self
 
-  def show_summary(self, verbose = False, out = sys.stdout):
+  def show_summary(self, verbose = False, list_scale_factors = True,
+      out = sys.stdout):
     method_summary_dict = {
        'b_iso':"Overall b_iso sharpening",
        'b_iso_to_d_cut':"b_iso sharpening to high_resolution cutoff",
@@ -2263,7 +2262,7 @@ class sharpening_info:
 
     elif self.sharpening_method == "model_sharpening":
       print("Resolution-dependent model sharpening", file = out)
-      if self.d_min_list and self.target_scale_factors:
+      if self.d_min_list and self.target_scale_factors and list_scale_factors:
         print("Scale vs resolution:", file = out)
         for d_min, sc in zip(
           self.d_min_list,
@@ -2272,7 +2271,7 @@ class sharpening_info:
 
     elif self.sharpening_method == "half_map_sharpening":
       print("Resolution-dependent half-map sharpening", file = out)
-      if self.d_min_list and self.target_scale_factors:
+      if self.d_min_list and self.target_scale_factors and list_scale_factors:
         print("Scale vs resolution:", file = out)
         for d_min, sc in zip(
           self.d_min_list,
@@ -2501,22 +2500,21 @@ def get_map_object(file_name = None, must_allow_sharpening = None,
     raise Sorry("The map file %s is missing..." %(file_name))
   map_labels = None
   if file_name.endswith(".xplor"):
-    import iotbx.xplor.map
-    m = iotbx.xplor.map.reader(file_name = file_name)
-    m.unit_cell_grid = m.map_data().all() # just so we have something
-    m.space_group_number = 0 # so we have something
-  else:
-    from iotbx import mrcfile
-    m = mrcfile.map_reader(file_name = file_name)
-    print("MIN MAX MEAN RMS of map: %7.2f %7.2f  %7.2f  %7.2f " %(
+    raise Sorry("Unable to read xplor maps with segment_and_split_map")
+  from iotbx.data_manager import DataManager
+  dm = DataManager()
+  m = dm.get_real_map(file_name)
+  m.shift_origin()
+
+  print("MIN MAX MEAN RMS of map: %7.2f %7.2f  %7.2f  %7.2f " %(
       m.header_min, m.header_max, m.header_mean, m.header_rms), file = out)
-    print("grid: ", m.unit_cell_grid, file = out)
-    print("cell:  %8.3f %8.3f %8.3f %8.3f %8.3f %8.3f  " %tuple(
+  print("grid: ", m.unit_cell_grid, file = out)
+  print("cell:  %8.3f %8.3f %8.3f %8.3f %8.3f %8.3f  " %tuple(
        m.unit_cell().parameters()), file = out)
-    print("SG: ", m.unit_cell_crystal_symmetry().space_group_number(), file = out)
-    if must_allow_sharpening and m.cannot_be_sharpened():
+  print("SG: ", m.unit_cell_crystal_symmetry().space_group_number(), file = out)
+  if must_allow_sharpening and m.cannot_be_sharpened():
       raise Sorry("Input map is already modified and should not be sharpened")
-    if get_map_labels:
+  if get_map_labels:
       map_labels = m.labels
   print("ORIGIN: ", m.map_data().origin(), file = out)
   print("EXTENT: ", m.map_data().all(), file = out)
@@ -2524,18 +2522,10 @@ def get_map_object(file_name = None, must_allow_sharpening = None,
 
   map_data = m.data
   acc = map_data.accessor()
-  shift_needed = not \
-     (map_data.focus_size_1d() > 0 and map_data.nd()  ==  3 and
-      map_data.is_0_based())
-  if(shift_needed):
-    map_data = map_data.shift_origin()
-    origin_shift = (
-      m.map_data().origin()[0]/m.map_data().all()[0],
-      m.map_data().origin()[1]/m.map_data().all()[1],
-      m.map_data().origin()[2]/m.map_data().all()[2])
-    origin_frac = origin_shift  # NOTE: fraction of NEW cell
-  else:
-    origin_frac = (0., 0., 0.)
+  origin_frac = (
+     m.origin_shift_grid_units[0]/m.map_data().all()[0],
+     m.origin_shift_grid_units[1]/m.map_data().all()[1],
+     m.origin_shift_grid_units[2]/m.map_data().all()[2])
   # determine if we need to trim off the outer part of the map duplicating inner
   offsets = []
   need_offset = False
@@ -2609,8 +2599,8 @@ def write_ccp4_map(crystal_symmetry, file_name, map_data,
 def set_up_xrs(crystal_symmetry = None):  # dummy xrs to write out atoms
 
   lines = ["ATOM     92  SG  CYS A  10       8.470  28.863  18.423  1.00 22.05           S"] # just a random line to set up x-ray structure
-  from cctbx.array_family import flex
-  pdb_inp = iotbx.pdb.input(source_info = "", lines = lines)
+  from iotbx.pdb.utils import get_pdb_input
+  pdb_inp = get_pdb_input(lines = lines)
   xrs = pdb_inp.xray_structure_simple(crystal_symmetry = crystal_symmetry)
   scatterers = flex.xray_scatterer()
   return xrs, scatterers
@@ -2637,10 +2627,11 @@ def write_atoms(tracking_data = None, sites = None, file_name = None,
     return text
 
 
-def write_xrs(xrs = None, scatterers = None, file_name = "atoms.pdb", out = sys.stdout):
+def write_xrs(
+    xrs = None, scatterers = None, file_name = "atoms.pdb", out = sys.stdout):
   from cctbx import xray
   xrs = xray.structure(xrs, scatterers = scatterers)
-  text = xrs.as_pdb_file()
+  text = xrs.as_pdb_file()  # PDB OK just writing out some atoms
   if file_name:
     f = open(file_name, 'w')
     print(text, file = f)
@@ -2687,9 +2678,10 @@ def map_coeffs_to_fp(map_coeffs):
   assert amplitudes.is_real_array()
   return amplitudes
 
-def get_f_phases_from_model(f_array = None, pdb_inp = None, overall_b = None,
+def get_f_phases_from_model(f_array = None, pdb_hierarchy= None,
+      overall_b = None,
      k_sol = None, b_sol = None, out = sys.stdout):
-  xray_structure = pdb_inp.construct_hierarchy().extract_xray_structure(
+  xray_structure = pdb_hierarchy.extract_xray_structure(
      crystal_symmetry = f_array.crystal_symmetry())
   print("Getting map coeffs from model with %s atoms.." %(
     xray_structure.sites_frac().size()), file = out)
@@ -4397,6 +4389,45 @@ def apply_soft_mask(map_data = None,
      out = out)
   return masked_map, smoothed_mask_data
 
+def smooth_one_map(map_data, crystal_symmetry = None, smoothing_radius = None,
+     non_negative = False, method = 'exp'):
+  from cctbx.maptbx import smooth_map, unpad_in_place
+  unpad_in_place(map = map_data.deep_copy())
+  smoothed_map = smooth_map(
+      map              = map_data,
+      crystal_symmetry = crystal_symmetry,
+      rad_smooth       = smoothing_radius,
+      non_negative     = non_negative,
+      method = method)
+  return smoothed_map
+
+def get_smoothed_cc_map(map_data_1, map_data_2,
+   crystal_symmetry = None, weighting_radius = None,
+   method = 'top_hat'):
+  avg1 = map_data_1.as_1d().min_max_mean().mean
+  avg2 = map_data_2.as_1d().min_max_mean().mean
+  avg_product_map = smooth_one_map((map_data_1 - avg1) * (map_data_2 - avg2),
+     crystal_symmetry = crystal_symmetry,
+      smoothing_radius = weighting_radius,
+      non_negative = True, method = method)
+
+  sm1 = smooth_one_map (flex.pow2(map_data_1 - avg1),
+      crystal_symmetry = crystal_symmetry,
+      smoothing_radius = weighting_radius,
+      non_negative = True, method = method)
+  sm2 = smooth_one_map(flex.pow2(map_data_2 - avg2),
+      crystal_symmetry = crystal_symmetry,
+      smoothing_radius = weighting_radius,
+      non_negative = True, method = method)
+  sm = flex.sqrt(sm1) * flex.sqrt(sm2)
+  sm.as_1d().set_selected(sm.as_1d() < 1.e-20, 1.e-20)
+  cc_map = avg_product_map/sm
+  cc_map.as_1d().set_selected(cc_map.as_1d() < 0, 0)
+  cc_map.as_1d().set_selected(cc_map.as_1d() > 1, 1)
+
+  return cc_map
+
+
 def smooth_mask_data(mask_data = None,
     crystal_symmetry = None,
     threshold = None,
@@ -4734,7 +4765,7 @@ def get_bounds_for_au_box(params,
 
   # write out closest_sites to match original position
   coordinate_offset = -1*matrix.col(box.shift_cart)
-  write_atoms(file_name = 'one_au.pdb',
+  write_atoms(file_name = 'one_au.pdb', # PDB OK just writing out atoms
       crystal_symmetry = box_crystal_symmetry, sites = closest_sites+coordinate_offset)
 
   unique_closest_sites = closest_sites.deep_copy()
@@ -4837,7 +4868,7 @@ def check_memory(map_data, ratio_needed, maximum_fraction_to_use = 0.90,
 
 def get_params(args, map_data = None, crystal_symmetry = None,
     half_map_data_list = None,
-    sharpening_target_pdb_inp = None,
+    sharpening_target_pdb_hierarchy = None,
     ncs_object = None,
     write_files = None,
     auto_sharpen = None,
@@ -5034,8 +5065,8 @@ def get_params(args, map_data = None, crystal_symmetry = None,
   if params.input_files.pdb_file:
     print("\nInput PDB file to be used to identify region to work with: %s\n" %(
        params.input_files.pdb_file), file = out)
-    pdb_inp = iotbx.pdb.input(file_name = params.input_files.pdb_file)
-    pdb_hierarchy = pdb_inp.construct_hierarchy()
+    from iotbx.pdb.utils import get_pdb_hierarchy
+    pdb_hierarchy = get_pdb_hierarchy(file_name = params.input_files.pdb_file)
     pdb_atoms = pdb_hierarchy.atoms()
     pdb_atoms.reset_i_seq()
     tracking_data.set_input_pdb_info(file_name = params.input_files.pdb_file,
@@ -5116,7 +5147,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
         wrapping = wrapping,
         crystal_symmetry = crystal_symmetry,
         write_output_files = False,
-        pdb_inp = sharpening_target_pdb_inp,
+        pdb_hierarchy = sharpening_target_pdb_hierarchy,
         ncs_obj = ncs_obj,
         return_map_data_only = False,
         return_unshifted_map = True,
@@ -5643,7 +5674,8 @@ def get_ncs(params = None, tracking_data = None, file_name = None,
       from mmtbx.ncs.ncs import ncs
       ncs_object = ncs()
       try: # see if we can read biomtr records
-        pdb_inp = iotbx.pdb.input(file_name = file_name)
+        from iotbx.pdb.utils import get_pdb_input
+        pdb_inp = get_pdb_input(file_name = file_name)
         ncs_object.ncs_from_pdb_input_BIOMT(pdb_inp = pdb_inp, log = out)
       except Exception as e: # try as regular ncs object
         ncs_object.read_ncs(file_name = file_name, log = out)
@@ -7730,11 +7762,12 @@ def write_region_maps(params,
     else:
       text = "_r"
     base_file = 'map%s_%d.ccp4' %(text, id)
-    base_pdb_file = 'atoms%s_%d.pdb' %(text, id)
+    base_pdb_file = 'atoms%s_%d.pdb' %(text, id) # PDB OK just atoms
     if tracking_data.params.output_files.output_directory:
       if not os.path.isdir(tracking_data.params.output_files.output_directory):
         os.mkdir(tracking_data.params.output_files.output_directory)
-      file_name = os.path.join(tracking_data.params.output_files.output_directory, base_file)
+      file_name = os.path.join(
+        tracking_data.params.output_files.output_directory, base_file)
       pdb_file_name = os.path.join(
         tracking_data.params.output_files.output_directory, base_pdb_file)
     else:
@@ -8397,7 +8430,6 @@ def apply_origin_shift(origin_shift = None,
     shifted_pdb_file = None,
     shifted_ncs_file = None,
     tracking_data = None,
-    sharpening_target_pdb_inp = None,
     out = sys.stdout):
 
   if shifted_map_file:
@@ -8420,13 +8452,6 @@ def apply_origin_shift(origin_shift = None,
        pdb_hierarchy = pdb_hierarchy,
        out = out)
 
-    if sharpening_target_pdb_inp:
-      sharpening_target_pdb_inp = apply_shift_to_pdb_hierarchy(
-       origin_shift = origin_shift,
-       crystal_symmetry = tracking_data.crystal_symmetry,
-       pdb_hierarchy = sharpening_target_pdb_inp.construct_hierarchy(),
-       out = out).as_pdb_input()
-
     if target_hierarchy:
       target_hierarchy = apply_shift_to_pdb_hierarchy(
        origin_shift = origin_shift,
@@ -8441,12 +8466,10 @@ def apply_origin_shift(origin_shift = None,
 
 
   if shifted_pdb_file and pdb_hierarchy:
-      import iotbx.pdb
-      f = open(shifted_pdb_file, 'w')
-      print(iotbx.pdb.format_cryst1_record(
-         crystal_symmetry = tracking_data.crystal_symmetry), file = f)
-      print(pdb_hierarchy.as_pdb_string(), file = f)
-      f.close()
+      shifted_pdb_file = pdb_hierarchy.write_pdb_or_mmcif_file(
+        target_filename = shifted_pdb_file,
+        crystal_symmetry = tracking_data.crystal_symmetry)
+
       print("Wrote shifted pdb file to %s" %(
         shifted_pdb_file), file = out)
       tracking_data.set_shifted_pdb_info(file_name = shifted_pdb_file,
@@ -8467,8 +8490,8 @@ def apply_origin_shift(origin_shift = None,
         is_helical_symmetry = tracking_data.input_ncs_info.is_helical_symmetry)
       tracking_data.shifted_ncs_info.show_summary(out = out)
 
-  return shifted_ncs_object, pdb_hierarchy, target_hierarchy, tracking_data, \
-     sharpening_target_pdb_inp
+  return shifted_pdb_file, shifted_ncs_object, pdb_hierarchy, \
+     target_hierarchy, tracking_data
 
 def restore_pdb(params, tracking_data = None, out = sys.stdout):
   if not params.output_files.restored_pdb:
@@ -8481,20 +8504,20 @@ def restore_pdb(params, tracking_data = None, out = sys.stdout):
   origin_shift = (-os[0], -os[1], -os[2])
   print("Origin shift will be: %.1f  %.1f  %.1f "%(origin_shift), file = out)
 
-  import iotbx.pdb
-  pdb_inp = iotbx.pdb.input(file_name = params.input_files.pdb_to_restore)
-  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  from iotbx.pdb.utils import get_pdb_hierarchy
+  pdb_hierarchy = get_pdb_hierarchy(
+     file_name = params.input_files.pdb_to_restore)
+
   pdb_hierarchy = apply_shift_to_pdb_hierarchy(
     origin_shift = origin_shift,
     crystal_symmetry = tracking_data.crystal_symmetry,
     pdb_hierarchy = pdb_hierarchy,
     out = out)
 
-  f = open(params.output_files.restored_pdb, 'w')
-  print(iotbx.pdb.format_cryst1_record(
-      crystal_symmetry = tracking_data.crystal_symmetry), file = f)
-  print(pdb_hierarchy.as_pdb_string(), file = f)
-  f.close()
+  params.output_files.restored_pdb = pdb_hierarchy.write_pdb_or_mmcif_file(
+      crystal_symmetry = tracking_data.crystal_symmetry,
+      target_filename = params.output_files.restored_pdb)
+
   print("Wrote restored pdb file to %s" %(
      params.output_files.restored_pdb), file = out)
 
@@ -9225,7 +9248,8 @@ def get_solvent_fraction_from_molecular_mass(
 def set_up_si(var_dict = None, crystal_symmetry = None,
       is_crystal = None,
       ncs_copies = None, n_residues = None,
-      solvent_fraction = None, molecular_mass = None, pdb_inp = None, map = None,
+      solvent_fraction = None, molecular_mass = None,
+      pdb_hierarchy = None, map = None,
       auto_sharpen = True, half_map_data_list = None, verbose = None,
       out = sys.stdout):
     si = sharpening_info(n_real = map.all())
@@ -9355,7 +9379,7 @@ def set_up_si(var_dict = None, crystal_symmetry = None,
       n_residues = n_residues,
       auto_sharpen = auto_sharpen,
       sharpening_method = sharpening_method,
-      pdb_inp = pdb_inp,
+      pdb_hierarchy = pdb_hierarchy,
       half_map_data_list = half_map_data_list,
       )
     return si
@@ -9433,7 +9457,7 @@ def select_box_map_data(si = None,
            map_data = None,
            first_half_map_data = None,
            second_half_map_data = None,
-           pdb_inp = None,
+           pdb_hierarchy = None,
            get_solvent_fraction = True, # XXX test not doing this...
            n_min = 30, # at least 30 atoms to run model sharpening
            restrict_map_size = None,
@@ -9449,7 +9473,7 @@ def select_box_map_data(si = None,
   original_box_map_data = None #
   n_buffer = None
 
-  if  (not pdb_inp and not si.box_in_auto_sharpen) and (
+  if  (not pdb_hierarchy and not si.box_in_auto_sharpen) and (
       first_half_map_data and second_half_map_data):
       print("Creating density-based soft mask and applying to half-map data", file = out)
 
@@ -9473,27 +9497,24 @@ def select_box_map_data(si = None,
 
       box_first_half_map, box_second_half_map = half_map_data_list
       box_crystal_symmetry = crystal_symmetry
-      box_pdb_inp = pdb_inp
+      box_pdb_hierarchy = None
 
-  elif pdb_inp or (
+  elif pdb_hierarchy or (
      si.density_select_in_auto_sharpen and not si.box_in_auto_sharpen):
 
-  #   use map_box for pdb_inp (mask with model)
+  #   use map_box for pdb_hierarchy (mask with model)
   #   also use map_box for density_select_in_auto_sharpen sharpening because
   #     need to use the same density select for all 3 maps.
 
-  # XXX Perhaps we canuse above method for pdb_inp
 
     assert not si.local_sharpening
 
-    if pdb_inp:
+    if pdb_hierarchy:
       print("Using map_box based on input model", file = out)
-      hierarchy = pdb_inp.construct_hierarchy()
       max_box_fraction = si.max_box_fraction
       si.density_select_in_auto_sharpen = False
     else:
       #print >>out, "Using density_select in map_box"
-      hierarchy = None
       assert si.density_select_in_auto_sharpen
       max_box_fraction = si.density_select_max_box_fraction
 
@@ -9563,8 +9584,9 @@ def select_box_map_data(si = None,
       args.append('restrict_map_size = True')
     print("Getting map as box now", file = out)
     local_hierarchy = None
-    if hierarchy:
-       local_hierarchy = hierarchy.deep_copy() # run_map_box modifies its argument
+    if pdb_hierarchy:
+       local_hierarchy = pdb_hierarchy.deep_copy()
+       # run_map_box modifies its argument
     assert isinstance(si.wrapping, bool) # wrapping must be defined
     box = run_map_box(args,
         map_data = map_data, pdb_hierarchy = local_hierarchy,
@@ -9579,13 +9601,13 @@ def select_box_map_data(si = None,
     box_map = scale_map(box_map, out = out)
     box_crystal_symmetry = box.box_crystal_symmetry
     if box.hierarchy:
-      box_pdb_inp = box.hierarchy.as_pdb_input()
+      box_pdb_hierarchy = box.hierarchy
     else:
-      box_pdb_inp = None
+      box_pdb_hierarchy = None
     if first_half_map_data:
       print("Getting first map as box", file = out)
-      if hierarchy:
-        local_hierarchy = hierarchy.deep_copy() # required
+      if pdb_hierarchy:
+        local_hierarchy = pdb_hierarchy.deep_copy() # required
       box_first = run_map_box(args,
         map_data = first_half_map_data, pdb_hierarchy = local_hierarchy,
        write_output_files = False,
@@ -9600,8 +9622,8 @@ def select_box_map_data(si = None,
 
     if second_half_map_data:
       print("Getting second map as box", file = out)
-      if hierarchy:
-        local_hierarchy = hierarchy.deep_copy() # required
+      if pdb_hierarchy:
+        local_hierarchy = pdb_hierarchy.deep_copy() # required
       box_second = run_map_box(args,
         map_data = second_half_map_data, pdb_hierarchy = local_hierarchy,
        write_output_files = False,
@@ -9654,7 +9676,7 @@ def select_box_map_data(si = None,
        resolution = si.resolution,
        shift_origin = True,
        min_point = lower_bounds, max_point = upper_bounds, out = out)
-    box_pdb_inp = None
+    box_pdb_hierarchy = None
 
     if first_half_map_data:
       box_first_half_map, box_first_crystal_symmetry, \
@@ -9683,7 +9705,7 @@ def select_box_map_data(si = None,
       box_second_half_map = None
 
   if not box_map or (
-       (not pdb_inp and not second_half_map_data) and \
+       (not pdb_hierarchy and not second_half_map_data) and \
       box_map.size() > si.max_box_fraction* map_data.size()):
 
     return None, map_data, first_half_map_data, \
@@ -9715,7 +9737,7 @@ def select_box_map_data(si = None,
     wrapping = False,
     crystal_symmetry = box_crystal_symmetry,
     solvent_fraction = box_solvent_fraction)
-  return box_pdb_inp, box_map, box_first_half_map, box_second_half_map, \
+  return box_pdb_hierarchy, box_map, box_first_half_map, box_second_half_map, \
       box_crystal_symmetry, box_sharpening_info_obj, \
       smoothed_box_mask_data, original_box_map_data, n_buffer
 
@@ -9972,7 +9994,7 @@ def split_boxes(lower = None, upper = None, target_size = None, target_n_overlap
   return new_lower_upper_list
 
 def get_target_boxes(si = None, ncs_obj = None, map = None,
-    pdb_inp = None, out = sys.stdout):
+    pdb_hierarchy = None, out = sys.stdout):
 
   print(80*"-", file = out)
   print("Getting segmented map to ID locations for sharpening", file = out)
@@ -10017,8 +10039,8 @@ def get_target_boxes(si = None, ncs_obj = None, map = None,
   centers_frac = flex.vec3_double()
   upper_bounds_list = []
   lower_bounds_list = []
-  if pdb_inp and pdb_inp.atoms().extract_xyz().size()>1:
-    xyz_list = pdb_inp.atoms().extract_xyz()
+  if pdb_hierarchy and pdb_hierarchy.atoms().extract_xyz().size()>1:
+    xyz_list = pdb_hierarchy.atoms().extract_xyz()
     i_end = xyz_list.size()
     n_centers = min(i_end, max(1, len(tracking_data.output_region_map_info_list)))
     n_steps = min(n_centers, xyz_list.size())
@@ -10072,11 +10094,11 @@ def get_target_boxes(si = None, ncs_obj = None, map = None,
 
   sharpening_centers_file = os.path.join(
       si.output_directory, "sharpening_centers.pdb")
-  write_atoms(file_name = sharpening_centers_file,
+  write_atoms(file_name = sharpening_centers_file, # PDB OK
     crystal_symmetry = si.crystal_symmetry, sites = centers_cart)
   ncs_sharpening_centers_file = os.path.join(
       si.output_directory, "ncs_sharpening_centers.pdb")
-  write_atoms(file_name = ncs_sharpening_centers_file,
+  write_atoms(file_name = ncs_sharpening_centers_file, # PDB OK
     crystal_symmetry = si.crystal_symmetry, sites = all_cart)
 
   print("\nSharpening centers (matching shifted_map_file).\n\n "+\
@@ -10121,7 +10143,7 @@ def run_local_sharpening(si = None,
     map = None,
     ncs_obj = None,
     half_map_data_list = None,
-    pdb_inp = None,
+    pdb_hierarchy = None,
     out = sys.stdout):
   print(80*"-", file = out)
   print("Running local sharpening", file = out)
@@ -10141,7 +10163,7 @@ def run_local_sharpening(si = None,
           auto_sharpen_methods = auto_sharpen_methods,
           map = map,
           half_map_data_list = half_map_data_list,
-          pdb_inp = pdb_inp,
+          pdb_hierarchy = pdb_hierarchy,
           out = out)
     sharpened_map = overall_si.map_data
     print("\nDone sharpening map overall before carrying out local sharpening\n", file = out)
@@ -10168,7 +10190,7 @@ def run_local_sharpening(si = None,
   upper_bounds_list, lower_bounds_list, \
      centers_cart_ncs_list, centers_cart, all_cart = \
      get_target_boxes(si = si, map = sharpened_map, ncs_obj = ncs_obj,
-       pdb_inp = pdb_inp, out = out)
+       pdb_hierarchy = pdb_hierarchy, out = out)
 
   dist = mean_dist_to_nearest_neighbor(all_cart)
   if not dist:
@@ -10213,11 +10235,11 @@ def run_local_sharpening(si = None,
         auto_sharpen_methods = auto_sharpen_methods,
         map = sharpened_map,
         half_map_data_list = half_map_data_list,
-        pdb_inp = pdb_inp,
+        pdb_hierarchy = pdb_hierarchy,
         return_bsi = True, # just return the bsi of sharpened data
         out = out)
 
-      if not bsi.map_data:
+      if not bsi or not bsi.map_data:
         print("\nNo result for local map %s ...skipping" %(i), file = out)
         continue
 
@@ -10294,7 +10316,7 @@ def auto_sharpen_map_or_map_coeffs(
         half_map_data_list = None,     #  two half-maps matching map
         is_crystal = None,
         map_coeffs = None,
-        pdb_inp = None,
+        pdb_hierarchy = None,
         ncs_obj = None,
         seq_file = None,
         sequence = None,
@@ -10425,7 +10447,7 @@ def auto_sharpen_map_or_map_coeffs(
     if half_map_data_list and len(half_map_data_list) == 2:
       if auto_sharpen_methods !=  ['external_map_sharpening']:
         auto_sharpen_methods = ['half_map_sharpening']
-    elif pdb_inp:
+    elif pdb_hierarchy:
       auto_sharpen_methods = ['model_sharpening']
     if not si:
       # Copy parameters to si (sharpening_info_object)
@@ -10438,7 +10460,7 @@ def auto_sharpen_map_or_map_coeffs(
         map = map,
         verbose = verbose,
         half_map_data_list = half_map_data_list,
-        pdb_inp = pdb_inp,
+        pdb_hierarchy = pdb_hierarchy,
         ncs_copies = ncs_copies,
         n_residues = n_residues, out = out)
     if wrapping is not None:
@@ -10475,7 +10497,7 @@ def auto_sharpen_map_or_map_coeffs(
          map = map,
          ncs_obj = ncs_obj,
          half_map_data_list = half_map_data_list,
-         pdb_inp = pdb_inp,
+         pdb_hierarchy = pdb_hierarchy,
          out = out)
 
     # Get preliminary values of sharpening
@@ -10492,7 +10514,7 @@ def auto_sharpen_map_or_map_coeffs(
             auto_sharpen_methods = auto_sharpen_methods,
             map = map,
             half_map_data_list = half_map_data_list,
-            pdb_inp = pdb_inp,
+            pdb_hierarchy = pdb_hierarchy,
             out = out)
       working_map = overall_si.map_data
       # Get solvent content again
@@ -10524,7 +10546,7 @@ def auto_sharpen_map_or_map_coeffs(
       map_data = working_map,
       first_half_map_data = first_half_map_data,
       second_half_map_data = second_half_map_data,
-      pdb_inp = pdb_inp,
+      pdb_hierarchy = pdb_hierarchy,
       auto_sharpen_methods = auto_sharpen_methods,
       print_result = False,
       return_bsi = return_bsi,
@@ -10732,7 +10754,7 @@ def run_auto_sharpen(
       map_data = None,
       first_half_map_data = None,
       second_half_map_data = None,
-      pdb_inp = None,
+      pdb_hierarchy = None,
       auto_sharpen_methods = None,
       print_result = True,
       return_bsi = False,
@@ -10753,10 +10775,11 @@ def run_auto_sharpen(
   smoothed_box_mask_data = None
   original_box_map_data = None
   if si.auto_sharpen and (
-    si.box_in_auto_sharpen or si.density_select_in_auto_sharpen or pdb_inp):
+    si.box_in_auto_sharpen or
+    si.density_select_in_auto_sharpen or pdb_hierarchy):
 
     original_box_sharpening_info_obj = deepcopy(si)  # should really not be box
-    box_pdb_inp, box_map_data, box_first_half_map_data, \
+    box_pdb_hierarchy, box_map_data, box_first_half_map_data, \
          box_second_half_map_data, \
          box_crystal_symmetry, box_sharpening_info_obj, \
          smoothed_box_mask_data, original_box_map_data, n_buffer = \
@@ -10764,7 +10787,7 @@ def run_auto_sharpen(
            map_data = map_data,
            first_half_map_data = first_half_map_data,
            second_half_map_data = second_half_map_data,
-           pdb_inp = pdb_inp,
+           pdb_hierarchy = pdb_hierarchy,
            restrict_map_size = si.restrict_map_size,
            out = out, local_out = local_out)
 
@@ -10783,11 +10806,11 @@ def run_auto_sharpen(
       original_crystal_symmetry = si.crystal_symmetry
 
       map_data = box_map_data
-      pdb_inp = box_pdb_inp
-      if si.density_select_in_auto_sharpen and ( # catch empty pdb_inp
-         not pdb_inp or not \
-           pdb_inp.construct_hierarchy().overall_counts().n_residues):
-        pdb_inp = None
+      pdb_hierarchy = box_pdb_hierarchy
+      if si.density_select_in_auto_sharpen and ( # catch empty pdb_hierarchy
+         (not pdb_hierarchy) or (not
+           pdb_hierarchy.overall_counts().n_residues)):
+        pdb_hierarchy = None
 
       crystal_symmetry = box_crystal_symmetry
       if box_first_half_map_data:
@@ -10847,16 +10870,17 @@ def run_auto_sharpen(
   else:
     second_half_map_coeffs = None
 
-  if pdb_inp:
-    # Getting model information if pdb_inp present ---------------------------
+  if pdb_hierarchy:
+    # Getting model information if pdb_hierarchy present -------------------
     from cctbx.maptbx.refine_sharpening import get_model_map_coeffs_normalized
-    model_map_coeffs = get_model_map_coeffs_normalized(pdb_inp = pdb_inp,
+    model_map_coeffs = get_model_map_coeffs_normalized(
+     pdb_hierarchy = pdb_hierarchy,
        si = si,
        f_array = f_array,
        resolution = si.resolution,
        out = out)
     if not model_map_coeffs:  # give up
-      pdb_inp = None
+      pdb_hierarchy = None
       if si.is_model_sharpening():
         raise Sorry("Cannot carry out model sharpening without a model."+
             " It could be that the model was outside the map")
@@ -11384,7 +11408,8 @@ def run_auto_sharpen(
           print("This is the current best score\n", file = out)
 
   if (best_si.score is not None )  and (
-     not best_si.is_model_sharpening() )  and (not best_si.is_half_map_sharpening()):
+     not best_si.is_model_sharpening() )  and (
+     not best_si.is_half_map_sharpening()):
     print("\nOverall best sharpening method: %s Score: %7.3f\n" %(
        best_si.sharpening_method, best_si.score), file = out)
     best_si.show_summary(out = out)
@@ -11396,6 +11421,8 @@ def run_auto_sharpen(
       print("Did not improve score with sharpening...", file = out)
   if return_bsi:
     map_data = best_map_and_b.map_data
+    if not map_data: # no result
+       return None
     map_data = set_mean_sd_of_map(map_data = map_data,
       target_mean = starting_mean, target_sd = starting_sd)
     box_sharpening_info_obj.map_data = map_data
@@ -11709,7 +11736,7 @@ def run(args,
      target_xyz = None,
      target_hierarchy = None,
      target_model = None,
-     sharpening_target_pdb_inp = None,
+     sharpening_target_pdb_hierarchy = None,
      wrapping = None,
      target_ncs_au_file = None,
      regions_to_keep = None,
@@ -11751,7 +11778,8 @@ def run(args,
        box_buffer = box_buffer,
        soft_mask_extract_unique = soft_mask_extract_unique,
        mask_expand_ratio = mask_expand_ratio,
-       sharpening_target_pdb_inp = sharpening_target_pdb_inp, out = out)
+       sharpening_target_pdb_hierarchy = sharpening_target_pdb_hierarchy,
+        out = out)
     if params.control.shift_only:
       return map_data, ncs_obj, tracking_data
     elif params.control.check_ncs or \
@@ -11769,9 +11797,9 @@ def run(args,
     if target_model:
       target_hierarchy = target_model.get_hierarchy()
     elif params.input_files.target_ncs_au_file: # read in target
-      import iotbx.pdb
-      target_hierarchy = iotbx.pdb.input(
-         file_name = params.input_files.target_ncs_au_file).construct_hierarchy()
+      from iotbx.pdb.utils import get_pdb_hierarchy
+      pdb_hierarchy = get_pdb_hierarchy(
+         file_name = params.input_files.target_ncs_au_file)
 
     print("\nShifting model based on origin shift (if any)", file = out)
     print("Coordinate shift is (%7.2f, %7.2f, %7.2f)" %(
@@ -11797,8 +11825,8 @@ def run(args,
           params.output_files.shifted_pdb_file)
     else:
       shifted_pdb_file = None
-    ncs_obj, pdb_hierarchy, target_hierarchy, \
-      tracking_data, sharpening_target_pdb_inp = apply_origin_shift(
+    shifted_pdb_file, ncs_obj, pdb_hierarchy, target_hierarchy, \
+      tracking_data= apply_origin_shift(
         shifted_map_file = shifted_map_file,
         shifted_pdb_file = shifted_pdb_file,
         shifted_ncs_file = shifted_ncs_file,
@@ -11808,8 +11836,9 @@ def run(args,
         target_hierarchy = target_hierarchy,
         map_data = map_data,
         tracking_data = tracking_data,
-        sharpening_target_pdb_inp = sharpening_target_pdb_inp,
         out = out)
+    if shifted_pdb_file:
+      params.output_files.shifted_pdb_file = os.path.split(shifted_pdb_file)[-1]
 
     if target_hierarchy:
       target_xyz = target_hierarchy.atoms().extract_xyz()

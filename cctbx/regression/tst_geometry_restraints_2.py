@@ -395,7 +395,7 @@ def exercise_non_crystallographic_conserving_bonds_and_angles():
   sio = StringIO()
   geo.show_sorted(sites_cart=sites_cart_noise, f=sio)
   expected_first_part = """\
-Bond restraints: 5
+Bond | covalent geometry | restraints: 5
 Sorted by residual:
 bond 2
      3
@@ -420,7 +420,7 @@ bond 0
 
 """
   assert not show_diff(sio.getvalue(), expected_first_part + """\
-Nonbonded interactions: 0
+Nonbonded | unspecified | interactions: 0
 
 """)
   #
@@ -438,7 +438,7 @@ Nonbonded interactions: 0
   sio = StringIO()
   geo.show_sorted(sites_cart=sites_cart_noise, f=sio)
   assert not show_diff(sio.getvalue(), expected_first_part + """\
-Nonbonded interactions: 2
+Nonbonded | unspecified | interactions: 2
 Sorted by model distance:
 nonbonded 0
           4
@@ -550,11 +550,11 @@ ATOM    263  C6   DC B  12       8.502  -0.825  21.311  1.00  6.80           C
   Bond restraints: 87""",
   '''\
   Histogram of bond angle deviations from ideal:
-       99.49 -   105.87: 23
-      105.87 -   112.26: 36
-      112.26 -   118.65: 28
-      118.65 -   125.04: 30
-      125.04 -   131.42: 13
+        0.00 -     1.10: 75
+        1.10 -     2.19: 30
+        2.19 -     3.29: 13
+        3.29 -     4.38: 8
+        4.38 -     5.48: 4
   Bond angle restraints: 130''',
   ]
   with open("tst_cctbx_geometry_restraints_2_na.pdb", "w") as f:
@@ -598,20 +598,26 @@ ATOM    263  C6   DC B  12       8.502  -0.825  21.311  1.00  6.80           C
         print("This portion was not found:\n%s\n=====End of portion." % portion)
         assert 0, "the portion above does not match expected portion."
   # check .geo output
-  geo_identical_portions = ["Bond restraints: 87",
-      "Bond angle restraints: 130", "Dihedral angle restraints: 33",
-      "Chirality restraints: 15",
-      "Planarity restraints: 4"]
-  ss_geo_portions = ["Bond-like restraints: 6",
-      'Secondary Structure restraints around h-bond angle restraints: 12',
-      "Stacking parallelity restraints: 2",
-      'Basepair parallelity restraints: 2',
-      "Nonbonded interactions: 504"]
+  geo_identical_portions = ["Bond | covalent geometry | restraints: 87",
+      "Bond angle | covalent geometry | restraints: 130",
+      "Dihedral angle | covalent geometry | restraints: 33",
+      "Chirality | covalent geometry | restraints: 15",
+      "Planarity | covalent geometry | restraints: 4"]
+  ss_geo_portions = [
+      # "Bond-like restraints: 6",
+      "Bond | Bond-like | restraints: 6",
+      # 'Secondary Structure restraints around h-bond angle restraints: 12',
+      'Bond angle | Secondary Structure restraints around h-bond | restraints: 12',
+      # "Stacking parallelity restraints: 2",
+      # 'Basepair parallelity restraints: 2',
+      'Parallelity | Stacking parallelity | restraints: 2',
+      'Parallelity | Basepair parallelity | restraints: 2',
+      "Nonbonded | unspecified | interactions: 504"]
   non_ss_geo_portions = [
       #"Bond-like restraints: 0",
       #'Secondary Structure restraints around h-bond angle restraints: 0',
       # "Parallelity restraints: 0", removed because zero
-      "Nonbonded interactions: 526"]
+      "Nonbonded | unspecified | interactions: 526"]
   acp = processed_pdb_file.all_chain_proxies
   sites_cart = acp.sites_cart_exact()
   site_labels = [atom.id_str() for atom in acp.pdb_atoms]
@@ -622,9 +628,10 @@ ATOM    263  C6   DC B  12       8.502  -0.825  21.311  1.00  6.80           C
   v_geo_out_noss = geo_out1.getvalue()
   v_geo_out_ss = geo_out2.getvalue()
   for portion in geo_identical_portions+ss_geo_portions:
-    assert v_geo_out_ss.find(portion) >= 0, 'did not find %s\n in \n%s' % (
+    assert v_geo_out_ss.find(portion) >= 0, 'did not find %s\n in \n%s\n%s\n' % (
       portion,
-      v_geo_out_ss)
+      v_geo_out_ss,
+      portion)
   for portion in geo_identical_portions+non_ss_geo_portions:
     assert v_geo_out_noss.find(portion) >= 0, 'did not find %s\n in \n%s' % (
       portion,

@@ -1,3 +1,87 @@
+2024.12
+=======
+
+* Added consistency checks for map_model_manager
+* Added tool for finding reference models based on sequence identity
+
+2024.11
+=======
+
+* Added generalized interface for LBFGS minimizer
+* Improved adding of hydrogens near links in Reduce2
+
+2024.10
+=======
+
+* Added support for Python 3.13
+* Improved tools for alternate conformations
+* Added option to download maps from the EMDB to iotbx.fetch_pdb
+* Fix random selection of atoms to consistently select the same number of atoms
+
+2024.9
+======
+
+* Added general minimizer class for LBFGS and LBFGS-B minimizers
+* Enabled linking of modified amino acids for cyclic peptides
+* Added functions for parsing .geo files
+
+2024.8
+======
+
+* Speed improvements to pdb_interpretation
+* DataManager: add sanity check for specified resolution limits
+
+2024.7
+======
+
+* Speed improvements in NCS search and process non-bonded links
+* DataManager: add scoring layer to filter arrays for fmodel
+
+2024.6
+======
+
+* Update pdbtools to use target_output_format
+* Update known residue codes
+* Update CCTBXParser to show diff of DataManager scope with --diff-params
+
+2024.5
+======
+
+* Added water picking with alternate conformations
+* Removed more unused or not maintained tools in iotbx and mmtbx
+* Added check for NaN in ccp4/mrc maps
+
+2024.4
+======
+
+* Added mmtbx.holton_geometry_validation tool
+* Removed unused or not maintained tools in mmtbx
+* Fixed bug in PDB remediator for RNA
+* Added ability to add water with alternative conformations
+
+2024.3
+======
+
+* Fixed loggraph output in xtriage
+* Added initial clashscore2 that uses reduce2 and probe2
+* Clean up MolProbity and clashscore code
+* Clean up Polder maps code
+* Added option to use pyopengl in gltbx if available
+
+2024.2
+======
+
+* Improved handling of writing models in mmCIF or PDB formats
+* Speedups to reduce2 and probe2
+
+2024.1
+======
+
+* Added checks to see if a model can be outupt in the PDB format
+* Added custom scattering factors support to fmodel
+* Reogranize fmodel PHIL
+* Fixed boost::timer deprecation
+
 2023.12
 =======
 

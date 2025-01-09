@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 import six
 from six.moves import range
 from six.moves import cStringIO as StringIO
+from collections import Counter
 import math
 from libtbx import adopt_init_args
 from dials.array_family import flex
@@ -56,7 +57,7 @@ class postrefinement_rs2(postrefinement_rs):
     new_experiments = ExperimentList()
     new_reflections = flex.reflection_table()
 
-    experiments_rejected_by_reason = {} # reason:how_many_rejected
+    experiments_rejected_by_reason = Counter()  # reason:how_many_rejected
 
     for expt_id, experiment in enumerate(experiments):
 
@@ -174,15 +175,25 @@ class postrefinement_rs2(postrefinement_rs):
 
         assert result_observations_original_index.size() == result_observations.size()
         assert result_matches.pairs().size() == result_observations_original_index.size()
+        # Calculate the correlation of each frame after corrections.
+        # This is used in the MM24 error model to determine a per frame level of error
+        # These are the added to the reflection table
+        I_observed = result_observations.data()
+        matches = miller.match_multi_indices(
+          miller_indices_unique = miller_set.indices(),
+          miller_indices = result_observations.indices()
+        )
+        I_reference = flex.double([i_model.data()[pair[0]] for pair in matches.pairs()])
+        I_invalid = flex.bool([i_model.sigmas()[pair[0]] < 0. for pair in matches.pairs()])
+        I_weight = flex.double(len(result_observations.sigmas()), 1.)
+        I_weight.set_selected(I_invalid, 0.)
+        SWC_after_post = simple_weighted_correlation(I_weight, I_reference, I_observed)
       except (AssertionError, ValueError, RuntimeError) as e:
         error_detected = True
         reason = repr(e)
         if not reason:
           reason = "Unknown error"
-        if not reason in experiments_rejected_by_reason:
-          experiments_rejected_by_reason[reason] = 1
-        else:
-          experiments_rejected_by_reason[reason] += 1
+        experiments_rejected_by_reason[reason] += 1
 
       if not error_detected:
         new_experiments.append(experiment)
@@ -206,7 +217,7 @@ class postrefinement_rs2(postrefinement_rs):
         for key in self.params.input.persistent_refl_cols:
           if key not in new_exp_reflections.keys():
             new_exp_reflections[key] = exp_reflections_match_results[key]
-
+        new_exp_reflections["correlation_after_post"] = flex.double(len(new_exp_reflections), SWC_after_post.corr)
         new_reflections.extend(new_exp_reflections)
 
     # report rejected experiments, reflections
@@ -216,27 +227,12 @@ class postrefinement_rs2(postrefinement_rs):
     self.logger.log("Experiments rejected by post-refinement: %d"%experiments_rejected_by_postrefinement)
     self.logger.log("Reflections rejected by post-refinement: %d"%reflections_rejected_by_postrefinement)
 
-    all_reasons = []
     for reason, count in six.iteritems(experiments_rejected_by_reason):
       self.logger.log("Experiments rejected due to %s: %d"%(reason,count))
-      all_reasons.append(reason)
-
-    comm = self.mpi_helper.comm
-    MPI = self.mpi_helper.MPI
-
-    # Collect all rejection reasons from all ranks. Use allreduce to let each rank have all reasons.
-    all_reasons  = comm.allreduce(all_reasons, MPI.SUM)
-    all_reasons = set(all_reasons)
 
     # Now that each rank has all reasons from all ranks, we can treat the reasons in a uniform way.
-    total_experiments_rejected_by_reason = {}
-    for reason in all_reasons:
-      rejected_experiment_count = 0
-      if reason in experiments_rejected_by_reason:
-        rejected_experiment_count = experiments_rejected_by_reason[reason]
-      total_experiments_rejected_by_reason[reason] = comm.reduce(rejected_experiment_count, MPI.SUM, 0)
-
-    total_accepted_experiment_count = comm.reduce(len(new_experiments), MPI.SUM, 0)
+    total_experiments_rejected_by_reason = self.mpi_helper.count(experiments_rejected_by_reason)
+    total_accepted_experiment_count = self.mpi_helper.sum(len(new_experiments))
 
     # how many reflections have we rejected due to post-refinement?
     rejected_reflections = len(reflections) - len(new_reflections);
@@ -284,8 +280,7 @@ class postrefinement_rs2(postrefinement_rs):
     partiality_array = self.refinery.get_partiality_array(values)
     p_scaler = flex.pow(partiality_array,
                         0.5*self.params.postrefinement.merge_partiality_exponent)
-
-    fat_selection = (partiality_array > 0.2)
+    fat_selection = (partiality_array > self.params.postrefinement.partiality_threshold_hcfix)
     fat_count = fat_selection.count(True)
     scaler_s = scaler.select(fat_selection)
     p_scaler_s = p_scaler.select(fat_selection)

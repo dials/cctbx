@@ -27,7 +27,7 @@ other_charges = {
   'HOH' : 0,
 }
 disallowed_element_charges = {
-  'N' :  2,
+  'N' :  1,
   'O' : -1,
   'C' :  1,
 }
@@ -54,21 +54,21 @@ def get_atom_database():
   from mmtbx.ligands.chemistry import non_metal_indices
   atom_database = atoms()
   for i, element in enumerate(elements):
-    atom_database[element]={'number':i}
+    atom_database[element.upper()]={'number':i}
   for element, valence in zip(elements, valences):
     if valence>-1:
-      atom_database[element]['valence'] = valence
+      atom_database[element.upper()]['valence'] = valence
   for element, lone_pair in zip(elements, lone_pairs):
     if lone_pair>0:
-      atom_database[element]['lone pairs'] = lone_pair
+      atom_database[element.upper()]['lone pairs'] = lone_pair
   for i, element in enumerate(elements):
     if i not in non_metal_indices:
-      atom_database[element]['metal']=True
+      atom_database[element.upper()]['metal']=True
       if element in default_metal_charges:
         # atom_database['valence'] = default_metal_charges[element]*-1
-        atom_database[element]['charge'] = default_metal_charges[element]
+        atom_database[element.upper()]['charge'] = default_metal_charges[element]
       else:
-        atom_database[element]['charge'] = None
+        atom_database[element.upper()]['charge'] = None
   atom_database['D']=atom_database['H']
   return atom_database
 
@@ -95,7 +95,7 @@ class atom_property(dict):
     return self.get(element.strip(), {}).get('number', 0)
 
   def is_metal(self, element):
-    return self.get(element.strip().capitalize(), {}).get('metal', False)
+    return self.get(element.strip(), {}).get('metal', False)
 
   def get_charge(self):
     return self.get(element.strip(), {}).get('charge', None)
@@ -105,7 +105,7 @@ class electron_distribution(dict):
                hierarchy,
                grm,
                specific_atom_charges=None, # a list of selections and charges
-               specific_atom_multicities=None,
+               specific_atom_multiplicities=None,
                alternative_location_id=None,
                alternative_location_index=None,
                log=None,
@@ -123,12 +123,14 @@ class electron_distribution(dict):
       sites_cart=self.xrs.sites_cart())
     #
     self.specific_atom_charges = specific_atom_charges
+    self.specific_atom_multiplicities = specific_atom_multiplicities
+    self.atoms_with_charges_set = []
     if log is None:
       self.logger = sys.stdout
     else:
       self.logger = log
     self.verbose=verbose
-    if [_f for _f in hierarchy.get_conformer_indices() if _f]:
+    if [_f for _f in hierarchy.get_conformer_indices().conformer_indices if _f]:
       assert (alternative_location_id is not None or
               alternative_location_index is not None)
     for atom in self.atoms:
@@ -136,8 +138,8 @@ class electron_distribution(dict):
       assert e is not None, ' element %s not found' % atom.element
       metal = self.properties.is_metal(atom.element)
       if metal:
-        if atom.element in default_metal_charges:
-          self[atom.i_seq]=default_metal_charges[atom.element]*-1
+        if atom.element.capitalize() in default_metal_charges:
+          self[atom.i_seq]=default_metal_charges[atom.element.capitalize()]*-1
           # self[atom.i_seq]=None
         else:
           print(atom.quote())
@@ -147,6 +149,7 @@ class electron_distribution(dict):
     self.set_charges() # place for selections
     self.validate_metals()
     self.form_bonds()
+    self.adjust_for_multiplicity()
 
   def __repr__(self):
     return self.show()
@@ -264,8 +267,8 @@ class electron_distribution(dict):
     atoms = self.hierarchy.atoms()
     for key, electrons in self.items():
       element = atoms[key].element.strip()
-      if element in default_metal_charges:
-        self[key]=default_metal_charges[element]*-1
+      if element.capitalize() in default_metal_charges:
+        self[key]=default_metal_charges[element.capitalize()]*-1
 
     for atom in atoms:
       element = atom.element.strip()
@@ -278,13 +281,30 @@ class electron_distribution(dict):
         metal_asc = self.hierarchy.atom_selection_cache()
         metal_sel = metal_asc.selection(sac.atom_selection)
         metal_hierarchy = self.hierarchy.select(metal_sel)
-        for atom in metal_hierarchy.atoms():
+        for i, atom in enumerate(metal_hierarchy.atoms()):
           self[atom.i_seq]=sac.charge*-1
+          self.atoms_with_charges_set.append(atom.i_seq)
+          assert i<1
+
+  def adjust_for_multiplicity(self):
+    if self.specific_atom_multiplicities:
+      for i, mac in enumerate(self.specific_atom_multiplicities):
+        radical_asc = self.hierarchy.atom_selection_cache()
+        radical_sel = radical_asc.selection(mac.atom_selection)
+        radical_hierarchy = self.hierarchy.select(radical_sel)
+        for i, atom in enumerate(radical_hierarchy.atoms()):
+          if self[atom.i_seq] and not atom.i_seq in self.atoms_with_charges_set:
+            if mac.multiplicity==2:
+              self[atom.i_seq]=0
+              print('\nCharge on %s changed to zero because of multiplicity. CHECK!' % atom.quote(),
+                    file=self.logger)
+              break
 
   def _has_metal(self, atom1, atom2):
     is_metal_count = [0,1][self.properties.is_metal(atom1.element)]
     is_metal_count+= [0,1][self.properties.is_metal(atom2.element)]
-    if is_metal_count==2: assert 0
+    if is_metal_count==2:
+      print('\nMore than one metal in a bond can lead to issues. CHECK!', file=self.logger)
     return is_metal_count
 
   def is_metal_bond(self, key):
@@ -851,7 +871,9 @@ class electron_distribution(dict):
             rc.setdefault(outl, [])
             rc[outl].append([atoms[key].quote(), key])
 
+    terminals = {}
     for atom, charge in charged_atoms:
+      if atom.name in [' OXT']: terminals[atom.parent().id_str()]=charge
       ag = atom.parent()
       if get_class(ag.resname) in ['common_amino_acid']:
         base = base_amino_acid_charges.get(ag.resname, 0)
@@ -874,9 +896,10 @@ class electron_distribution(dict):
     for ag in self.hierarchy.atom_groups():
       delta = 1
       if ag.resname in ['HIS']: delta=2
+      terminal_adjust = ag.id_str() in terminals
       charge = charged_residues.get(ag.id_str(), 0)
       outl = 'Unlikely charge for %s of %s' % (ag.resname, charge)
-      if abs(charge-base_amino_acid_charges.get(ag.resname, 0)) > delta:
+      if abs(charge-base_amino_acid_charges.get(ag.resname, 0)-int(terminal_adjust)) > delta:
         if raise_if_error: raise Sorry(outl)
         rc.setdefault(outl, [])
         rc[outl].append('"%s"' % ag.id_str())
@@ -886,7 +909,7 @@ class electron_distribution(dict):
     answers = {
       'Residue HOH has a problem with the charge : 2!=0' : \
         'Hydrogen atoms not added to water',
-      'Element has strange number of electrons  N  : 2' : \
+      'Element has strange number of electrons  N  : 1' : \
         'N terminal (or break) missing hydrogen atoms',
       'Element has strange number of electrons  O  : -1' : \
         'C terminal (or break) missing oxygen atoms',
@@ -918,7 +941,7 @@ class electron_distribution(dict):
     return report
 
 from libtbx.program_template import ProgramTemplate
-#from libtbx.utils import null_out
+from libtbx.utils import null_out
 from libtbx import group_args
 
 master_phil_str = '''
@@ -956,6 +979,7 @@ Inputs:
 
   def run(self):
     model = self.data_manager.get_model()
+    model.set_log(null_out())
     model.process(make_restraints=True)
     if self.params.input.selection:
       new_model = model.selection(self.params.input.selection)
@@ -986,6 +1010,7 @@ def run(pdb_filename=None,
         raw_records=None,
         return_formal_charges=False,
         verbose=False,
+        cif_objects=None,
         ):
   # legacy from Q|R...
   if pdb_filename:
@@ -1005,6 +1030,7 @@ def run(pdb_filename=None,
   working_params.pdb_interpretation.automatic_linking.link_metals=True
   model = mmtbx.model.manager(
     model_input = inp,
+    restraint_objects=cif_objects,
     log = log,
   )
   model.process(make_restraints=True,

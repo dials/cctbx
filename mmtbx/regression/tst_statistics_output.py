@@ -1184,8 +1184,8 @@ def test_1():
       exp = """
 GEOMETRY RESTRAINTS LIBRARY: GEOSTD + MONOMER LIBRARY + CDL V1.2
 DEVIATIONS FROM IDEAL VALUES - RMSD, RMSZ FOR BONDS AND ANGLES.
-  BOND      :  0.004   0.020   1174  Z= 0.292
-  ANGLE     :  0.908   4.674   1594  Z= 0.671
+  BOND      :  0.004   0.020   1174  Z= 0.293
+  ANGLE     :  0.914   4.674   1594  Z= 0.676
   CHIRALITY :  0.038   0.125    186
   PLANARITY :  0.003   0.018    205
   DIHEDRAL  : 11.055  85.166    440
@@ -1226,7 +1226,11 @@ MAX DEVIATION FROM PLANES:
 """
   val = [l.strip() for l in val.splitlines() if l.strip() != '']
   exp = [l.strip() for l in exp.splitlines() if l.strip() != '']
-  assert val == exp
+  if val!=exp:
+    for a,b in zip(val,exp):
+      if a!=b:
+        print('------\n%s\n%s\n======' % (a,b))
+  assert val == exp, '%s\n NOT EQUAL\n%s' % (val, exp)
 
 if __name__ == '__main__':
   test_1()
