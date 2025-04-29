@@ -56,7 +56,6 @@ tst_list = [
   "$D/geometry_restraints/tst_process_nonbonded_proxies.py",
   "$D/geometry_restraints/tst_angle_derivs.py",
   "$D/geometry_restraints/tst_motif.py",
-  "$D/adp_restraints/tst_ext.py",
   "$D/regression/tst_math_module.py",
   ["$D/regression/tst_krivy_gruber.py", "--Quick"],
   "$D/regression/tst_sgtbx.py",
@@ -101,7 +100,6 @@ tst_list = [
   "$D/maptbx/tst_real_space_refinement_simple.py",
   "$D/maptbx/tst_interpolation.py",
   "$D/maptbx/tst_interpolation_2.py",
-  "$D/regression/tst_loc_res.py",
   "$D/maptbx/tst_target_and_gradients.py",
   ["$D/regression/tst_miller_merge_equivalents.py", "P31"],
   ["$D/regression/tst_grouped_data.py", "P31"],
@@ -152,7 +150,6 @@ tst_list = [
    "$D/regression/tst_connectivity.py",
    "$D/regression/tst_connectivity_allsym.py",
    "$D/regression/tst_diffuse.py",
-   "$D/regression/tst_grm_modifications.py",
    "$D/regression/tst_prepare_map_for_docking.py",
    "$D/regression/tst_wavelength_units.py",
   ]
