@@ -350,6 +350,13 @@ class CommandBuilder:
         # Exception: invariants with prerequisite=X signal that program X should run first
         invariants = self._registry.get_invariants(program)
         for inv in invariants:
+            # Respect only_for_experiment_type: skip blocking check for invariants
+            # that don't apply to the current session type.
+            only_for = inv.get("check", {}).get("only_for_experiment_type")
+            if only_for:
+                session_exp_type = getattr(context, "experiment_type", None)
+                if session_exp_type and session_exp_type != only_for:
+                    continue
             required_key = inv.get("check", {}).get("has_strategy")
             if required_key and required_key not in strategy:
                 msg = inv.get("message", "%s required" % required_key)
@@ -1387,6 +1394,17 @@ class CommandBuilder:
             name = inv.get("name", "unnamed")
             check = inv.get("check", {})
             fix = inv.get("fix", {})
+
+            # Skip this invariant if it is restricted to a specific experiment type
+            # and the current session is a different type.
+            # Example: requires_resolution for map_correlations only fires for cryoem.
+            only_for = check.get("only_for_experiment_type")
+            if only_for:
+                session_exp_type = getattr(context, "experiment_type", None)
+                if session_exp_type and session_exp_type != only_for:
+                    self._log(context, "BUILD: Invariant '%s' skipped (only_for_experiment_type=%s, "
+                              "session=%s)" % (name, only_for, session_exp_type))
+                    continue
 
             # Check file_matches condition (e.g., for denmod MTZ labels)
             file_matches = check.get("file_matches", {})

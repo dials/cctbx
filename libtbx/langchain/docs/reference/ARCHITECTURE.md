@@ -527,7 +527,7 @@ Key directories:
 - `analysis/` — Post-run log analysis and session evaluation
 - `core/` — LLM provider abstraction
 - `validation/` — Command validation framework
-- `tests/` — 34 test files with 747+ tests
+- `tests/` — 34 test files with 800+ tests
 
 ## Key Design Decisions
 
@@ -663,7 +663,7 @@ xray_initial → xtriage → xray_analyzed
 | State | Description | Valid Programs |
 |-------|-------------|----------------|
 | `xray_initial` | Starting point | xtriage |
-| `xray_analyzed` | After data analysis | predict_and_build, phaser, autosol |
+| `xray_analyzed` | After data analysis — includes `probe_placement` phase (maps to same external state) | predict_and_build, phaser, autosol, model_vs_data (probe only) |
 | `xray_has_prediction` | Have AlphaFold model | process_predicted_model |
 | `xray_mr_sad` | After phaser + anomalous data (MR-SAD) | autosol (with partpdb_file) |
 | `xray_has_phases` | After experimental phasing | autobuild |
@@ -693,10 +693,126 @@ cryoem_initial → mtriage → cryoem_analyzed
 | State | Description | Valid Programs |
 |-------|-------------|----------------|
 | `cryoem_initial` | Starting point | mtriage |
-| `cryoem_analyzed` | After map analysis | predict_and_build, dock_in_map |
+| `cryoem_analyzed` | After map analysis — includes `probe_placement` phase (maps to same external state) | predict_and_build, dock_in_map, map_correlations (probe only) |
 | `cryoem_has_model` | Half-map optimisation / model check (legacy name — no model yet; `check_map` and `optimize_map` phases) | resolve_cryo_em, map_sharpening |
 | `cryoem_docked` | Model docked, ready for first real-space refinement (`ready_to_refine` phase) | real_space_refine |
 | `cryoem_refined` | After refinement **or** validation (`refine` and `validate` phases share this external state; internal `phase_info["phase"]` distinguishes them) | real_space_refine, molprobity, STOP |
+
+## Model Placement Detection
+
+When a user supplies an atomic model together with reflection data or a cryo-EM
+map but no session history, the agent must decide whether the model is already
+positioned in the unit cell / map before choosing the next program.  A three-tier
+framework resolves this automatically, with each tier more expensive but more
+definitive than the last.
+
+### Tier 1 — Unit cell comparison (free, instant)
+
+`agent/placement_checker.py` reads the unit cell parameters from each file and
+compares them with a 5% fractional tolerance.
+
+| Source | Reader |
+|---|---|
+| PDB CRYST1 record | `read_pdb_unit_cell()` |
+| MTZ file | `read_mtz_unit_cell()` (iotbx.mtz, falls back to mtzdump) |
+| CCP4/MRC map | `read_map_unit_cells()` — returns **two** cells: full-map and present-portion |
+
+- If any read fails → **fail-safe: no mismatch declared** (workflow falls through to Tier 2)
+- Definitive mismatch (> 5% on any parameter) → model cannot be placed →
+  route immediately to **MR** (X-ray) or **docking** (cryo-EM)
+- Cryo-EM: model is compatible if it matches *either* the full-map cell or the
+  present-portion cell (partial maps are common)
+
+### Tier 2 — Existing heuristics (`_has_placed_model`)
+
+Checks history flags (`refine_done`, `dock_done`), file subcategory (`positioned`),
+and user directives.  When any of these give a clear signal the framework is done.
+When the result is still ambiguous, Tier 3 runs.
+
+The `build_context()` method in `WorkflowEngine` computes a `placement_uncertain`
+flag that is `True` exactly when all of the following hold:
+
+- `has_model` and (`has_data_mtz` or `has_map`)
+- `has_placed_model` is False (Tier 2 found no evidence)
+- `cell_mismatch` is False (Tier 1 found no mismatch)
+- `placement_probed` is False (probe has not run yet)
+- `has_predicted_model` is False (predicted models always need processing/docking)
+
+### Tier 3 — Diagnostic probe (one program cycle)
+
+When `placement_uncertain` is True the workflow engine routes to the
+`probe_placement` phase, which runs a single quick diagnostic:
+
+| Experiment | Program | Threshold | Placed | Not placed |
+|---|---|---|---|---|
+| X-ray | `phenix.model_vs_data` | R-free < 0.50 | → refine | → molecular_replacement |
+| Cryo-EM | `phenix.map_correlations` | CC > 0.15 | → refine | → dock_model |
+
+After the probe cycle, `_analyze_history` in `workflow_state.py` detects the
+result **positionally**: the first occurrence of `model_vs_data` or
+`map_correlations` that appears *before* any refinement or docking cycle is
+identified as the probe.  This requires no schema change to history entries.
+
+`build_context()` sets `placement_probed = True` and
+`placement_probe_result = "placed" | "needs_mr" | "needs_dock" | None` (None if
+the result could not be parsed — fail-safe: falls through to obtain_model).
+When the result is `"placed"`, `build_context` overrides `has_placed_model = True`
+so normal refinement routing takes over.
+
+The probe never repeats: `placement_probed = True` in `history_info` prevents
+`placement_uncertain` from being set on subsequent cycles.
+
+### Routing summary
+
+```
+model + data, no history
+        │
+        ▼ Tier 1
+   Cell mismatch? ─── YES ──▶ MR / docking (skip probe)
+        │ NO
+        ▼ Tier 2
+  Has heuristic evidence? ─── YES ──▶ normal routing
+        │ NO (placement_uncertain = True)
+        ▼ Tier 3
+   probe_placement phase
+    (model_vs_data or map_correlations)
+        │
+   R-free / CC result
+        ├── placed    ──▶ refine
+        ├── not placed ──▶ MR / docking
+        └── unparseable ──▶ obtain_model (fail-safe)
+```
+
+### Key files
+
+| File | Role |
+|---|---|
+| `agent/placement_checker.py` | Unit cell readers and comparison |
+| `agent/workflow_engine.py` | `build_context()` new keys; `_detect_*_phase()` routing |
+| `agent/workflow_state.py` | `_analyze_history()` probe detection |
+| `knowledge/workflows.yaml` | `probe_placement` phase in xray and cryoem |
+| `knowledge/programs.yaml` | `done_tracking` for `map_correlations` (pre-existing gap fixed) |
+| `agent/yaml_tools.py` | `if_placed` / `if_not_placed` added to `valid_transition_fields` |
+
+### Implementation notes
+
+**Import paths**: `placement_checker` is importable via both `libtbx.langchain.agent.placement_checker`
+(production) and `agent.placement_checker` (tests / local dev). `_check_cell_mismatch`
+tries both paths — libtbx first, bare `agent` path as fallback — matching the pattern
+used throughout the codebase.
+
+**Short-circuit**: `build_context()` computes `cell_mismatch` by calling `_check_cell_mismatch()`
+on every cycle. For cryo-EM this involves running `phenix.show_map_info` as a subprocess.
+After the context dict is built, a post-processing block overrides `cell_mismatch = False`
+when either `has_placed_model` or `placement_probed` is `True` — both conditions mean
+placement is already resolved and the check cannot change the outcome. The cell check
+still runs unconditionally on the first cycle when placement is genuinely unknown.
+
+**YAML validator**: `if_placed` and `if_not_placed` are registered in
+`valid_transition_fields` in `yaml_tools.py` so that `_validate_workflows()` does not
+emit spurious "unknown field" warnings for `probe_placement` phases.
+
+---
 
 ## Workflow History and Done Flags
 

@@ -641,7 +641,9 @@ def _validate_workflows(data):
     valid_transition_fields = {
         'on_complete', 'on_target_reached', 'on_plateau', 'on_max_cycles',
         'on_ligandfit', 'if_predict_only', 'if_quality_acceptable',
-        'if_quality_poor', 'if_has_full_map', 'if_needs_optimization', 'else'
+        'if_quality_poor', 'if_has_full_map', 'if_needs_optimization', 'else',
+        # Placement probe transitions (probe_placement phase)
+        'if_placed', 'if_not_placed',
     }
 
     for wf_name, wf_def in workflows.items():

@@ -1312,6 +1312,9 @@ phenix.real_space_refine:
     - "Resolution is REQUIRED - get it from mtriage"
     - "Requires a FULL map, not half-maps"
 
+  defaults:
+    skip_map_model_overlap_check: True  # Suppress spurious box/symmetry mismatch errors
+
 
 # -----------------------------------------------------------------------------
 # LIGAND PROGRAMS
@@ -1758,6 +1761,13 @@ phenix.map_correlations:
   experiment_types: [xray, cryoem]
   log_detection:
     markers: ["map_correlations"]
+  done_tracking:
+    # When run from the normal validate phase this sets validation_done.
+    # When run from probe_placement phase the history analyzer sets
+    # placement_probed instead (phase-aware Python override in workflow_state).
+    flag: "validation_done"
+    history_detection:
+      markers: ["map_correlations"]
   gui_app_id: "MapCorrelations"
   gui_app_id_cryoem: "MapCorrelationsCryoEM"
 
@@ -1802,12 +1812,26 @@ phenix.map_correlations:
     log: true
     description: "Map-model correlation (CC_mask, CC_volume) or map-map CC"
 
+  defaults:
+    ignore_symmetry_conflicts: true
+
   command: "phenix.map_correlations"
 
   strategy_flags:
     resolution:
       flag: "resolution={value}"
       type: float
+
+  invariants:
+    - name: requires_resolution
+      description: "Resolution is required for map_correlations in cryo-EM mode"
+      check:
+        has_strategy: resolution
+        only_for_experiment_type: cryoem
+      fix:
+        auto_fill_resolution: true
+      message: "Resolution required for map_correlations (cryo-EM)"
+      prerequisite: phenix.mtriage
 
   log_parsing:
     cc_mask:
@@ -1850,6 +1874,9 @@ phenix.model_vs_data:
   log_detection:
     markers: ["model_vs_data"]
   done_tracking:
+    # When run from the normal validate phase this sets validation_done.
+    # When run from probe_placement phase the history analyzer sets
+    # placement_probed instead (phase-aware Python override in workflow_state).
     flag: "validation_done"
     history_detection:
       markers: ['model_vs_data']
@@ -1922,6 +1949,16 @@ phenix.validation_cryoem:
     resolution:
       flag: "resolution={value}"
       type: float
+
+  invariants:
+    - name: requires_resolution
+      description: "Resolution parameter is required for validation_cryoem"
+      check:
+        has_strategy: resolution
+      fix:
+        auto_fill_resolution: true
+      message: "Resolution required for validation_cryoem"
+      prerequisite: phenix.mtriage  # Run mtriage first to get resolution
 
   log_parsing:
     map_cc:

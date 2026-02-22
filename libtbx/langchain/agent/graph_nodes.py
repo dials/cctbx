@@ -652,6 +652,14 @@ def perceive(state):
     for diag in workflow_state.get("zombie_diagnostics", []):
         state = _log(state, "PERCEIVE: ZOMBIE STATE — " + diag)
 
+    # S2c: Log when unclassified PDB files were promoted to search_model so
+    # that the placement detection → docking routing is visible in debug output.
+    if workflow_state.get("context", {}).get("unclassified_promoted_to_search_model"):
+        _promoted = workflow_state.get("categorized_files", {}).get("unclassified_pdb", [])
+        state = _log(state,
+            "PERCEIVE: S2c: Promoted %d unclassified PDB(s) to search_model for docking: %s"
+            % (len(_promoted), [os.path.basename(f) for f in _promoted]))
+
     # Debug categorization (helps diagnose model vs search_model issues)
     categorized = workflow_state.get("categorized_files", {})
     model_files = categorized.get("model", [])

@@ -812,6 +812,10 @@ def _analyze_history(history):
         "twin_law": None,
         "twin_fraction": None,
         "has_ncs": False,  # NCS detected in data
+
+        # Placement probe results (Tier 3)
+        "placement_probed": False,
+        "placement_probe_result": None,
     }
 
     # Initialize done flags and count fields from YAML (single source of truth)
@@ -912,6 +916,78 @@ def _analyze_history(history):
                 info["needs_post_ligandfit_refine"] = True
             elif "refine" in combined and "real_space" not in combined:
                 info["needs_post_ligandfit_refine"] = False
+
+    # =========================================================================
+    # Placement probe detection (Tier 3 post-processing)
+    # =========================================================================
+    # Identify whether model_vs_data or map_correlations ran as a *placement
+    # probe* (i.e. before any refinement or docking) vs. as normal validation.
+    #
+    # Strategy: iterate history a second time, tracking whether we have seen
+    # any refine/dock cycle yet.  The FIRST occurrence of model_vs_data or
+    # map_correlations that appears BEFORE the first refine/dock is the probe.
+    #
+    # This requires no schema change — phase is inferred from position.
+    if history:
+        _seen_refine_or_dock = False
+        for _entry in history:
+            if not isinstance(_entry, dict):
+                continue
+            _eprog  = (_entry.get("program") or "").lower()
+            _ecmd   = _entry.get("command", "").lower()
+            _ecomb  = _eprog + " " + _ecmd
+            _result = _entry.get("result", "")
+
+            if _is_failed_result(_result):
+                continue   # Ignore failed cycles for probe detection
+
+            # Once refinement or docking has run, anything after is validation
+            if ("refine" in _ecomb and "real_space" not in _ecomb and
+                    "model_vs_data" not in _ecomb):
+                _seen_refine_or_dock = True
+            if "dock_in_map" in _ecomb or "real_space_refine" in _ecomb:
+                _seen_refine_or_dock = True
+
+            # model_vs_data before any refine → X-ray placement probe
+            if "model_vs_data" in _ecomb and not _seen_refine_or_dock:
+                _analysis = _entry.get("analysis", _entry.get("metrics", {}))
+                _rfree = None
+                if isinstance(_analysis, dict):
+                    _rfree = _analysis.get("r_free")
+                # Also try to parse from result text if not in analysis
+                if _rfree is None:
+                    _m = re.search(r'r_free\s*[=:]\s*([0-9.]+)', _result)
+                    if _m:
+                        try:
+                            _rfree = float(_m.group(1))
+                        except ValueError:
+                            pass
+                if _rfree is not None:
+                    try:
+                        _rfree = float(_rfree)
+                        info["placement_probed"] = True
+                        info["placement_probe_result"] = (
+                            "placed" if _rfree < 0.50 else "needs_mr"
+                        )
+                    except (ValueError, TypeError):
+                        pass
+
+            # map_correlations before any refine/dock → cryo-EM placement probe
+            if "map_correlations" in _ecomb and not _seen_refine_or_dock:
+                _analysis = _entry.get("analysis", _entry.get("metrics", {}))
+                _cc = None
+                if isinstance(_analysis, dict):
+                    _cc = (_analysis.get("cc_mask") or _analysis.get("map_cc")
+                           or _analysis.get("cc_volume"))
+                if _cc is not None:
+                    try:
+                        _cc = float(_cc)
+                        info["placement_probed"] = True
+                        info["placement_probe_result"] = (
+                            "placed" if _cc > 0.15 else "needs_dock"
+                        )
+                    except (ValueError, TypeError):
+                        pass
 
     return info
 
@@ -1108,7 +1184,7 @@ def detect_workflow_state(history, available_files, analysis=None, maximum_autom
             state = engine.get_workflow_state(experiment_type, files, history_info, analysis,
                                              directives, maximum_automation)
 
-            state["categorized_files"] = files
+            state["categorized_files"] = state.get("categorized_files", files)  # S2c: respect promoted files
             # Set automation_path for both experiment types
             state["automation_path"] = "automated" if maximum_automation else "stepwise"
             # Surface zombie diagnostics for PERCEIVE logging (non-empty only)

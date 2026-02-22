@@ -255,19 +255,26 @@ If the advice describes a SPECIFIC LIMITED TASK rather than full structure deter
 - "map sharpening", "sharpen the map", "sharpen map", "automatic sharpening" → after_program="phenix.map_sharpening", skip_validation=true
 
 **CRITICAL: model_is_placed — detecting when the model is already positioned**
-If the user's goal implies their model is already in the unit cell (NOT a template for MR), set model_is_placed=true in workflow_preferences. This tells the agent to skip molecular replacement.
-Set model_is_placed=true when:
-- User says "refine this model", "run refinement", "refine the structure"
-- User says "fit a ligand", "ligandfit", "place ligand into density"
-- User says "run polder", "evaluate ligand", "validate model"
-- User says "the model is already placed" or "skip molecular replacement"
-- User's goal clearly implies the model is ready for refinement (not MR)
-- User provides a model + ligand + data and wants ligand fitting
-Do NOT set model_is_placed=true when:
-- User says "solve the structure" (might need MR)
-- User says "molecular replacement" or "run phaser"
-- User provides only a search model / template
-- Goal is ambiguous about whether MR is needed
+ONLY set model_is_placed=true when the user EXPLICITLY states their model is already positioned or placed in the unit cell / map. This is a HIGH-PRECISION flag: when in doubt, do NOT set it. The workflow will figure out placement automatically.
+
+Set model_is_placed=true ONLY when the user uses language like:
+- "the model is already placed", "the model is already positioned", "skip molecular replacement"
+- "skip docking", "skip MR", "the structure is solved", "I already ran phaser/dock_in_map"
+- "run refinement on this placed model", "refine this placed model"
+- User explicitly confirms no MR/docking step is needed because they placed it themselves
+
+Do NOT set model_is_placed=true in any of these cases:
+- User says "solve the structure" (ambiguous — may need MR or docking)
+- User says "refine this model" or "run refinement" (the model may still need docking first)
+- User says "fit a ligand" or "validate model" (use after_program stop instead)
+- User provides a PDB alongside half-maps without explicitly saying the model is placed
+- User provides a homology model / starting model for structure determination
+- Goal is ambiguous or generic ("run the workflow", "analyze these files")
+- User provides a PDB + cryo-EM map combination (model almost certainly needs docking)
+
+IMPORTANT: For cryo-EM workflows where a PDB is provided alongside maps, do NOT set
+model_is_placed=true unless the user explicitly says the model has already been docked.
+An unplaced PDB + cryo-EM map always requires phenix.dock_in_map before refinement.
 
 **CRITICAL: MR-SAD workflow**
 - For MR-SAD experiments, set use_mr_sad=true in workflow_preferences. Do NOT set after_program="phenix.autosol".

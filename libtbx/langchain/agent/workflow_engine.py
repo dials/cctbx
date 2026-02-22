@@ -90,6 +90,15 @@ class WorkflowEngine:
             "has_predicted_model": bool(files.get("predicted")) or history_info.get("predict_done", False),
             "has_processed_model": bool(files.get("processed_predicted")) or history_info.get("process_predicted_done", False),
             "has_placed_model": self._has_placed_model(files, history_info, directives),
+            # Placement confirmed by history/files only — does NOT reflect the
+            # model_is_placed directive.  Used by Tier 1 routing and S1 short-circuit
+            # so that a mis-set directive cannot suppress a real cell-mismatch signal.
+            "has_placed_model_from_history": self._has_placed_model_from_history(files, history_info),
+            # Explicit after_program directive naming a program that requires a placed model
+            # (e.g. after_program=phenix.model_vs_data).  Unlike model_is_placed=True in
+            # workflow_preferences, this is a deliberate user request — reliable evidence
+            # that the user knows the model is placed.  Used to suppress placement_uncertain.
+            "has_placed_model_from_after_program": self._has_placed_model_from_after_program(files, directives),
             "has_refined_model": self._has_refined_model(files, history_info),
             "has_ligand_fit": bool(files.get("ligand_fit_output")) or history_info.get("ligandfit_done", False),
             "has_optimized_full_map": self._has_optimized_map(files, history_info),
@@ -131,6 +140,22 @@ class WorkflowEngine:
             "twin_fraction": self._get_metric(analysis, history_info, "twin_fraction", "twin_fraction"),
             "anomalous_resolution": self._get_metric(analysis, history_info, "anomalous_resolution", "anomalous_resolution"),
             "has_ncs": self._get_bool(analysis, history_info, "has_ncs"),
+
+            # ── Placement detection (Tier 1 / Tier 3) ──────────────────────
+            # Tier 1: unit cell comparison — fast, free, no extra cycle.
+            # Computed here so routing logic can use it without a method call.
+            # Note: short-circuit against history_info is applied after the
+            # dict is fully built (see below) — context self-reference is not
+            # possible inside the literal.
+            "cell_mismatch": self._check_cell_mismatch(files),
+
+            # Tier 3: diagnostic probe results (set by history after
+            # phenix.model_vs_data / phenix.map_correlations ran as a probe).
+            "placement_probed": history_info.get("placement_probed", False),
+            "placement_probe_result": history_info.get("placement_probe_result", None),
+
+            # Filled in below once has_placed_model and cell_mismatch are known.
+            "placement_uncertain": False,
         }
 
         # =====================================================================
@@ -189,6 +214,53 @@ class WorkflowEngine:
         else:
             context["use_mr_sad"] = False
 
+        # ── Tier 1 short-circuit: skip cell check when placement is resolved ────
+        # _check_cell_mismatch may run phenix.show_map_info as a subprocess for
+        # cryo-EM maps; skip it on subsequent cycles once placement is already known.
+        # Conditions that render the check unnecessary:
+        #   - history/files confirm placement (has_placed_model_from_history=True)
+        #   - probe already ran this session (placement_probed=True)
+        # IMPORTANT: we use has_placed_model_FROM_HISTORY, not has_placed_model.
+        # A directive setting model_is_placed=True does NOT suppress the check —
+        # that directive could be wrong (as seen when LLM misinterprets the goal),
+        # and we need the cell-mismatch check to catch that error.
+        # Note: cell_mismatch is computed before these flags are set above, so we
+        # override here in post-processing once the full context is available.
+        if context.get("has_placed_model_from_history") or context.get("placement_probed"):
+            context["cell_mismatch"] = False
+
+        # ── Probe result overrides has_placed_model ──────────────────────────
+        # When the probe ran and confirmed placement (R-free < 0.50 or CC > 0.15),
+        # treat the model as placed so normal refine routing takes over.
+        # This overrides the Tier 2 heuristic which could not determine placement.
+        if (context["placement_probed"] and
+                context.get("placement_probe_result") == "placed"):
+            context["has_placed_model"] = True
+
+        # ── Placement uncertainty (Tier 2 gate for Tier 3 probe) ────────────
+        # placement_uncertain=True when all conditions hold:
+        #   - No OBJECTIVE confirmation of placement from history/files
+        #   - No definitive cell mismatch (that already routes to MR/dock)
+        #   - Probe has not already been run this session
+        #   - Has a model AND reflection data or map (probe inputs available)
+        #   - Model is NOT a predicted model (those always need MR/dock — no probe)
+        #
+        # CRITICAL: we use has_placed_model_FROM_HISTORY, NOT has_placed_model.
+        # The directive model_is_placed=True can be set incorrectly by the LLM
+        # (e.g. "solve the structure" → model_is_placed=True is a known failure
+        # mode).  Using has_placed_model here would suppress the probe even when
+        # the model has never actually been placed, allowing RSR to run against a
+        # mismatched map and crash with a symmetry error.
+        context["placement_uncertain"] = (
+            not context["has_placed_model_from_history"] and
+            not context["has_placed_model_from_after_program"] and
+            not context["cell_mismatch"] and
+            not context["placement_probed"] and
+            context["has_model"] and
+            (context["has_data_mtz"] or context["has_map"]) and
+            not context["has_predicted_model"]
+        )
+
         return context
 
     def _get_metric(self, analysis, history_info, analysis_key, history_key):
@@ -211,6 +283,144 @@ class WorkflowEngine:
         which contains: predicted, processed_predicted, pdb_template
         """
         return bool(files.get("search_model"))
+
+    def _check_cell_mismatch(self, files):
+        """
+        Tier 1 placement check: compare model and data unit cells.
+
+        Returns True **only** when both cells can be read and are definitively
+        incompatible (> 5% difference on any parameter).  Any read failure
+        returns False (fail-safe — never wrongly prevents MR).
+
+        For X-ray: compares PDB CRYST1 against MTZ crystal symmetry.
+        For cryo-EM: compares PDB CRYST1 against both full-map and
+            present-portion cells (compatible if it matches either).
+
+        Args:
+            files (dict): Categorised files dict from the agent.
+
+        Returns:
+            bool: True → definitive mismatch; False → compatible or unknown.
+        """
+        try:
+            from libtbx.langchain.agent.placement_checker import (
+                check_xray_cell_mismatch,
+                check_cryoem_cell_mismatch,
+            )
+        except ImportError:
+            try:
+                from agent.placement_checker import (
+                    check_xray_cell_mismatch,
+                    check_cryoem_cell_mismatch,
+                )
+            except ImportError:
+                return False   # Module not available — fail-safe
+
+        # Get the first model file (generic PDB, not a positioned subcategory)
+        model_files = files.get("model", [])
+        pdb_path = model_files[0] if model_files else None
+        if not pdb_path:
+            return False
+
+        # X-ray: compare against MTZ
+        mtz_files = files.get("data_mtz", [])
+        if mtz_files:
+            return check_xray_cell_mismatch(pdb_path, mtz_files[0])
+
+        # Cryo-EM: compare against map (full_map preferred, fall back to map)
+        map_files = files.get("full_map", []) or files.get("map", [])
+        if map_files:
+            return check_cryoem_cell_mismatch(pdb_path, map_files[0])
+
+        return False   # No data to compare against
+
+    def _promote_unclassified_for_docking(self, files, context, experiment_type):
+        """
+        S2c: Promote unclassified PDB files to search_model when context
+        unambiguously confirms that docking is needed.
+
+        Problem being solved
+        --------------------
+        Filename-based categorisation runs at session start with no workflow
+        context.  A plain crystal-structure PDB like ``1aew_A.pdb`` lands in
+        ``unclassified_pdb → model`` because nothing in the name says "template".
+        When Tier 1 (cell_mismatch) or Tier 3 (probe) routes to ``dock_model``,
+        the ``phenix.dock_in_map`` condition ``has_any: [search_model, processed_model]``
+        still fails because ``files["search_model"]`` is empty.
+
+        This method detects the unambiguous "needs docking" signal from context
+        and copies the unclassified PDB paths into ``files["search_model"]`` so
+        that the YAML condition is satisfied and the command builder can find
+        the correct input file.
+
+        Trigger conditions (all must hold)
+        -----------------------------------
+        1. ``experiment_type == "cryoem"``   — X-ray paths use ``model`` key for phaser
+        2. ``files["unclassified_pdb"]`` non-empty — something to promote
+        3. ``not has_placed_model_from_history``  — no historical dock/refine evidence
+        4. ``not has_search_model``          — search_model already populated → no-op
+        5. Any one of:
+           a. ``placement_uncertain``         — Tier 3 path, probe not yet run
+           b. ``placement_probed AND needs_dock`` — Tier 3 path, post-probe
+           c. ``cell_mismatch AND not from_history`` — Tier 1 path (production)
+
+        Safety
+        ------
+        * Input dicts are never mutated.  Shallow copies are made only when
+          promotion fires.
+        * ``files["model"]`` and ``files["unclassified_pdb"]`` are left intact
+          so no information is lost.
+        * X-ray sessions are completely unaffected (condition 1).
+        * Sessions where dock/refine already ran are blocked (condition 3).
+
+        Scope
+        -----
+        ``files["unclassified_pdb"]`` is only populated by ``_categorize_files_yaml``
+        (the normal PHENIX path).  The hardcoded fallback never sets this key, so
+        promotion silently no-ops in that degraded environment — which is fine
+        because ``has_model`` is also False there and the scenario doesn't arise.
+
+        Returns
+        -------
+        (files, context) — promoted copies when conditions met, originals otherwise.
+        """
+        if experiment_type != "cryoem":
+            return files, context
+
+        unclassified = files.get("unclassified_pdb", [])
+        if not unclassified:
+            return files, context
+
+        if context.get("has_placed_model_from_history"):
+            return files, context
+
+        if context.get("has_search_model"):
+            return files, context
+
+        needs_dock = (
+            context.get("placement_uncertain") or
+            (context.get("placement_probed") and
+             context.get("placement_probe_result") == "needs_dock") or
+            (context.get("cell_mismatch") and
+             not context.get("has_placed_model_from_history"))
+        )
+        if not needs_dock:
+            return files, context
+
+        # Shallow-copy both dicts — never mutate the caller's originals
+        files = dict(files)
+        files["search_model"] = list(files.get("search_model", [])) + unclassified
+        if "pdb" in files:
+            files["pdb"] = list(files["pdb"])
+            for f in unclassified:
+                if f not in files["pdb"]:
+                    files["pdb"].append(f)
+
+        context = dict(context)
+        context["has_search_model"] = True
+        context["unclassified_promoted_to_search_model"] = True
+
+        return files, context
 
     def _has_placed_model(self, files, history_info, directives=None):
         """
@@ -321,6 +531,98 @@ class WorkflowEngine:
 
         return False
 
+
+    def _has_placed_model_from_history(self, files, history_info):
+        """
+        Check if model is placed based on HISTORY and FILES only — no directives.
+
+        This is a strict subset of _has_placed_model() that intentionally ignores
+        the model_is_placed directive.  It is used by:
+
+          - Tier 1 routing (cell_mismatch check): a directive claiming the model
+            is placed cannot override a definitive cell-dimension mismatch.  Only
+            concrete evidence (dock_done in history, refine_done, etc.) can.
+
+          - S1 short-circuit: cell_mismatch subprocess is only skipped when
+            placement is confirmed by history, not just by a directive.
+
+        Returns True if:
+          1. History shows MR, dock, autobuild, predict_full, or refine completed.
+          2. A file in a positioned subcategory (refined, docked, phaser_output,
+             autobuild_output, with_ligand, rsr_output, ligand_fit_output) exists.
+        """
+        # History-based: definitive evidence
+        if (history_info.get("phaser_done") or
+            history_info.get("autobuild_done") or
+            history_info.get("dock_done") or
+            history_info.get("predict_full_done") or
+            history_info.get("refine_done")):
+            return True
+
+        # File-based: positioned subcategories
+        positioned_subcategories = [
+            "refined", "phaser_output", "autobuild_output", "docked",
+            "with_ligand", "rsr_output", "ligand_fit_output",
+        ]
+        for subcat in positioned_subcategories:
+            if files.get(subcat):
+                return True
+
+        return False
+
+    def _has_placed_model_from_after_program(self, files, directives):
+        """
+        Check if an explicit after_program directive reliably implies a placed model.
+
+        This is a SEPARATE signal from the model_is_placed workflow_preference,
+        which can be set by LLM hallucination (e.g. "solve the structure" →
+        model_is_placed=True is a known failure mode and is intentionally ignored
+        by placement_uncertain / S1 short-circuit).
+
+        An after_program directive is different: the user explicitly named a
+        concrete program to run.  Programs in programs_requiring_placed cannot
+        sensibly run without a positioned model, so the request is reliable
+        evidence that the user knows the model is placed.
+
+        Returns True when:
+          - directives["stop_conditions"]["after_program"] is one of the programs
+            that unambiguously require a placed model, AND
+          - at least one non-ligand, non-search-model PDB is present.
+
+        Used to suppress the placement_uncertain probe in build_context(), which
+        otherwise fires whenever no history evidence of placement exists.
+        """
+        if not directives:
+            return False
+        after_program = directives.get("stop_conditions", {}).get("after_program", "")
+        if not after_program:
+            return False
+
+        programs_requiring_placed = [
+            "phenix.refine", "phenix.polder", "phenix.model_vs_data",
+            "phenix.ligandfit", "phenix.molprobity",
+            "phenix.real_space_refine",
+        ]
+        if after_program not in programs_requiring_placed:
+            return False
+
+        for f in files.get("pdb", []):
+            basename = os.path.basename(f).lower()
+            is_ligand = (
+                basename.startswith("lig") or
+                f in files.get("ligand_pdb", []) or
+                f in files.get("ligand", [])
+            )
+            is_search = (
+                f in files.get("search_model", []) or
+                f in files.get("predicted", []) or
+                f in files.get("processed_predicted", [])
+            )
+            if not is_ligand and not is_search:
+                return True
+
+        return False
+
     def _has_refined_model(self, files, history_info):
         """Check if model has been refined IN THIS SESSION.
 
@@ -367,6 +669,7 @@ class WorkflowEngine:
 
     XRAY_STATE_MAP = {
         "analyze": "xray_initial",
+        "probe_placement": "xray_analyzed",   # Probe is pre-phase-2; maps to same state
         "obtain_model": "xray_analyzed",
         "molecular_replacement": "xray_has_prediction",   # H2: distinct from xray_initial
         "build_from_phases": "xray_has_phases",
@@ -381,6 +684,7 @@ class WorkflowEngine:
 
     CRYOEM_STATE_MAP = {
         "analyze": "cryoem_initial",
+        "probe_placement": "cryoem_analyzed",  # Probe is pre-phase-2; maps to same state
         "obtain_model": "cryoem_analyzed",
         "dock_model": "cryoem_has_prediction",
         # H1: check_map and optimize_map deal with half-map → full-map conversion;
@@ -466,6 +770,30 @@ class WorkflowEngine:
             not context["autosol_done"]):
             return self._make_phase_result(phases, "experimental_phasing",
                 "Model placed by phaser, anomalous data detected - MR-SAD with autosol")
+
+        # ── Tier 1: unit cell mismatch → skip probe, go straight to MR ─────
+        # Both cells were readable and definitively incompatible (> 5 % on any
+        # parameter).  No point probing — the model cannot be placed here.
+        if context.get("cell_mismatch") and not context.get("has_placed_model_from_history"):
+            # Tier 1: cell mismatch overrides even model_is_placed directive.
+            # Only history evidence (phaser_done, dock_done, etc.) can suppress this.
+            return self._make_phase_result(phases, "molecular_replacement",
+                "Unit cell mismatch: model cannot be placed in this crystal — running MR")
+
+        # ── Tier 3: probe result known → route based on R-free ───────────────
+        if context.get("placement_probed"):
+            if context.get("placement_probe_result") == "needs_mr":
+                return self._make_phase_result(phases, "molecular_replacement",
+                    "Placement probe (model_vs_data) confirmed model is not placed "
+                    "(R-free ≥ 0.50) — running MR")
+            # "placed" or None (probe ran but R-free unparseable) → fall through
+            # to normal refine routing below
+
+        # ── Tier 3: probe not yet run, placement ambiguous → run it ──────────
+        if context.get("placement_uncertain"):
+            return self._make_phase_result(phases, "probe_placement",
+                "Model placement uncertain — running model_vs_data to check "
+                "(R-free < 0.50 → placed, ≥ 0.50 → MR)")
 
         # Phase 2: Need model
         if not context["has_placed_model"]:
@@ -567,6 +895,30 @@ class WorkflowEngine:
                 # Check if we need to process first or can dock directly
                 return self._make_phase_result(phases, "dock_model",
                     "Have prediction, need to dock in map")
+
+        # ── Tier 1: unit cell mismatch → skip probe, go straight to docking ──
+        # Both map cells were readable and neither matches the model cell
+        # (> 5 % on any parameter).  Model is not placed in this map.
+        if context.get("cell_mismatch") and not context.get("has_placed_model_from_history"):
+            # Tier 1: cell mismatch overrides even model_is_placed directive.
+            # Only history evidence (dock_done, refine_done, etc.) can suppress this.
+            return self._make_phase_result(phases, "dock_model",
+                "Unit cell mismatch: model is not placed in this map — running docking")
+
+        # ── Tier 3: probe result known → route based on map CC ───────────────
+        if context.get("placement_probed"):
+            if context.get("placement_probe_result") == "needs_dock":
+                return self._make_phase_result(phases, "dock_model",
+                    "Placement probe (map_correlations) confirmed model is not placed "
+                    "(CC ≤ 0.15) — running docking")
+            # "placed" or None (probe ran but CC unparseable) → fall through
+            # to normal refine routing below
+
+        # ── Tier 3: probe not yet run, placement ambiguous → run it ──────────
+        if context.get("placement_uncertain"):
+            return self._make_phase_result(phases, "probe_placement",
+                "Model placement uncertain — running map_correlations to check "
+                "(CC > 0.15 → placed, ≤ 0.15 → docking)")
 
         # Phase 2: Need model
         if not context["has_placed_model"]:
@@ -1473,6 +1825,12 @@ class WorkflowEngine:
         # Add automation_path to context for program filtering
         context["automation_path"] = "automated" if maximum_automation else "stepwise"
 
+        # S2c: promote unclassified PDB to search_model when docking is needed.
+        # Must run after build_context (needs placement flags) and before
+        # detect_phase + get_valid_programs (both consume context and files).
+        files, context = self._promote_unclassified_for_docking(
+            files, context, experiment_type)
+
         phase_info = self.detect_phase(experiment_type, context)
         valid_programs = self.get_valid_programs(experiment_type, phase_info, context, directives)
 
@@ -1541,6 +1899,8 @@ class WorkflowEngine:
             "context": context,
             "resolution": context.get("resolution"),
             "unavailable_explanations": unavailable_explanations,  # NEW: why programs aren't available
+            # S2c: promoted files so detect_workflow_state doesn't overwrite with originals
+            "categorized_files": files,
         }
 
     def _get_program_priorities(self, experiment_type, phase_info, context):

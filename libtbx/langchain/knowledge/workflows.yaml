@@ -45,6 +45,22 @@ xray:
         - phenix.predict_and_build
         - phenix.phaser
 
+    # Phase 2-pre: Probe model placement (runs at most once per session)
+    # Triggered when: model + data present, no history evidence, no directive,
+    # not a predicted model, and no cell mismatch (Tier 1 already handled that).
+    # Runs phenix.model_vs_data to get R-free; if < 0.50 the model is placed.
+    probe_placement:
+      description: "Verify model placement before choosing MR vs refinement"
+      goal: "Determine if model is already placed in the unit cell"
+
+      programs:
+        - program: phenix.model_vs_data
+          hint: "Quick R-factor check to determine if model is placed in this crystal"
+
+      transitions:
+        if_placed: refine          # R-free < 0.50 → model is placed → refine
+        if_not_placed: molecular_replacement  # R-free ≥ 0.50 → needs MR
+
     # Phase 2: Get an initial model
     obtain_model:
       description: "Obtain an initial atomic model"
@@ -336,6 +352,22 @@ cryoem:
         - phenix.predict_and_build
         - phenix.phaser
 
+    # Phase 2-pre: Probe model placement (runs at most once per session)
+    # Triggered when: model + map present, no history evidence, no directive,
+    # not a predicted model, and no cell mismatch (Tier 1 already handled that).
+    # Runs phenix.map_correlations to get CC; if > 0.15 the model is placed.
+    probe_placement:
+      description: "Verify model placement before choosing docking vs refinement"
+      goal: "Determine if model is already placed in this map"
+
+      programs:
+        - program: phenix.map_correlations
+          hint: "Quick map-model CC check to determine if model is placed in this map"
+
+      transitions:
+        if_placed: refine          # CC > 0.15 → model is placed → refine/RSR
+        if_not_placed: dock_model  # CC ≤ 0.15 → needs docking
+
     # Phase 2: Get a model
     obtain_model:
       description: "Obtain initial model"
@@ -428,10 +460,13 @@ cryoem:
             - not_done: map_sharpening
           hint: "Sharpen map before docking"
 
-        # Then dock the processed model into the FULL map (not half-maps)
+        # Then dock the model into the FULL map (not half-maps).
+        # S2c: accepts search_model (promoted unclassified PDB or any template)
+        # OR processed_model (AlphaFold stepwise path) so that crystal-structure
+        # PDBs routed here by Tier 1/3 placement detection can dock correctly.
         - program: phenix.dock_in_map
           conditions:
-            - has: processed_model
+            - has_any: [search_model, processed_model]
             - has: full_map
             - not_done: dock
           hint: "Requires full map (not half-maps) for accurate docking"

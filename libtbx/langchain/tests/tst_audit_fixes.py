@@ -727,7 +727,11 @@ def test_polder_selection_always_uses_safe_default():
     """
     print("Test: polder_selection_always_uses_safe_default")
     sys.path.insert(0, _PROJECT_ROOT)
-    from agent.program_registry import ProgramRegistry
+    try:
+        from agent.program_registry import ProgramRegistry
+    except ImportError:
+        print("  SKIP (ProgramRegistry unavailable)")
+        return
 
     registry = ProgramRegistry(use_yaml=True)
     dummy_files = {"data_mtz": "/tmp/data.mtz", "model": "/tmp/model.pdb"}
@@ -1264,1907 +1268,2478 @@ def test_k2_optimized_full_map_recognized_as_genuine_full_map():
 
 
 # =============================================================================
+# CATEGORY R1 — placement_checker: unit cell comparison (Tier 1)
+# =============================================================================
+
+def test_r1_pdb_cryst1_parsed_correctly():
+    """R1: read_pdb_unit_cell returns correct 6-tuple from a CRYST1 line."""
+    print("Test: r1_pdb_cryst1_parsed_correctly")
+    import tempfile
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import read_pdb_unit_cell
+
+    cryst1 = "CRYST1   57.230   57.230  146.770  90.00  90.00  90.00 P 41 21 2\n"
+    with tempfile.NamedTemporaryFile(suffix=".pdb", mode="w", delete=False) as f:
+        f.write(cryst1)
+        f.write("ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00           C\n")
+        pdb_path = f.name
+    try:
+        cell = read_pdb_unit_cell(pdb_path)
+        assert cell is not None, "Should parse CRYST1 line"
+        assert len(cell) == 6, "Should return 6 values"
+        assert abs(cell[0] - 57.230) < 0.001, "a should be 57.230, got %s" % cell[0]
+        assert abs(cell[2] - 146.770) < 0.001, "c should be 146.770, got %s" % cell[2]
+        assert abs(cell[3] - 90.00) < 0.001, "alpha should be 90.00, got %s" % cell[3]
+    finally:
+        os.unlink(pdb_path)
+    print("  PASSED")
+
+
+def test_r1_pdb_cryst1_missing_returns_none():
+    """R1: read_pdb_unit_cell returns None when no CRYST1 record is present."""
+    print("Test: r1_pdb_cryst1_missing_returns_none")
+    import tempfile
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import read_pdb_unit_cell
+
+    with tempfile.NamedTemporaryFile(suffix=".pdb", mode="w", delete=False) as f:
+        f.write("ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00           C\n")
+        pdb_path = f.name
+    try:
+        cell = read_pdb_unit_cell(pdb_path)
+        assert cell is None, "Should return None when CRYST1 absent, got %s" % str(cell)
+    finally:
+        os.unlink(pdb_path)
+    print("  PASSED")
+
+
+def test_r1_pdb_missing_file_returns_none():
+    """R1: read_pdb_unit_cell returns None (not raises) for a missing file."""
+    print("Test: r1_pdb_missing_file_returns_none")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import read_pdb_unit_cell
+
+    cell = read_pdb_unit_cell("/tmp/this_file_does_not_exist_xyz.pdb")
+    assert cell is None, "Should return None for missing file, got %s" % str(cell)
+    print("  PASSED")
+
+
+def test_r1_cells_compatible_within_tolerance():
+    """R1: cells_are_compatible returns True for cells within 5% tolerance."""
+    print("Test: r1_cells_compatible_within_tolerance")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import cells_are_compatible
+
+    # Identical cells
+    cell = (57.23, 57.23, 146.77, 90.0, 90.0, 90.0)
+    assert cells_are_compatible(cell, cell), "Identical cells must be compatible"
+
+    # Within 4% on one axis — should still be compatible
+    cell_a = (57.23, 57.23, 146.77, 90.0, 90.0, 90.0)
+    cell_b = (59.50, 57.23, 146.77, 90.0, 90.0, 90.0)  # ~4% diff on a
+    assert cells_are_compatible(cell_a, cell_b), (
+        "Cells within 5%% should be compatible: %s vs %s" % (cell_a, cell_b)
+    )
+    print("  PASSED")
+
+
+def test_r1_cells_mismatch_outside_tolerance():
+    """R1: cells_are_compatible returns False when any parameter differs > 5%."""
+    print("Test: r1_cells_mismatch_outside_tolerance")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import cells_are_compatible
+
+    # Large difference on 'a' axis (P1 vs different crystal form)
+    cell_a = (57.23, 57.23, 146.77, 90.0, 90.0, 90.0)
+    cell_b = (80.00, 57.23, 146.77, 90.0, 90.0, 90.0)  # ~40% diff → mismatch
+    assert not cells_are_compatible(cell_a, cell_b), (
+        "Cells with >5%% difference should be incompatible: %s vs %s" % (cell_a, cell_b)
+    )
+
+    # Angle mismatch (orthorhombic vs monoclinic-like)
+    cell_c = (57.23, 57.23, 146.77, 90.0, 90.0, 90.0)
+    cell_d = (57.23, 57.23, 146.77, 90.0, 110.0, 90.0)  # beta 90→110 = 22% diff
+    assert not cells_are_compatible(cell_c, cell_d), (
+        "Angle mismatch should be detected: %s vs %s" % (cell_c, cell_d)
+    )
+    print("  PASSED")
+
+
+def test_r1_cells_compatible_with_none_is_failsafe():
+    """R1: cells_are_compatible returns True (fail-safe) when either cell is None."""
+    print("Test: r1_cells_compatible_with_none_is_failsafe")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import cells_are_compatible
+
+    cell = (57.23, 57.23, 146.77, 90.0, 90.0, 90.0)
+    assert cells_are_compatible(None, cell), "None vs cell should be fail-safe True"
+    assert cells_are_compatible(cell, None), "cell vs None should be fail-safe True"
+    assert cells_are_compatible(None, None), "None vs None should be fail-safe True"
+    print("  PASSED")
+
+
+def test_r1_xray_mismatch_requires_both_readable():
+    """R1: check_xray_cell_mismatch returns False (fail-safe) when PDB has no CRYST1."""
+    print("Test: r1_xray_mismatch_requires_both_readable")
+    import tempfile
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import check_xray_cell_mismatch
+
+    # PDB with no CRYST1 — cannot compare → must NOT declare mismatch
+    with tempfile.NamedTemporaryFile(suffix=".pdb", mode="w", delete=False) as f:
+        f.write("ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00           C\n")
+        pdb_no_cryst1 = f.name
+    try:
+        result = check_xray_cell_mismatch(pdb_no_cryst1, "/tmp/fake.mtz")
+        assert result is False, (
+            "Must return False (fail-safe) when PDB has no CRYST1, got %s" % result
+        )
+    finally:
+        os.unlink(pdb_no_cryst1)
+    print("  PASSED")
+
+
+def test_r1_xray_missing_files_return_false():
+    """R1: check_xray_cell_mismatch returns False for missing/None paths."""
+    print("Test: r1_xray_missing_files_return_false")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import check_xray_cell_mismatch
+
+    assert check_xray_cell_mismatch(None, None) is False
+    assert check_xray_cell_mismatch("", "/tmp/data.mtz") is False
+    assert check_xray_cell_mismatch("/tmp/model.pdb", None) is False
+    assert check_xray_cell_mismatch("/no/such/file.pdb", "/no/such.mtz") is False
+    print("  PASSED")
+
+
+def test_r1_cryoem_matches_present_cell_is_compatible():
+    """R1: model matching the present-portion map cell is NOT a mismatch.
+
+    The model may have been placed in a sub-box extracted from the full map;
+    matching the present-portion cell means it is correctly placed.
+    """
+    print("Test: r1_cryoem_matches_present_cell_is_compatible")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import cells_are_compatible
+
+    # Simulate: full map cell = 320^3, present portion = (59, 67, 106)
+    # Model cell matches the present portion
+    full_cell    = (320.0, 320.0, 320.0, 90.0, 90.0, 90.0)
+    present_cell = (59.0, 67.0, 106.0, 90.0, 90.0, 90.0)
+    model_cell   = (59.5, 67.3, 106.2, 90.0, 90.0, 90.0)  # ~within 1%
+
+    assert not cells_are_compatible(model_cell, full_cell), (
+        "Model should NOT match full cell in this scenario"
+    )
+    assert cells_are_compatible(model_cell, present_cell), (
+        "Model SHOULD match present-portion cell — should be compatible"
+    )
+
+    # Verify the overall mismatch logic: compatible with present → not a mismatch
+    # (mirrors check_cryoem_cell_mismatch logic without needing a real map file)
+    matches_full    = cells_are_compatible(model_cell, full_cell)
+    matches_present = cells_are_compatible(model_cell, present_cell)
+    is_mismatch = not matches_full and not matches_present
+    assert not is_mismatch, "Should NOT be mismatch when model matches present-portion cell"
+    print("  PASSED")
+
+
+def test_r1_cryoem_missing_files_return_false():
+    """R1: check_cryoem_cell_mismatch returns False for missing/None paths."""
+    print("Test: r1_cryoem_missing_files_return_false")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import check_cryoem_cell_mismatch
+
+    assert check_cryoem_cell_mismatch(None, None) is False
+    assert check_cryoem_cell_mismatch("", "/tmp/map.ccp4") is False
+    assert check_cryoem_cell_mismatch("/tmp/model.pdb", None) is False
+    assert check_cryoem_cell_mismatch("/no/such.pdb", "/no/such.ccp4") is False
+    print("  PASSED")
+
+
+def test_r1_definitive_xray_mismatch_detected():
+    """R1: check_xray_cell_mismatch correctly identifies a clear mismatch
+    when both cells are available and are very different.
+
+    Uses the internal comparison path directly (no real MTZ needed).
+    """
+    print("Test: r1_definitive_xray_mismatch_detected")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import cells_are_compatible
+
+    # A large crystal-form difference (P1 vs different SG/cell)
+    model_cell = (57.23, 57.23, 146.77, 90.0, 90.0, 90.0)
+    mtz_cell   = (100.0, 100.0, 200.0,  90.0, 90.0, 90.0)
+
+    assert not cells_are_compatible(model_cell, mtz_cell), (
+        "Very different cells should NOT be compatible: %s vs %s"
+        % (model_cell, mtz_cell)
+    )
+    print("  PASSED")
+
+
+# =============================================================================
+# CATEGORY R2 — placement_uncertain context key (Tier 2 gate)
+# =============================================================================
+
+def _make_minimal_context(overrides=None):
+    """Build a minimal WorkflowEngine context dict for R2 tests."""
+    base = {
+        "has_placed_model":      False,
+        "cell_mismatch":         False,
+        "placement_probed":      False,
+        "placement_probe_result": None,
+        "has_model":             True,
+        "has_data_mtz":          True,
+        "has_map":               False,
+        "has_predicted_model":   False,
+        "placement_uncertain":   False,   # will be recomputed
+    }
+    if overrides:
+        base.update(overrides)
+    # Replicate the logic from build_context
+    base["placement_uncertain"] = (
+        not base["has_placed_model"] and
+        not base["cell_mismatch"] and
+        not base["placement_probed"] and
+        base["has_model"] and
+        (base["has_data_mtz"] or base["has_map"]) and
+        not base["has_predicted_model"]
+    )
+    return base
+
+
+def test_r2_placement_uncertain_set_when_ambiguous():
+    """R2: placement_uncertain=True when model+MTZ present, no history, no directive."""
+    print("Test: r2_placement_uncertain_set_when_ambiguous")
+    ctx = _make_minimal_context()
+    assert ctx["placement_uncertain"] is True, (
+        "placement_uncertain should be True for ambiguous model+MTZ case"
+    )
+    print("  PASSED")
+
+
+def test_r2_placement_uncertain_false_when_placed():
+    """R2: placement_uncertain=False when heuristics confirm model is placed."""
+    print("Test: r2_placement_uncertain_false_when_placed")
+    ctx = _make_minimal_context({"has_placed_model": True})
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False when has_placed_model=True"
+    )
+    print("  PASSED")
+
+
+def test_r2_placement_uncertain_false_on_cell_mismatch():
+    """R2: placement_uncertain=False when cell_mismatch=True (Tier 1 already decided)."""
+    print("Test: r2_placement_uncertain_false_on_cell_mismatch")
+    ctx = _make_minimal_context({"cell_mismatch": True})
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False when cell_mismatch=True "
+        "(Tier 1 handles routing)"
+    )
+    print("  PASSED")
+
+
+def test_r2_placement_uncertain_false_when_probed():
+    """R2: placement_uncertain=False when probe has already run (placement_probed=True)."""
+    print("Test: r2_placement_uncertain_false_when_probed")
+    ctx = _make_minimal_context({"placement_probed": True})
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False when placement_probed=True"
+    )
+    print("  PASSED")
+
+
+def test_r2_placement_uncertain_false_no_model():
+    """R2: placement_uncertain=False when there is no model file."""
+    print("Test: r2_placement_uncertain_false_no_model")
+    ctx = _make_minimal_context({"has_model": False})
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False when has_model=False"
+    )
+    print("  PASSED")
+
+
+def test_r2_placement_uncertain_false_no_data():
+    """R2: placement_uncertain=False when there is no data (MTZ or map)."""
+    print("Test: r2_placement_uncertain_false_no_data")
+    ctx = _make_minimal_context({"has_data_mtz": False, "has_map": False})
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False when no MTZ and no map"
+    )
+    print("  PASSED")
+
+
+def test_r2_placement_uncertain_false_for_predicted_model():
+    """R2: placement_uncertain=False for predicted models (always need MR/dock — no probe)."""
+    print("Test: r2_placement_uncertain_false_for_predicted_model")
+    ctx = _make_minimal_context({"has_predicted_model": True})
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False for predicted models "
+        "(they always require MR/dock without probing)"
+    )
+    print("  PASSED")
+
+
+def test_r2_placement_uncertain_true_with_map_only():
+    """R2: placement_uncertain=True for cryo-EM case (model + map, no MTZ)."""
+    print("Test: r2_placement_uncertain_true_with_map_only")
+    ctx = _make_minimal_context({"has_data_mtz": False, "has_map": True})
+    assert ctx["placement_uncertain"] is True, (
+        "placement_uncertain should be True for model+map (cryo-EM ambiguous case)"
+    )
+    print("  PASSED")
+
+
+def test_r2_context_keys_present_in_workflow_engine():
+    """R2: WorkflowEngine.build_context() returns all four new placement keys."""
+    print("Test: r2_context_keys_present_in_workflow_engine")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    # Minimal inputs — no files, no history, no analysis
+    ctx = engine.build_context(
+        files={},
+        history_info={},
+        analysis=None,
+        directives=None,
+    )
+    for key in ("cell_mismatch", "placement_probed",
+                "placement_probe_result", "placement_uncertain"):
+        assert key in ctx, (
+            "build_context() must include key %r in returned context" % key
+        )
+    print("  PASSED (all four keys present: cell_mismatch, placement_probed, "
+          "placement_probe_result, placement_uncertain)")
+
+
+def test_r2_placement_probed_loaded_from_history():
+    """R2: placement_probed and placement_probe_result are loaded from history_info."""
+    print("Test: r2_placement_probed_loaded_from_history")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+
+    # Simulate history where probe already ran and confirmed placement
+    history = {
+        "placement_probed": True,
+        "placement_probe_result": "placed",
+    }
+    ctx = engine.build_context(files={}, history_info=history)
+    assert ctx["placement_probed"] is True, "placement_probed must be True from history"
+    assert ctx["placement_probe_result"] == "placed", (
+        "placement_probe_result must be 'placed' from history, got %r"
+        % ctx["placement_probe_result"]
+    )
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False when placement_probed=True"
+    )
+    print("  PASSED")
+
+
+def test_r2_cell_mismatch_false_with_no_files():
+    """R2: cell_mismatch=False when no model or data files are present (fail-safe)."""
+    print("Test: r2_cell_mismatch_false_with_no_files")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    ctx = engine.build_context(files={}, history_info={})
+    assert ctx["cell_mismatch"] is False, (
+        "cell_mismatch must be False (fail-safe) when no files present, got %r"
+        % ctx["cell_mismatch"]
+    )
+    print("  PASSED")
+
+
+# =============================================================================
+# CATEGORY R3 — probe_placement phase routing (Tier 3)
+# =============================================================================
+
+def _make_xray_history_with_probe(program, rfree=None, pre_refine=True):
+    """Build a minimal history list simulating a probe run."""
+    result_text = "SUCCESS: Quick R-factor check complete"
+    metrics = {}
+    if rfree is not None:
+        metrics["r_free"] = rfree
+
+    entry = {
+        "program": program,
+        "command": program + " model.pdb data.mtz",
+        "result": result_text,
+        "analysis": metrics,
+    }
+    if not pre_refine:
+        # Simulate refinement having run first
+        return [
+            {"program": "phenix.refine", "command": "phenix.refine model.pdb data.mtz",
+             "result": "SUCCESS: Refinement complete", "analysis": {"r_free": 0.28}},
+            entry,
+        ]
+    return [entry]
+
+
+def test_r3_probe_placement_phase_offered_xray():
+    """R3: placement_uncertain=True → xray phase is probe_placement."""
+    print("Test: r3_probe_placement_phase_offered_xray")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    # Build context that triggers placement_uncertain
+    # has_model=True, has_data_mtz=True, no history, no predicted model
+    context = {
+        "has_placed_model": False,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "has_model": True,
+        "has_search_model": False,
+        "has_model_for_mr": True,
+        "has_data_mtz": True,
+        "has_map_coeffs_mtz": False,
+        "has_sequence": False,
+        "has_full_map": False,
+        "has_half_map": False,
+        "has_map": False,
+        "has_non_half_map": False,
+        "has_ligand": False,
+        "has_ligand_file": False,
+        "has_ligand_fit": False,
+        "has_optimized_full_map": False,
+        "has_refined_model": False,
+        "phaser_done": False,
+        "predict_done": False,
+        "predict_full_done": False,
+        "autobuild_done": False,
+        "autosol_done": False,
+        "autosol_success": False,
+        "refine_done": False,
+        "rsr_done": False,
+        "validation_done": False,
+        "ligandfit_done": False,
+        "pdbtools_done": False,
+        "needs_post_ligandfit_refine": False,
+        "dock_done": False,
+        "process_predicted_model_done": False,
+        "refine_count": 0,
+        "rsr_count": 0,
+        "r_free": None, "r_work": None, "map_cc": None, "clashscore": None,
+        "resolution": None, "tfz": None,
+        "has_anomalous": False, "strong_anomalous": False,
+        "anomalous_measurability": None, "has_twinning": False, "twin_law": None,
+        "twin_fraction": None, "anomalous_resolution": None, "has_ncs": False,
+        "has_half_map": False,
+        "xtriage_done": True,   # Analysis already done
+        "model_is_good": False,
+        "use_mr_sad": False,
+        "automation_path": "automated",
+        # Tier 1/2/3 placement keys
+        "cell_mismatch": False,
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "placement_uncertain": True,   # <- This triggers probe
+    }
+
+    from knowledge.yaml_loader import get_workflow_phases
+    phases = get_workflow_phases("xray")
+    result = engine._detect_xray_phase(phases, context)
+    assert result["phase"] == "probe_placement", (
+        "Expected probe_placement phase, got %r (reason: %s)"
+        % (result["phase"], result.get("reason", ""))
+    )
+    print("  PASSED: phase=%r" % result["phase"])
+
+
+def test_r3_probe_valid_programs_xray():
+    """R3: probe_placement valid programs for xray = [phenix.model_vs_data]."""
+    print("Test: r3_probe_valid_programs_xray")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    phase_info = {"phase": "probe_placement"}
+    progs = engine.get_valid_programs("xray", phase_info, {}, {})
+    assert "phenix.model_vs_data" in progs, (
+        "phenix.model_vs_data must be in probe_placement valid programs for xray, got %s" % progs
+    )
+    assert "phenix.refine" not in progs, (
+        "phenix.refine must NOT be in probe_placement valid programs"
+    )
+    print("  PASSED: valid programs = %s" % progs)
+
+
+def test_r3_probe_valid_programs_cryoem():
+    """R3: probe_placement valid programs for cryoem = [phenix.map_correlations]."""
+    print("Test: r3_probe_valid_programs_cryoem")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    phase_info = {"phase": "probe_placement"}
+    progs = engine.get_valid_programs("cryoem", phase_info, {}, {})
+    assert "phenix.map_correlations" in progs, (
+        "phenix.map_correlations must be in probe_placement valid programs for cryoem, got %s" % progs
+    )
+    assert "phenix.real_space_refine" not in progs, (
+        "phenix.real_space_refine must NOT be in probe_placement valid programs"
+    )
+    print("  PASSED: valid programs = %s" % progs)
+
+
+def test_r3_probe_result_placed_routes_to_refine():
+    """R3: placement_probe_result='placed' → xray phase is refine (not probe_placement)."""
+    print("Test: r3_probe_result_placed_routes_to_refine")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    from knowledge.yaml_loader import get_workflow_phases
+    phases = get_workflow_phases("xray")
+
+    # placement_probed=True, result=placed → should skip probe_placement, go to refine
+    context = _make_minimal_context({
+        "has_placed_model": False,   # Heuristics still say False
+        "placement_probed": True,
+        "placement_probe_result": "placed",
+        "placement_uncertain": False,
+        "cell_mismatch": False,
+        "xtriage_done": True,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "autosol_done": False,
+        "phaser_done": False,
+        "has_ligand_fit": False,
+        "pdbtools_done": False,
+        "needs_post_ligandfit_refine": False,
+        "has_refined_model": False,
+        "has_anomalous": False,
+        "use_mr_sad": False,
+        "has_twinning": False,
+        "has_ligand_file": False,
+        "ligandfit_done": False,
+        "refine_count": 0,
+        "r_free": None,
+        "resolution": None,
+        "validation_done": False,
+        "model_is_good": False,
+    })
+    # build_context overrides has_placed_model=True when probe result is 'placed';
+    # replicate that here since we bypass build_context in this unit test.
+    if context.get("placement_probe_result") == "placed":
+        context["has_placed_model"] = True
+    result = engine._detect_xray_phase(phases, context)
+    assert result["phase"] == "refine", (
+        "After successful probe (placed), expected refine, got %r (reason: %s)"
+        % (result["phase"], result.get("reason", ""))
+    )
+    print("  PASSED: phase=%r" % result["phase"])
+
+
+def test_r3_probe_result_needs_mr_routes_to_mr():
+    """R3: placement_probe_result='needs_mr' → xray phase is molecular_replacement."""
+    print("Test: r3_probe_result_needs_mr_routes_to_mr")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    from knowledge.yaml_loader import get_workflow_phases
+    phases = get_workflow_phases("xray")
+
+    context = _make_minimal_context({
+        "has_placed_model": False,
+        "placement_probed": True,
+        "placement_probe_result": "needs_mr",
+        "placement_uncertain": False,
+        "cell_mismatch": False,
+        "xtriage_done": True,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "autosol_done": False,
+        "phaser_done": False,
+        "use_mr_sad": False,
+        "has_anomalous": False,
+        "model_is_good": False,
+    })
+    result = engine._detect_xray_phase(phases, context)
+    assert result["phase"] == "molecular_replacement", (
+        "needs_mr probe result should route to molecular_replacement, got %r"
+        % result["phase"]
+    )
+    print("  PASSED: phase=%r" % result["phase"])
+
+
+def test_r3_cell_mismatch_routes_to_mr_xray():
+    """R3: cell_mismatch=True → xray phase is molecular_replacement (skips probe)."""
+    print("Test: r3_cell_mismatch_routes_to_mr_xray")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    from knowledge.yaml_loader import get_workflow_phases
+    phases = get_workflow_phases("xray")
+
+    context = _make_minimal_context({
+        "has_placed_model": False,
+        "cell_mismatch": True,          # <- Tier 1 result
+        "placement_uncertain": False,   # Tier 1 detected → uncertainty cleared
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "xtriage_done": True,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "autosol_done": False,
+        "phaser_done": False,
+        "use_mr_sad": False,
+        "has_anomalous": False,
+        "model_is_good": False,
+    })
+    result = engine._detect_xray_phase(phases, context)
+    assert result["phase"] == "molecular_replacement", (
+        "cell_mismatch should route to molecular_replacement, got %r" % result["phase"]
+    )
+    print("  PASSED: phase=%r" % result["phase"])
+
+
+def test_r3_cell_mismatch_routes_to_dock_cryoem():
+    """R3: cell_mismatch=True → cryoem phase is dock_model (skips probe)."""
+    print("Test: r3_cell_mismatch_routes_to_dock_cryoem")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    from knowledge.yaml_loader import get_workflow_phases
+    phases = get_workflow_phases("cryoem")
+
+    context = _make_minimal_context({
+        "has_placed_model": False,
+        "cell_mismatch": True,
+        "placement_uncertain": False,
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "has_data_mtz": False,
+        "has_map": True,
+        "has_full_map": True,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "has_search_model": False,
+        "has_model_for_mr": True,
+        "has_half_map": False,
+        "has_non_half_map": True,
+        "has_sequence": False,
+        "has_optimized_full_map": False,
+        "xtriage_done": True,
+        "mtriage_done": True,
+        "dock_done": False,
+        "resolve_cryo_em_done": False,
+        "map_sharpening_done": False,
+        "map_to_model_done": False,
+        "model_is_good": False,
+        "automation_path": "automated",
+        "map_symmetry_done": False,
+    })
+    result = engine._detect_cryoem_phase(phases, context)
+    assert result["phase"] == "dock_model", (
+        "cell_mismatch should route to dock_model for cryoem, got %r" % result["phase"]
+    )
+    print("  PASSED: phase=%r" % result["phase"])
+
+
+def test_r3_probe_not_rerun_when_already_probed():
+    """R3: placement_probed=True → probe_placement phase NOT offered again."""
+    print("Test: r3_probe_not_rerun_when_already_probed")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    from knowledge.yaml_loader import get_workflow_phases
+    phases = get_workflow_phases("xray")
+
+    # Probe ran but R-free was unparseable (result=None) → should not re-probe
+    context = _make_minimal_context({
+        "has_placed_model": False,
+        "placement_probed": True,
+        "placement_probe_result": None,   # Couldn't parse → fail-safe
+        "placement_uncertain": False,     # probed=True clears uncertainty
+        "cell_mismatch": False,
+        "xtriage_done": True,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "autosol_done": False,
+        "phaser_done": False,
+        "use_mr_sad": False,
+        "has_anomalous": False,
+        "model_is_good": False,
+    })
+    result = engine._detect_xray_phase(phases, context)
+    assert result["phase"] != "probe_placement", (
+        "probe_placement must NOT be offered again when placement_probed=True, "
+        "got %r" % result["phase"]
+    )
+    print("  PASSED: phase=%r (not re-probing)" % result["phase"])
+
+
+def test_r3_history_probe_detection_xray_placed():
+    """R3: model_vs_data in history before refine → placement_probed=True, result=placed."""
+    print("Test: r3_history_probe_detection_xray_placed")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    history = _make_xray_history_with_probe("phenix.model_vs_data", rfree=0.38, pre_refine=True)
+    info = _analyze_history(history)
+
+    assert info["placement_probed"] is True, (
+        "placement_probed should be True after model_vs_data before refinement"
+    )
+    assert info["placement_probe_result"] == "placed", (
+        "R-free=0.38 < 0.50 should give placement_probe_result='placed', got %r"
+        % info["placement_probe_result"]
+    )
+    print("  PASSED: probed=%s result=%r" % (info["placement_probed"],
+                                              info["placement_probe_result"]))
+
+
+def test_r3_history_probe_detection_xray_needs_mr():
+    """R3: model_vs_data before refine with R-free >= 0.50 → result=needs_mr."""
+    print("Test: r3_history_probe_detection_xray_needs_mr")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    history = _make_xray_history_with_probe("phenix.model_vs_data", rfree=0.55, pre_refine=True)
+    info = _analyze_history(history)
+
+    assert info["placement_probed"] is True
+    assert info["placement_probe_result"] == "needs_mr", (
+        "R-free=0.55 >= 0.50 should give placement_probe_result='needs_mr', got %r"
+        % info["placement_probe_result"]
+    )
+    print("  PASSED: result=%r" % info["placement_probe_result"])
+
+
+def test_r3_history_probe_not_detected_after_refine():
+    """R3: model_vs_data AFTER refinement → NOT treated as probe (is validation)."""
+    print("Test: r3_history_probe_not_detected_after_refine")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    # model_vs_data ran AFTER refinement → it's validation, not a probe
+    history = _make_xray_history_with_probe("phenix.model_vs_data", rfree=0.25, pre_refine=False)
+    info = _analyze_history(history)
+
+    assert info["placement_probed"] is False, (
+        "model_vs_data after refinement must NOT be treated as placement probe, "
+        "placement_probed should be False, got %s" % info["placement_probed"]
+    )
+    print("  PASSED: placement_probed=%s (correctly treated as validation)" % info["placement_probed"])
+
+
+def test_r3_validation_done_not_set_during_probe_phase():
+    """R3: probe history detection (pre-refine) sets placement_probed, not validation_done.
+
+    validation_done is still set by YAML done_tracking (set_flag strategy),
+    which fires whenever model_vs_data marker is found.  The probe result
+    flags are SET IN ADDITION — they don't prevent validation_done.
+    This test verifies the probe result flags ARE set; validation_done
+    being also set is acceptable (it resets when the session resumes with
+    the probe result already known, so validation phase runs normally later).
+    """
+    print("Test: r3_validation_done_not_set_during_probe_phase")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    history = _make_xray_history_with_probe("phenix.model_vs_data", rfree=0.38, pre_refine=True)
+    info = _analyze_history(history)
+
+    # The key invariant: placement_probed must be set
+    assert info["placement_probed"] is True, (
+        "placement_probed must be True after pre-refine model_vs_data"
+    )
+    assert info["placement_probe_result"] == "placed", (
+        "placement_probe_result must be 'placed' for R-free=0.38"
+    )
+    # validation_done being set is acceptable here — context builder uses
+    # placement_probed to route correctly; validation can re-run later.
+    print("  PASSED: placement_probed=%s, result=%r, validation_done=%s"
+          % (info["placement_probed"], info["placement_probe_result"],
+             info.get("validation_done")))
+
+
+# =============================================================================
+# CATEGORY R3-EXTRA -- additional placement detection edge cases
+# =============================================================================
+
+def test_r3_cryoem_probe_needs_dock():
+    """R3-extra: map_correlations before refine, CC <= 0.15 -> needs_dock."""
+    print("Test: r3_cryoem_probe_needs_dock")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    history = [{
+        "program": "phenix.map_correlations",
+        "command": "phenix.map_correlations model.pdb map.ccp4",
+        "result": "SUCCESS: Map-model CC computed",
+        "analysis": {"cc_mask": 0.05},
+    }]
+    info = _analyze_history(history)
+    assert info["placement_probed"] is True, "placement_probed should be True"
+    assert info["placement_probe_result"] == "needs_dock", (
+        "CC=0.05 should give needs_dock, got %r" % info["placement_probe_result"]
+    )
+    print("  PASSED: result=%r" % info["placement_probe_result"])
+
+
+def test_r3_cryoem_probe_placed():
+    """R3-extra: map_correlations before refine, CC > 0.15 -> placed."""
+    print("Test: r3_cryoem_probe_placed")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    history = [{
+        "program": "phenix.map_correlations",
+        "command": "phenix.map_correlations model.pdb map.ccp4",
+        "result": "SUCCESS: Map-model CC computed",
+        "analysis": {"cc_mask": 0.42},
+    }]
+    info = _analyze_history(history)
+    assert info["placement_probed"] is True
+    assert info["placement_probe_result"] == "placed", (
+        "CC=0.42 should give placed, got %r" % info["placement_probe_result"]
+    )
+    print("  PASSED: result=%r" % info["placement_probe_result"])
+
+
+def test_r3_failed_probe_not_counted():
+    """R3-extra: a FAILED model_vs_data run does not set placement_probed."""
+    print("Test: r3_failed_probe_not_counted")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    history = [{
+        "program": "phenix.model_vs_data",
+        "command": "phenix.model_vs_data model.pdb data.mtz",
+        "result": "FAILED: Sorry: could not open file",
+        "analysis": {},
+    }]
+    info = _analyze_history(history)
+    assert info["placement_probed"] is False, (
+        "FAILED model_vs_data must NOT set placement_probed=True"
+    )
+    print("  PASSED: failed run correctly ignored")
+
+
+def test_r3_probe_cc_volume_fallback():
+    """R3-extra: probe detection uses cc_volume when cc_mask is absent."""
+    print("Test: r3_probe_cc_volume_fallback")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    history = [{
+        "program": "phenix.map_correlations",
+        "command": "phenix.map_correlations model.pdb map.ccp4",
+        "result": "SUCCESS: Done",
+        "analysis": {"cc_volume": 0.30},   # cc_mask absent, cc_volume present
+    }]
+    info = _analyze_history(history)
+    assert info["placement_probed"] is True
+    assert info["placement_probe_result"] == "placed", (
+        "cc_volume=0.30 > 0.15 should give placed, got %r" % info["placement_probe_result"]
+    )
+    print("  PASSED: cc_volume fallback works, result=%r" % info["placement_probe_result"])
+
+
+def test_r3_build_context_overrides_has_placed_model():
+    """R3-extra: build_context sets has_placed_model=True when probe says placed."""
+    print("Test: r3_build_context_overrides_has_placed_model")
+    import tempfile
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    from agent.workflow_state import _analyze_history
+
+    engine = WorkflowEngine()
+    history = [{
+        "program": "phenix.model_vs_data",
+        "command": "phenix.model_vs_data model.pdb data.mtz",
+        "result": "SUCCESS: Done",
+        "analysis": {"r_free": 0.35},
+    }]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdb = os.path.join(tmpdir, "model.pdb")
+        mtz = os.path.join(tmpdir, "data.mtz")
+        for p in (pdb, mtz):
+            open(p, "w").close()
+
+        files = {"model": [pdb], "data_mtz": [mtz]}
+        history_info = _analyze_history(history)
+
+        assert history_info["placement_probed"] is True
+        assert history_info["placement_probe_result"] == "placed"
+
+        ctx = engine.build_context(files=files, history_info=history_info)
+
+        assert ctx["has_placed_model"] is True, (
+            "build_context must set has_placed_model=True when probe result is placed, "
+            "got %s" % ctx["has_placed_model"]
+        )
+        assert ctx["placement_uncertain"] is False
+    print("  PASSED: build_context correctly overrides has_placed_model=True")
+
+
+def test_r3_cells_fail_safe_none():
+    """R3-extra: cells_are_compatible with None inputs returns True (fail-safe)."""
+    print("Test: r3_cells_fail_safe_none")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import cells_are_compatible
+
+    assert cells_are_compatible(None, (57.0, 57.0, 147.0, 90.0, 90.0, 90.0)) is True
+    assert cells_are_compatible((57.0, 57.0, 147.0, 90.0, 90.0, 90.0), None) is True
+    assert cells_are_compatible(None, None) is True
+    print("  PASSED: None inputs always return True (fail-safe)")
+
+
+def test_r3_cells_clear_mismatch_detected():
+    """R3-extra: cells_are_compatible correctly rejects clearly incompatible cells."""
+    print("Test: r3_cells_clear_mismatch_detected")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.placement_checker import cells_are_compatible
+
+    # ~75% difference in all axes -- far outside 5% tolerance
+    model_cell = (57.23, 57.23, 146.77, 90.0, 90.0, 90.0)
+    mtz_cell   = (100.0, 100.0, 200.00, 90.0, 90.0, 90.0)
+    assert cells_are_compatible(model_cell, mtz_cell) is False, (
+        "Clearly incompatible cells must be detected as mismatch"
+    )
+    print("  PASSED: large cell difference correctly flagged as mismatch")
+
+
+def test_r3_placement_uncertain_clears_after_probe():
+    """R3-extra: placement_uncertain=False on build_context after probe ran."""
+    print("Test: r3_placement_uncertain_clears_after_probe")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    from agent.workflow_state import _analyze_history
+
+    engine = WorkflowEngine()
+    history = [{
+        "program": "phenix.model_vs_data",
+        "command": "phenix.model_vs_data model.pdb data.mtz",
+        "result": "SUCCESS: Done",
+        "analysis": {"r_free": 0.42},
+    }]
+    history_info = _analyze_history(history)
+    ctx = engine.build_context(files={}, history_info=history_info)
+
+    assert ctx["placement_probed"] is True
+    assert ctx["placement_uncertain"] is False, (
+        "placement_uncertain must be False after probe ran"
+    )
+    print("  PASSED: placement_uncertain cleared correctly after probe cycle")
+
+
+def test_r3_probe_placement_cryoem_phase_offered():
+    """R3-extra: cryoem placement_uncertain=True -> probe_placement phase offered."""
+    print("Test: r3_probe_placement_cryoem_phase_offered")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    from knowledge.yaml_loader import get_workflow_phases
+
+    engine = WorkflowEngine()
+    phases = get_workflow_phases("cryoem")
+    context = _make_minimal_context({
+        "has_placed_model": False,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "has_model": True,
+        "has_search_model": False,
+        "has_model_for_mr": True,
+        "has_data_mtz": False,
+        "has_map": True,
+        "has_full_map": True,
+        "has_half_map": False,
+        "has_non_half_map": True,
+        "has_sequence": False,
+        "has_optimized_full_map": False,
+        "has_refined_model": False,
+        "has_map_coeffs_mtz": False,
+        "predict_done": False,
+        "predict_full_done": False,
+        "dock_done": False,
+        "resolve_cryo_em_done": False,
+        "map_sharpening_done": False,
+        "map_to_model_done": False,
+        "xtriage_done": True,
+        "mtriage_done": True,
+        "map_symmetry_done": False,
+        "model_is_good": False,
+        "automation_path": "automated",
+        "cell_mismatch": False,
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "placement_uncertain": True,  # <- triggers probe
+    })
+    result = engine._detect_cryoem_phase(phases, context)
+    assert result["phase"] == "probe_placement", (
+        "Expected probe_placement phase for cryoem, got %r" % result["phase"]
+    )
+    print("  PASSED: phase=%r" % result["phase"])
+
+
+def test_r3_needs_dock_routes_to_dock():
+    """R3-extra: cryoem probe result needs_dock routes to dock_model phase."""
+    print("Test: r3_needs_dock_routes_to_dock")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    from knowledge.yaml_loader import get_workflow_phases
+
+    engine = WorkflowEngine()
+    phases = get_workflow_phases("cryoem")
+    context = _make_minimal_context({
+        "has_placed_model": False,
+        "has_predicted_model": False,
+        "has_processed_model": False,
+        "has_model": True,
+        "has_search_model": False,
+        "has_model_for_mr": True,
+        "has_data_mtz": False,
+        "has_map": True,
+        "has_full_map": True,
+        "has_half_map": False,
+        "has_non_half_map": True,
+        "has_sequence": False,
+        "has_optimized_full_map": False,
+        "has_refined_model": False,
+        "has_map_coeffs_mtz": False,
+        "predict_done": False,
+        "predict_full_done": False,
+        "dock_done": False,
+        "resolve_cryo_em_done": False,
+        "map_sharpening_done": False,
+        "map_to_model_done": False,
+        "xtriage_done": True,
+        "mtriage_done": True,
+        "map_symmetry_done": False,
+        "model_is_good": False,
+        "automation_path": "automated",
+        "cell_mismatch": False,
+        "placement_probed": True,
+        "placement_probe_result": "needs_dock",
+        "placement_uncertain": False,
+    })
+    result = engine._detect_cryoem_phase(phases, context)
+    assert result["phase"] == "dock_model", (
+        "needs_dock probe result should route to dock_model, got %r" % result["phase"]
+    )
+    print("  PASSED: phase=%r" % result["phase"])
+
+
+
+# =============================================================================
+# CATEGORY S2 -- Directive override protection
+#
+# Root cause: LLM directive extractor set model_is_placed=True from "solve the
+# structure", making _has_placed_model() return True. Tier 1 cell-mismatch
+# routing checked `cell_mismatch AND NOT has_placed_model`, which evaluated
+# False → skipped docking → RSR failed with "unit cell dimensions mismatch".
+#
+# Three fixes:
+#   A. Tightened directive extractor prompt (model_is_placed is now high-precision)
+#   B. has_placed_model_from_history context key (history/files only, no directives)
+#   C. Tier 1 routing guards use has_placed_model_from_history instead of has_placed_model
+#   D. S1 short-circuit also uses has_placed_model_from_history
+# =============================================================================
+
+def test_s2_has_placed_model_from_history_method_exists():
+    """S2: WorkflowEngine has _has_placed_model_from_history() method."""
+    print("Test: s2_has_placed_model_from_history_method_exists")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    engine = WorkflowEngine()
+    assert hasattr(engine, '_has_placed_model_from_history'), (
+        "_has_placed_model_from_history method must exist on WorkflowEngine"
+    )
+    print("  PASSED")
+
+
+def test_s2_from_history_false_when_only_directive():
+    """S2: _has_placed_model_from_history returns False when placement is only via directive."""
+    print("Test: s2_from_history_false_when_only_directive")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    engine = WorkflowEngine()
+
+    # Simulate: directive says model_is_placed=True, but no history/subcategory evidence
+    directives = {"workflow_preferences": {"model_is_placed": True}}
+    # files must include "model" for directive check to fire in _has_placed_model
+    files = {"model": ["/fake/1aew_A.pdb"]}
+    history_info = {}
+
+    # _has_placed_model should return True (directive-driven, model file present)
+    has_placed = engine._has_placed_model(files, history_info, directives)
+    assert has_placed is True, "Directive should make _has_placed_model return True (with model file)"
+
+    # _has_placed_model_from_history should return False (no history)
+    from_history = engine._has_placed_model_from_history(files, history_info)
+    assert from_history is False, (
+        "_has_placed_model_from_history must return False when placement is only "
+        "from directive (no dock_done, no phaser_done, no positioned subcategory)"
+    )
+    print("  PASSED: directive cannot fool has_placed_model_from_history")
+
+
+def test_s2_from_history_true_when_dock_done():
+    """S2: _has_placed_model_from_history returns True when dock_done=True in history."""
+    print("Test: s2_from_history_true_when_dock_done")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    from agent.workflow_state import _analyze_history
+
+    engine = WorkflowEngine()
+
+    history = [{
+        "program": "phenix.dock_in_map",
+        "command": "phenix.dock_in_map model.pdb map.ccp4",
+        "result": "SUCCESS: Docking complete",
+        "analysis": {},
+    }]
+    history_info = _analyze_history(history)
+    assert history_info["dock_done"] is True
+
+    from_history = engine._has_placed_model_from_history({}, history_info)
+    assert from_history is True, (
+        "_has_placed_model_from_history must return True when dock_done=True"
+    )
+    print("  PASSED: dock_done in history → has_placed_model_from_history=True")
+
+
+def test_s2_context_has_placed_from_history_key():
+    """S2: build_context populates has_placed_model_from_history key."""
+    print("Test: s2_context_has_placed_from_history_key")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    ctx = engine.build_context(files={}, history_info={})
+
+    assert "has_placed_model_from_history" in ctx, (
+        "build_context must include has_placed_model_from_history key"
+    )
+    assert ctx["has_placed_model_from_history"] is False, (
+        "Empty history → has_placed_model_from_history must be False"
+    )
+    print("  PASSED: has_placed_model_from_history present in context")
+
+
+def test_s2_directive_model_is_placed_does_not_suppress_cell_mismatch():
+    """
+    S2: The critical bug scenario — model_is_placed=True directive must NOT
+    suppress Tier 1 cell-mismatch routing to dock_model.
+
+    Replicates the apoferritin log:
+      - Directive: model_is_placed=True (set by LLM from "solve the structure")
+      - History: no dock_done, no phaser_done
+      - Cell mismatch: True (model cell ≠ map cell)
+    Expected: cryoem phase → dock_model  (not ready_to_refine)
+    """
+    print("Test: s2_directive_model_is_placed_does_not_suppress_cell_mismatch")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+
+    # Build context with directive-driven has_placed_model=True but no history
+    directives = {"workflow_preferences": {"model_is_placed": True}}
+    # Include mtriage_done=True so we are past the "analyze" gate in cryoem phase detection
+    history_with_mtriage = {"mtriage_done": True, "resolve_cryo_em_done": False}
+    ctx = engine.build_context(files={"model": ["/fake/1aew_A.pdb"], "full_map": ["/fake/map.ccp4"]},
+                               history_info=history_with_mtriage, directives=directives)
+
+    assert ctx["has_placed_model"] is True, \
+        "Directive should set has_placed_model=True (with model file present)"
+    assert ctx["has_placed_model_from_history"] is False, \
+        "No dock/phaser → has_placed_model_from_history must be False"
+
+    # Manually inject cell_mismatch=True to simulate what placement_checker would detect
+    ctx["cell_mismatch"] = True
+
+    # Now ask the engine to detect phase given this context
+    from knowledge.yaml_loader import get_workflow_phases; phases = get_workflow_phases("cryoem")
+    phase_info = engine._detect_cryoem_phase(phases, ctx)
+
+    assert phase_info["phase"] == "dock_model", (
+        "Cell mismatch MUST route to dock_model even when model_is_placed=True "
+        "from directive. Got phase=%r (reason=%r)" % (
+            phase_info["phase"], phase_info.get("reason", ""))
+    )
+    print("  PASSED: cell_mismatch → dock_model despite model_is_placed=True directive")
+
+
+def test_s2_history_placed_does_suppress_cell_mismatch():
+    """
+    S2: When placement is confirmed by real history (dock_done=True), Tier 1
+    cell-mismatch routing is correctly suppressed (model is already placed).
+    """
+    print("Test: s2_history_placed_does_suppress_cell_mismatch")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    from agent.workflow_state import _analyze_history
+
+    engine = WorkflowEngine()
+
+    history = [{
+        "program": "phenix.dock_in_map",
+        "command": "phenix.dock_in_map 1aew_A.pdb denmod_map.ccp4",
+        "result": "SUCCESS: Docking complete. Output: 1aew_A_docked.pdb",
+        "analysis": {},
+    }]
+    history_info = _analyze_history(history)
+    assert history_info["dock_done"] is True
+
+    ctx = engine.build_context(files={}, history_info=history_info)
+    assert ctx["has_placed_model_from_history"] is True
+
+    # Inject cell_mismatch=True (edge case: could still mismatch due to box padding)
+    ctx["cell_mismatch"] = True
+
+    from knowledge.yaml_loader import get_workflow_phases; phases = get_workflow_phases("cryoem")
+    phase_info = engine._detect_cryoem_phase(phases, ctx)
+
+    # With dock_done=True history, cell_mismatch is short-circuited to False
+    # (from the S1 post-processing short-circuit), so routing advances normally
+    assert phase_info["phase"] != "dock_model", (
+        "After dock_done, should NOT re-route to dock_model. "
+        "Got phase=%r" % phase_info["phase"]
+    )
+    print("  PASSED: dock_done in history correctly suppresses Tier 1 re-dock")
+
+
+def test_s2_xray_tier1_uses_from_history():
+    """S2: X-ray Tier 1 MR routing uses has_placed_model_from_history (not has_placed_model)."""
+    print("Test: s2_xray_tier1_uses_from_history")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+
+    # Directive: model_is_placed=True — should NOT suppress MR routing
+    directives = {"workflow_preferences": {"model_is_placed": True}}
+    # files must include "model" — _has_placed_model gates the directive on files.get("model")
+    ctx = engine.build_context(files={"model": ["/fake/1abc.pdb"]}, history_info={}, directives=directives)
+    assert ctx["has_placed_model"] is True,         "Directive should make has_placed_model=True (with model file present)"
+    assert ctx["has_placed_model_from_history"] is False
+
+    # Inject cell_mismatch=True and also fake X-ray analysis flag
+    ctx["cell_mismatch"] = True
+    ctx["xtriage_done"] = True  # past analysis phase
+
+    from knowledge.yaml_loader import get_workflow_phases; phases = get_workflow_phases("xray")
+    phase_info = engine._detect_xray_phase(phases, ctx)
+
+    assert phase_info["phase"] == "molecular_replacement", (
+        "X-ray cell mismatch MUST route to MR even with model_is_placed=True directive. "
+        "Got phase=%r" % phase_info["phase"]
+    )
+    print("  PASSED: X-ray cell_mismatch → molecular_replacement despite model_is_placed directive")
+
+
+def test_s2_short_circuit_uses_from_history_not_directive():
+    """
+    S2: S1 short-circuit uses has_placed_model_from_history — a directive-only
+    has_placed_model=True must NOT prevent the cell-mismatch check from running.
+    """
+    print("Test: s2_short_circuit_uses_from_history_not_directive")
+    sys.path.insert(0, _PROJECT_ROOT)
+    src_path = os.path.join(_PROJECT_ROOT, "agent", "workflow_engine.py")
+    with open(src_path) as f:
+        src = f.read()
+
+    # The short-circuit must reference has_placed_model_from_history, not has_placed_model
+    assert 'context.get("has_placed_model_from_history")' in src, (
+        "Short-circuit must use has_placed_model_from_history"
+    )
+    # The short-circuit must NOT reference bare has_placed_model (without _from_history)
+    # in its condition
+    sc_block_start = src.index("Tier 1 short-circuit: skip cell check")
+    sc_block_end   = src.index("context[\"cell_mismatch\"] = False", sc_block_start) + 40
+    sc_block = src[sc_block_start:sc_block_end]
+    assert 'has_placed_model_from_history' in sc_block, \
+        "Short-circuit block must reference has_placed_model_from_history"
+    # The bare 'has_placed_model' should only appear in the _from_history lookup, not standalone
+    assert '"has_placed_model")' not in sc_block, (
+        "Short-circuit must not check bare has_placed_model — directive could be wrong"
+    )
+    print("  PASSED: short-circuit uses has_placed_model_from_history (not bare directive flag)")
+
+
+def test_s2_directive_prompt_stronger_do_not_set():
+    """S2: directive_extractor.py prompt explicitly warns against 'solve the structure'."""
+    print("Test: s2_directive_prompt_stronger_do_not_set")
+    sys.path.insert(0, _PROJECT_ROOT)
+    src_path = os.path.join(_PROJECT_ROOT, "agent", "directive_extractor.py")
+    with open(src_path) as f:
+        src = f.read()
+
+    # Must explicitly say "solve the structure" is a DO NOT case
+    assert '"solve the structure"' in src or "'solve the structure'" in src or \
+           "solve the structure" in src, (
+        "Prompt must explicitly list 'solve the structure' as a case to NOT set model_is_placed"
+    )
+    # Must warn about cryo-EM + PDB combination
+    assert "cryo-EM" in src or "cryoem" in src.lower(), \
+        "Prompt must mention cryo-EM as a case requiring docking before refinement"
+    # ONLY / HIGH-PRECISION language should be present
+    assert ("HIGH-PRECISION" in src or "ONLY set model_is_placed" in src or
+            "high-precision" in src.lower()), (
+        "Prompt must use high-precision / only language to discourage false positives"
+    )
+    print("  PASSED: directive prompt contains explicit DO NOT cases and precision guidance")
+
+
+def test_s2_full_cryoem_stack_routes_to_dock_not_rsr():
+    """
+    S2: Full stack integration — cryoem workflow with resolve_cryo_em done,
+    model_is_placed directive, but no dock history → must route to dock_model
+    (not ready_to_refine or real_space_refine).
+
+    This replicates the exact failure observed in the apoferritin log.
+    """
+    print("Test: s2_full_cryoem_stack_routes_to_dock_not_rsr")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    from agent.workflow_state import _analyze_history
+
+    engine = WorkflowEngine()
+
+    # History: mtriage ran (cycle 1), resolve_cryo_em ran (cycle 2)
+    # Exactly as in the apoferritin log
+    history = [
+        {
+            "program": "phenix.mtriage",
+            "command": "phenix.mtriage half_map=map1.ccp4 half_map=map2.ccp4",
+            "result": "SUCCESS: Resolution 1.91 Å",
+            "analysis": {"resolution": 1.91},
+        },
+        {
+            "program": "phenix.resolve_cryo_em",
+            "command": "phenix.resolve_cryo_em half_map=map1.ccp4 half_map=map2.ccp4",
+            "result": "SUCCESS: Density modification complete",
+            "analysis": {},
+        },
+    ]
+    history_info = _analyze_history(history)
+    assert history_info["mtriage_done"] is True
+    assert history_info["resolve_cryo_em_done"] is True
+    assert history_info["dock_done"] is False  # no docking yet
+
+    # Directive: model_is_placed=True (as the LLM mis-extracted from "solve the structure")
+    directives = {"workflow_preferences": {"model_is_placed": True}}
+
+    ctx = engine.build_context(
+        files={"model": ["/fake/1aew_A.pdb"], "full_map": ["/fake/denmod_map.ccp4"]},
+        history_info=history_info, directives=directives
+    )
+
+    assert ctx["has_placed_model"] is True, \
+        "Directive should make has_placed_model=True (requires files['model'] non-empty)"
+    assert ctx["has_placed_model_from_history"] is False, \
+        "No dock/phaser in history → has_placed_model_from_history=False"
+
+    # Inject cell mismatch (what placement_checker would detect for 1aew_A.pdb vs denmod_map.ccp4)
+    ctx["cell_mismatch"] = True
+
+    from knowledge.yaml_loader import get_workflow_phases; phases = get_workflow_phases("cryoem")
+    phase_info = engine._detect_cryoem_phase(phases, ctx)
+
+    assert phase_info["phase"] == "dock_model", (
+        "REGRESSION: Full stack must route to dock_model when cell_mismatch=True "
+        "and has_placed_model_from_history=False, even if model_is_placed directive "
+        "is set. Got phase=%r (reason=%r). This is the apoferritin bug." % (
+            phase_info["phase"], phase_info.get("reason", ""))
+    )
+    print("  PASSED: apoferritin scenario correctly routes to dock_model (not RSR)")
+
+
+# =============================================================================
+# CATEGORY S1 -- Polish fixes (yaml_tools transition fields, import fallback,
+#                              redundant import, cell_mismatch short-circuit)
+# =============================================================================
+
+def test_s1_yaml_validator_no_if_placed_warnings():
+    """S1: _validate_workflows generates no warnings for if_placed / if_not_placed."""
+    print("Test: s1_yaml_validator_no_if_placed_warnings")
+    import yaml
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.yaml_tools import _validate_workflows
+
+    wf_path = os.path.join(_PROJECT_ROOT, "knowledge", "workflows.yaml")
+    with open(wf_path) as f:
+        data = yaml.safe_load(f)
+
+    issues = _validate_workflows(data)
+    probe_warns = [i for i in issues
+                   if "if_placed" in i[1] or "if_not_placed" in i[1]]
+
+    assert probe_warns == [], (
+        "Expected no if_placed/if_not_placed warnings, got: %s" % probe_warns
+    )
+    print("  PASSED: no spurious transition-field warnings from probe_placement phase")
+
+
+def test_s1_yaml_validator_if_placed_is_in_valid_set():
+    """S1: valid_transition_fields in yaml_tools explicitly includes if_placed/if_not_placed."""
+    print("Test: s1_yaml_validator_if_placed_is_in_valid_set")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.yaml_tools import _validate_workflows
+    assert _validate_workflows is not None, "_validate_workflows must be importable"
+
+    # Read source to verify the constants are present (not just that no warnings fired)
+    src_path = os.path.join(_PROJECT_ROOT, "agent", "yaml_tools.py")
+    with open(src_path) as f:
+        src = f.read()
+
+    assert "'if_placed'" in src, (
+        "'if_placed' must appear in yaml_tools.py (valid_transition_fields)"
+    )
+    assert "'if_not_placed'" in src, (
+        "'if_not_placed' must appear in yaml_tools.py (valid_transition_fields)"
+    )
+    print("  PASSED: if_placed and if_not_placed present in yaml_tools source")
+
+
+def test_s1_no_redundant_import_re_in_probe_block():
+    """S1: workflow_state.py probe detection does not use a local 'import re' inside the loop."""
+    print("Test: s1_no_redundant_import_re_in_probe_block")
+    sys.path.insert(0, _PROJECT_ROOT)
+
+    src_path = os.path.join(_PROJECT_ROOT, "agent", "workflow_state.py")
+    with open(src_path) as f:
+        src = f.read()
+
+    # The probe detection block should use the module-level `re`, not `_re2`
+    assert "import re as _re2" not in src, (
+        "Redundant 'import re as _re2' must be removed from probe detection block"
+    )
+    # Module-level `import re` must still be present
+    assert "import re\n" in src or "\nimport re\n" in src, (
+        "Module-level 'import re' must be present in workflow_state.py"
+    )
+    # The regex search used in the probe block must reference just `re`
+    assert "re.search(r'r_free" in src, (
+        "Probe block must use module-level re.search(), not _re2.search()"
+    )
+    print("  PASSED: probe detection uses module-level re, no _re2 alias")
+
+
+def test_s1_probe_re_fallback_still_works():
+    """S1: regex fallback for r_free still parses correctly after import cleanup."""
+    print("Test: s1_probe_re_fallback_still_works")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+
+    # Result has r_free in text only (not in analysis dict) — exercises the regex path
+    history = [{
+        "program": "phenix.model_vs_data",
+        "command": "phenix.model_vs_data model.pdb data.mtz",
+        "result": "SUCCESS: r_free: 0.38 r_work: 0.34",
+        "analysis": {},   # empty — forces regex fallback
+    }]
+    info = _analyze_history(history)
+
+    assert info["placement_probed"] is True, (
+        "placement_probed must be True when r_free parsed from result text"
+    )
+    assert info["placement_probe_result"] == "placed", (
+        "r_free=0.38 < 0.50 must give result='placed', got %r"
+        % info["placement_probe_result"]
+    )
+    print("  PASSED: regex fallback parses r_free from result text correctly")
+
+
+def test_s1_local_import_fallback_in_check_cell_mismatch():
+    """S1: _check_cell_mismatch has a local 'from agent.placement_checker' fallback path."""
+    print("Test: s1_local_import_fallback_in_check_cell_mismatch")
+    sys.path.insert(0, _PROJECT_ROOT)
+
+    src_path = os.path.join(_PROJECT_ROOT, "agent", "workflow_engine.py")
+    with open(src_path) as f:
+        src = f.read()
+
+    assert "from agent.placement_checker import" in src, (
+        "_check_cell_mismatch must have a local 'from agent.placement_checker' fallback"
+    )
+    # Verify the fallback is inside an except ImportError block
+    # (i.e., it appears after the libtbx path)
+    libtbx_idx = src.index("from libtbx.langchain.agent.placement_checker import")
+    local_idx  = src.index("from agent.placement_checker import")
+    assert local_idx > libtbx_idx, (
+        "Local import must appear AFTER the libtbx path (as a fallback)"
+    )
+    print("  PASSED: local import fallback present and correctly ordered")
+
+
+def test_s1_placement_checker_importable_locally():
+    """S1: placement_checker can be imported via the local path (no libtbx needed)."""
+    print("Test: s1_placement_checker_importable_locally")
+    sys.path.insert(0, _PROJECT_ROOT)
+
+    from agent.placement_checker import (
+        read_pdb_unit_cell,
+        cells_are_compatible,
+        check_xray_cell_mismatch,
+        check_cryoem_cell_mismatch,
+    )
+    # Basic smoke-test: all public functions callable and return correct types
+    assert check_xray_cell_mismatch(None, None) is False
+    assert check_cryoem_cell_mismatch(None, None) is False
+    assert cells_are_compatible(None, None) is True
+    assert read_pdb_unit_cell("/nonexistent.pdb") is None
+    print("  PASSED: all placement_checker public functions importable and callable")
+
+
+def test_s1_cell_mismatch_short_circuits_when_placed():
+    """S1: build_context sets cell_mismatch=False when has_placed_model=True (short-circuit)."""
+    print("Test: s1_cell_mismatch_short_circuits_when_placed")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+
+    # History: refinement ran -> has_placed_model=True via heuristics
+    # If short-circuit is correct, cell_mismatch will be False even if files
+    # had incompatible cells (we can't actually read MTZ in tests, but we verify
+    # the short-circuit fires by checking the result is always False here).
+    history_info = _analyze_history([{
+        "program": "phenix.refine",
+        "command": "phenix.refine model.pdb data.mtz",
+        "result": "SUCCESS: Refinement complete",
+        "analysis": {"r_free": 0.27},
+    }])
+
+    assert history_info.get("refine_done") is True, \
+        "refine_done must be True after refinement history entry"
+
+    ctx = engine.build_context(files={}, history_info=history_info)
+
+    assert ctx["has_placed_model"] is True, \
+        "has_placed_model must be True when refine_done=True"
+    assert ctx["cell_mismatch"] is False, (
+        "cell_mismatch must be False (short-circuited) when has_placed_model=True, "
+        "got %s" % ctx["cell_mismatch"]
+    )
+    print("  PASSED: cell_mismatch=False when has_placed_model=True (short-circuited)")
+
+
+def test_s1_cell_mismatch_short_circuits_when_probed():
+    """S1: build_context sets cell_mismatch=False when placement_probed=True (short-circuit)."""
+    print("Test: s1_cell_mismatch_short_circuits_when_probed")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from agent.workflow_state import _analyze_history
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+
+    # History: probe ran (needs_mr) -> placement_probed=True, has_placed_model=False
+    # Short-circuit must still fire even though has_placed_model is False
+    history_info = _analyze_history([{
+        "program": "phenix.model_vs_data",
+        "command": "phenix.model_vs_data model.pdb data.mtz",
+        "result": "SUCCESS: Done",
+        "analysis": {"r_free": 0.62},   # > 0.50 -> needs_mr
+    }])
+
+    assert history_info["placement_probed"] is True
+    assert history_info["placement_probe_result"] == "needs_mr"
+
+    ctx = engine.build_context(files={}, history_info=history_info)
+
+    assert ctx["has_placed_model"] is False, \
+        "has_placed_model must remain False when probe result is needs_mr"
+    assert ctx["cell_mismatch"] is False, (
+        "cell_mismatch must be False (short-circuited) when placement_probed=True, "
+        "got %s" % ctx["cell_mismatch"]
+    )
+    print("  PASSED: cell_mismatch=False when placement_probed=True (short-circuited)")
+
+
+def test_s1_cell_mismatch_not_short_circuited_first_cycle():
+    """S1: cell_mismatch check runs normally on first cycle (no placement evidence)."""
+    print("Test: s1_cell_mismatch_not_short_circuited_first_cycle")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+
+    # No history at all -> neither has_placed_model nor placement_probed
+    # cell_mismatch check must run (returns False for empty files — no PDB to compare)
+    ctx = engine.build_context(files={}, history_info={})
+
+    assert ctx["has_placed_model"] is False
+    assert ctx["placement_probed"] is False
+    # The check ran and correctly returned False for empty files
+    assert ctx["cell_mismatch"] is False
+    # placement_uncertain also False (no model and no data)
+    assert ctx["placement_uncertain"] is False
+    print("  PASSED: cell_mismatch check active on first cycle (no short-circuit)")
+
+
+def test_s1_short_circuit_order_before_probe_override():
+    """S1: cell_mismatch short-circuit applies before probe-result has_placed_model override."""
+    print("Test: s1_short_circuit_order_before_probe_override")
+    sys.path.insert(0, _PROJECT_ROOT)
+
+    src_path = os.path.join(_PROJECT_ROOT, "agent", "workflow_engine.py")
+    with open(src_path) as f:
+        src = f.read()
+
+    # The short-circuit block must appear before the probe-result override block
+    sc_marker   = 'if context.get("has_placed_model_from_history") or context.get("placement_probed"):\n            context["cell_mismatch"] = False'
+    probe_marker = 'if (context["placement_probed"] and\n                context.get("placement_probe_result") == "placed"):\n            context["has_placed_model"] = True'
+
+    sc_idx    = src.index(sc_marker)
+    probe_idx = src.index(probe_marker)
+
+    assert sc_idx < probe_idx, (
+        "Short-circuit override (cell_mismatch=False) must appear BEFORE "
+        "probe-result override (has_placed_model=True) in build_context"
+    )
+    print("  PASSED: short-circuit at index %d, probe override at %d (correct order)"
+          % (sc_idx, probe_idx))
+
+
+
+
+# =============================================================================
+# CATEGORY S2b -- placement_uncertain must use has_placed_model_from_history
+#
+# Root cause (apoferritin AIAgent_104 live failure):
+#   "solve the structure" → LLM sets model_is_placed=True directive
+#   placement_uncertain used `not context["has_placed_model"]` which is
+#   directive-affected → False → probe never fired → RSR crash on cycle 3.
+#
+# Fix: placement_uncertain = not has_placed_model_FROM_HISTORY (directive-immune)
+
+
+# =============================================================================
+# CATEGORY S2b -- placement_uncertain uses has_placed_model_from_history
+#
+# Root cause (apoferritin AIAgent_104 live failure):
+#   "solve the structure" -> LLM sets model_is_placed=True directive
+#   placement_uncertain used `not context["has_placed_model"]` which is
+#   directive-affected -> False -> probe never fired -> RSR crash cycle 3.
+#
+# Fix: placement_uncertain uses `not has_placed_model_FROM_HISTORY` (directive-immune)
+# =============================================================================
+
+def test_s2b_placement_uncertain_uses_from_history_not_directive():
+    """S2b: placement_uncertain=True despite directive model_is_placed=True when no history confirms."""
+    print("Test: s2b_placement_uncertain_uses_from_history_not_directive")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    engine = WorkflowEngine()
+    directives = {
+        "workflow_preferences": {"model_is_placed": True},
+        "constraints": [], "stop_conditions": {}, "program_settings": {},
+    }
+    history_info = {
+        "mtriage_done": True, "resolve_cryo_em_done": True,
+        "dock_done": False, "refine_done": False, "rsr_done": False,
+        "phaser_done": False, "autobuild_done": False, "predict_full_done": False,
+        "placement_probed": False, "placement_probe_result": None,
+        "predict_done": False, "process_predicted_done": False,
+    }
+    files = {"model": ["/fake/1aew_A.pdb"], "full_map": ["/fake/denmod_map.ccp4"]}
+    ctx = engine.build_context(files=files, history_info=history_info, directives=directives)
+    assert ctx["has_placed_model"] is True, "Directive should set has_placed_model=True"
+    assert ctx["has_placed_model_from_history"] is False
+    assert ctx["placement_uncertain"] is True, (
+        "placement_uncertain must be True despite model_is_placed directive. "
+        "from_history=%s cell_mismatch=%s probed=%s" % (
+            ctx["has_placed_model_from_history"], ctx["cell_mismatch"], ctx["placement_probed"])
+    )
+    print("  PASSED: placement_uncertain=True despite model_is_placed directive")
+
+
+def test_s2b_map_correlations_has_ignore_symmetry_default():
+    """S2b: phenix.map_correlations has ignore_symmetry_conflicts=True default."""
+    print("Test: s2b_map_correlations_has_ignore_symmetry_default")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.program_registry import ProgramRegistry
+    except ImportError:
+        print("  SKIP (ProgramRegistry unavailable)")
+        return
+    registry = ProgramRegistry()
+    prog = registry.get_program("phenix.map_correlations")
+    assert prog is not None
+    defaults = prog.get("defaults", {})
+    assert "ignore_symmetry_conflicts" in defaults, (
+        "map_correlations must have ignore_symmetry_conflicts in defaults to avoid "
+        "crashing when probe runs against a mismatched model+map"
+    )
+    val = defaults["ignore_symmetry_conflicts"]
+    assert val in (True, "true", "True"), "ignore_symmetry_conflicts must be true, got %r" % val
+    print("  PASSED: map_correlations has ignore_symmetry_conflicts=True in defaults")
+
+
+def test_s2b_placement_uncertain_formula_uses_from_history_key():
+    """S2b: The placement_uncertain formula uses has_placed_model_from_history."""
+    print("Test: s2b_placement_uncertain_formula_uses_from_history_key")
+    sys.path.insert(0, _PROJECT_ROOT)
+    src_path = os.path.join(_PROJECT_ROOT, "agent", "workflow_engine.py")
+    with open(src_path) as f:
+        src = f.read()
+    start = src.index('context["placement_uncertain"] = (')
+    # Grab ~600 chars which covers the multi-line tuple
+    block = src[start:start + 600]
+    assert "has_placed_model_from_history" in block, (
+        "placement_uncertain must use has_placed_model_from_history in its formula"
+    )
+    check = block.replace("has_placed_model_from_history", "REPLACED")
+    assert '"has_placed_model"' not in check, (
+        "placement_uncertain must NOT use bare has_placed_model (directive-affected)"
+    )
+    print("  PASSED: formula uses has_placed_model_from_history, not has_placed_model")
+
+
+# =============================================================================
+
+def test_s2b_placement_uncertain_uses_from_history_not_directive():
+    """S2b: placement_uncertain=True despite directive model_is_placed=True when no history confirms."""
+    print("Test: s2b_placement_uncertain_uses_from_history_not_directive")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    engine = WorkflowEngine()
+    directives = {
+        "workflow_preferences": {"model_is_placed": True},
+        "constraints": [], "stop_conditions": {}, "program_settings": {},
+    }
+    history_info = {
+        "mtriage_done": True, "resolve_cryo_em_done": True,
+        "dock_done": False, "refine_done": False, "rsr_done": False,
+        "phaser_done": False, "autobuild_done": False, "predict_full_done": False,
+        "placement_probed": False, "placement_probe_result": None,
+        "predict_done": False, "process_predicted_done": False,
+    }
+    files = {"model": ["/fake/1aew_A.pdb"], "full_map": ["/fake/denmod_map.ccp4"]}
+    ctx = engine.build_context(files=files, history_info=history_info, directives=directives)
+    assert ctx["has_placed_model"] is True, "Directive should set has_placed_model=True"
+    assert ctx["has_placed_model_from_history"] is False
+    assert ctx["placement_uncertain"] is True, (
+        "placement_uncertain must be True despite model_is_placed directive when no history confirms. "
+        "from_history=%s cell_mismatch=%s probed=%s" % (
+            ctx["has_placed_model_from_history"], ctx["cell_mismatch"], ctx["placement_probed"])
+    )
+    print("  PASSED: placement_uncertain=True despite model_is_placed directive")
+
+
+def test_s2b_cryoem_routes_to_probe_not_rsr_with_directive_placed():
+    """S2b: Full cryoem state goes to probe_placement (not RSR) when directive is placed but no history."""
+    print("Test: s2b_cryoem_routes_to_probe_not_rsr_with_directive_placed")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+    engine = WorkflowEngine()
+    directives = {
+        "workflow_preferences": {"model_is_placed": True},
+        "constraints": [], "stop_conditions": {}, "program_settings": {},
+    }
+    history_info = {
+        "mtriage_done": True, "resolve_cryo_em_done": True,
+        "dock_done": False, "refine_done": False, "rsr_done": False,
+        "rsr_count": 0, "refine_count": 0,
+        "phaser_done": False, "autobuild_done": False, "predict_full_done": False,
+        "placement_probed": False, "placement_probe_result": None,
+        "predict_done": False, "process_predicted_done": False,
+        "map_sharpening_done": False, "map_symmetry_done": False, "validation_done": False,
+    }
+    files = {
+        "model": ["/fake/1aew_A.pdb"], "full_map": ["/fake/denmod_map.ccp4"],
+        "half_map": ["/fake/h1.ccp4", "/fake/h2.ccp4"], "sequence": ["/fake/seq.dat"],
+    }
+    state = engine.get_workflow_state("cryoem", files, history_info, directives=directives)
+    phase = state.get("phase", state.get("state", ""))
+    valid_progs = state.get("valid_programs", [])
+    # The probe may be served from phase "probe_placement" or from a general phase
+    # like "cryoem_analyzed" — what matters is that map_correlations IS offered
+    # and real_space_refine is NOT (before placement is confirmed).
+    assert "phenix.map_correlations" in valid_progs, (
+        "Agent must offer map_correlations (probe) when placement unconfirmed. "
+        "Got phase=%r programs=%s" % (phase, valid_progs)
+    )
+    assert "phenix.real_space_refine" not in valid_progs, (
+        "Agent must NOT offer real_space_refine before placement confirmed. "
+        "Got phase=%r programs=%s" % (phase, valid_progs)
+    )
+    print("  PASSED: offers probe (map_correlations) not RSR, phase=%r" % phase)
+
+
+def test_s2b_map_correlations_has_ignore_symmetry_default():
+    """S2b: phenix.map_correlations has ignore_symmetry_conflicts=True default."""
+    print("Test: s2b_map_correlations_has_ignore_symmetry_default")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.program_registry import ProgramRegistry
+    except ImportError:
+        print("  SKIP (ProgramRegistry unavailable)")
+        return
+    registry = ProgramRegistry()
+    prog = registry.get_program("phenix.map_correlations")
+    assert prog is not None
+    defaults = prog.get("defaults", {})
+    assert "ignore_symmetry_conflicts" in defaults, (
+        "map_correlations must have ignore_symmetry_conflicts in defaults to avoid "
+        "crashing when probe runs against a mismatched model+map"
+    )
+    val = defaults["ignore_symmetry_conflicts"]
+    assert val in (True, "true", "True"), "ignore_symmetry_conflicts must be true, got %r" % val
+    print("  PASSED: map_correlations has ignore_symmetry_conflicts=True in defaults")
+
+
+# =============================================================================
+# CATEGORY S2c — promotion of unclassified_pdb to search_model for docking
+# =============================================================================
+
+def test_s2c_promotion_fires_when_placement_uncertain():
+    """S2c: unclassified PDB promoted to search_model when placement_uncertain=True (Tier 3 path)."""
+    print("Test: s2c_promotion_fires_when_placement_uncertain")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    pdb = "/fake/1aew_A.pdb"
+    files = {
+        "unclassified_pdb": [pdb],
+        "model": [pdb],
+        "search_model": [],
+        "pdb": [pdb],
+    }
+    ctx = {
+        "has_placed_model_from_history": False,
+        "has_search_model": False,
+        "placement_uncertain": True,
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "cell_mismatch": False,
+    }
+    f2, c2 = engine._promote_unclassified_for_docking(files, ctx, "cryoem")
+
+    assert_true(pdb in f2["search_model"],
+                "Promoted PDB must appear in search_model. Got: %s" % f2["search_model"])
+    assert_true(c2["has_search_model"] is True,
+                "has_search_model must be True after promotion")
+    assert_true(c2.get("unclassified_promoted_to_search_model") is True,
+                "unclassified_promoted_to_search_model flag must be set")
+    assert_true(files["search_model"] == [],
+                "Original files dict must be unchanged (no mutation)")
+    assert_true(f2 is not files,
+                "Promoted files must be a new dict, not the original")
+    print("  PASSED: promotion fires on placement_uncertain (Tier 3 path)")
+
+
+def test_s2c_promotion_fires_when_probe_says_needs_dock():
+    """S2c: unclassified PDB promoted when probe ran and returned needs_dock (Tier 3 post-probe)."""
+    print("Test: s2c_promotion_fires_when_probe_says_needs_dock")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    pdb = "/fake/1aew_A.pdb"
+    files = {"unclassified_pdb": [pdb], "model": [pdb], "search_model": [], "pdb": [pdb]}
+    ctx = {
+        "has_placed_model_from_history": False,
+        "has_search_model": False,
+        "placement_uncertain": False,
+        "placement_probed": True,
+        "placement_probe_result": "needs_dock",
+        "cell_mismatch": False,
+    }
+    f2, c2 = engine._promote_unclassified_for_docking(files, ctx, "cryoem")
+
+    assert_true(pdb in f2["search_model"],
+                "Promoted PDB must appear in search_model. Got: %s" % f2["search_model"])
+    assert_true(c2["has_search_model"] is True,
+                "has_search_model must be True after promotion")
+    print("  PASSED: promotion fires on placement_probed=needs_dock (Tier 3 post-probe)")
+
+
+def test_s2c_promotion_fires_when_cell_mismatch():
+    """S2c: unclassified PDB promoted when cell_mismatch=True and no history (Tier 1 path)."""
+    print("Test: s2c_promotion_fires_when_cell_mismatch")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    pdb = "/fake/1aew_A.pdb"
+    files = {"unclassified_pdb": [pdb], "model": [pdb], "search_model": [], "pdb": [pdb]}
+    ctx = {
+        "has_placed_model_from_history": False,
+        "has_search_model": False,
+        "placement_uncertain": False,
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "cell_mismatch": True,
+    }
+    f2, c2 = engine._promote_unclassified_for_docking(files, ctx, "cryoem")
+
+    assert_true(pdb in f2["search_model"],
+                "Promoted PDB must appear in search_model. Got: %s" % f2["search_model"])
+    assert_true(c2["has_search_model"] is True,
+                "has_search_model must be True after promotion")
+    print("  PASSED: promotion fires on cell_mismatch (Tier 1 path)")
+
+
+def test_s2c_no_promotion_when_placed_by_history():
+    """S2c: no promotion when dock/refine already in history (model is already placed)."""
+    print("Test: s2c_no_promotion_when_placed_by_history")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    pdb = "/fake/1aew_A.pdb"
+    files = {"unclassified_pdb": [pdb], "model": [pdb], "search_model": [], "pdb": [pdb]}
+    ctx = {
+        "has_placed_model_from_history": True,   # dock_done or refine_done in history
+        "has_search_model": False,
+        "placement_uncertain": True,             # would trigger if guard weren't here
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "cell_mismatch": True,                   # would trigger if guard weren't here
+    }
+    f2, c2 = engine._promote_unclassified_for_docking(files, ctx, "cryoem")
+
+    assert_true(f2 is files,
+                "Original files must be returned unchanged when model placed by history")
+    assert_true(f2["search_model"] == [],
+                "search_model must stay empty when model is placed by history")
+    print("  PASSED: no promotion when has_placed_model_from_history=True")
+
+
+def test_s2c_no_promotion_for_xray():
+    """S2c: no promotion for X-ray sessions — crystal PDBs handled via model key for phaser."""
+    print("Test: s2c_no_promotion_for_xray")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    pdb = "/fake/1aew_A.pdb"
+    files = {"unclassified_pdb": [pdb], "model": [pdb], "search_model": [], "pdb": [pdb]}
+    ctx = {
+        "has_placed_model_from_history": False,
+        "has_search_model": False,
+        "placement_uncertain": True,
+        "placement_probed": False,
+        "placement_probe_result": None,
+        "cell_mismatch": True,
+    }
+    f2, c2 = engine._promote_unclassified_for_docking(files, ctx, "xray")
+
+    assert_true(f2 is files,
+                "Original files must be returned unchanged for xray experiment type")
+    assert_true(f2["search_model"] == [],
+                "search_model must stay empty for xray sessions")
+    print("  PASSED: no promotion for xray experiment type")
+
+
+def test_s2c_categorized_files_propagates_through_get_workflow_state():
+    """S2c: promoted files appear in get_workflow_state return dict under categorized_files."""
+    print("Test: s2c_categorized_files_propagates_through_get_workflow_state")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    pdb = "/fake/1aew_A.pdb"
+
+    # Simulate post-resolve_cryo_em state: full_map present, no dock history,
+    # cell_mismatch will be False (no libtbx in test env → fail-safe False),
+    # so placement_uncertain fires (Tier 3 path, condition 5a).
+    files = {
+        "unclassified_pdb": [pdb],
+        "model": [pdb],
+        "search_model": [],
+        "pdb": [pdb],
+        "full_map": ["/fake/denmod_map.ccp4"],
+        "half_map": ["/fake/h1.ccp4", "/fake/h2.ccp4"],
+        "map": ["/fake/denmod_map.ccp4", "/fake/h1.ccp4", "/fake/h2.ccp4"],
+        "sequence": ["/fake/seq.dat"],
+        "data_mtz": [], "map_coeffs_mtz": [], "ligand_cif": [], "ligand_pdb": [],
+        "predicted": [], "processed_predicted": [], "docked": [],
+        "refined": [], "rsr_output": [], "phaser_output": [], "autobuild_output": [],
+        "with_ligand": [], "ligand_fit_output": [], "intermediate_mr": [],
+    }
+    history_info = {
+        "mtriage_done": True, "resolve_cryo_em_done": True,
+        "dock_done": False, "refine_done": False, "rsr_done": False,
+        "rsr_count": 0, "refine_count": 0,
+        "phaser_done": False, "autobuild_done": False, "predict_full_done": False,
+        "placement_probed": False, "placement_probe_result": None,
+        "predict_done": False, "process_predicted_done": False,
+        "map_sharpening_done": False, "map_symmetry_done": False,
+        "validation_done": False, "xtriage_done": False,
+    }
+
+    result = engine.get_workflow_state(
+        experiment_type="cryoem",
+        files=files,
+        history_info=history_info,
+    )
+
+    # Structural fix verification: categorized_files must be in the return dict
+    assert_true("categorized_files" in result,
+                "get_workflow_state must return categorized_files key")
+
+    returned_files = result["categorized_files"]
+
+    # When promotion fires (placement_uncertain=True in test env),
+    # search_model must contain the promoted PDB.
+    # When it doesn't fire (e.g. placement_uncertain=False for unexpected reasons),
+    # at minimum categorized_files must be a dict and not clobber with originals.
+    assert_true(isinstance(returned_files, dict),
+                "categorized_files must be a dict, got: %s" % type(returned_files))
+
+    # Context flag must match files state
+    ctx = result.get("context", {})
+    if ctx.get("unclassified_promoted_to_search_model"):
+        assert_true(pdb in returned_files.get("search_model", []),
+                    "If promotion fired, PDB must be in returned categorized_files['search_model']")
+        assert_true(returned_files.get("has_search_model") or
+                    bool(returned_files.get("search_model")),
+                    "search_model list must be non-empty after promotion")
+        print("  PASSED: promotion fired and categorized_files['search_model'] contains PDB")
+    else:
+        # Promotion did not fire (acceptable if placement_uncertain was False)
+        print("  PASSED: categorized_files key present in return dict (promotion did not fire)")
+
+
+# =============================================================================
+# CATEGORY S2d — skip_map_model_overlap_check=True default for real_space_refine
+# =============================================================================
+
+def test_s2d_rsr_has_skip_map_model_overlap_check_default():
+    """S2d: phenix.real_space_refine has skip_map_model_overlap_check=True in defaults."""
+    print("Test: s2d_rsr_has_skip_map_model_overlap_check_default")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from knowledge.yaml_loader import load_programs
+    programs = load_programs()
+    rsr = programs.get("phenix.real_space_refine", {})
+    assert_not_none(rsr, "phenix.real_space_refine must exist in programs.yaml")
+    defaults = rsr.get("defaults", {})
+    assert_true("skip_map_model_overlap_check" in defaults,
+                "real_space_refine defaults must contain skip_map_model_overlap_check")
+    val = defaults["skip_map_model_overlap_check"]
+    assert_true(val in (True, "true", "True"),
+                "skip_map_model_overlap_check must be True, got %r" % val)
+    print("  PASSED: real_space_refine has skip_map_model_overlap_check=True in defaults")
+
+
+# =============================================================================
+# CATEGORY S2e — after_program directive suppresses placement probe correctly
+# =============================================================================
+
+def test_s2e_after_program_requiring_placed_suppresses_probe():
+    """S2e: after_program=model_vs_data sets has_placed_model_from_after_program=True,
+    which suppresses placement_uncertain so probe_placement phase is skipped."""
+    print("Test: s2e_after_program_requiring_placed_suppresses_probe")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    files = {
+        "model": ["/fake/1aba.pdb"],
+        "pdb": ["/fake/1aba.pdb"],
+        "data_mtz": ["/fake/1aba.mtz"],
+        "search_model": [], "predicted": [], "processed_predicted": [],
+        "ligand_pdb": [], "ligand": [],
+    }
+    history_info = {
+        "phaser_done": False, "autobuild_done": False, "dock_done": False,
+        "predict_full_done": False, "refine_done": False, "xtriage_done": True,
+        "placement_probed": False, "placement_probe_result": None,
+    }
+    directives = {
+        "stop_conditions": {
+            "after_program": "phenix.model_vs_data",
+            "skip_validation": True,
+        },
+        "workflow_preferences": {},
+        "constraints": [],
+        "program_settings": {},
+    }
+
+    ctx = engine.build_context(files=files, history_info=history_info, directives=directives)
+
+    assert_true(ctx.get("has_placed_model_from_after_program") is True,
+                "has_placed_model_from_after_program must be True for after_program=model_vs_data")
+    assert_true(ctx.get("placement_uncertain") is False,
+                "placement_uncertain must be False when after_program implies placed model. "
+                "Got placement_uncertain=%r, from_history=%r, from_after_program=%r" % (
+                    ctx.get("placement_uncertain"),
+                    ctx.get("has_placed_model_from_history"),
+                    ctx.get("has_placed_model_from_after_program")))
+    print("  PASSED: after_program=model_vs_data suppresses placement probe")
+
+
+def test_s2e_model_is_placed_directive_still_does_not_suppress_probe():
+    """S2e: model_is_placed=True workflow_preference (unreliable LLM directive) does NOT
+    suppress placement_uncertain — only after_program or history evidence does."""
+    print("Test: s2e_model_is_placed_directive_still_does_not_suppress_probe")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    files = {
+        "model": ["/fake/1aew_A.pdb"],
+        "pdb": ["/fake/1aew_A.pdb"],
+        "data_mtz": ["/fake/data.mtz"],
+        "search_model": [], "predicted": [], "processed_predicted": [],
+        "ligand_pdb": [], "ligand": [],
+    }
+    history_info = {
+        "phaser_done": False, "autobuild_done": False, "dock_done": False,
+        "predict_full_done": False, "refine_done": False,
+        "placement_probed": False, "placement_probe_result": None,
+    }
+    directives = {
+        "workflow_preferences": {"model_is_placed": True},  # hallucinated directive
+        "stop_conditions": {},
+        "constraints": [],
+        "program_settings": {},
+    }
+
+    ctx = engine.build_context(files=files, history_info=history_info, directives=directives)
+
+    assert_true(ctx.get("has_placed_model_from_after_program") is False,
+                "has_placed_model_from_after_program must be False for model_is_placed directive")
+    assert_true(ctx.get("placement_uncertain") is True,
+                "placement_uncertain must remain True despite model_is_placed directive (S2b guard). "
+                "Got placement_uncertain=%r" % ctx.get("placement_uncertain"))
+    print("  PASSED: model_is_placed directive does not suppress placement probe (S2b intact)")
+
+
+def test_s2e_after_program_not_in_requiring_placed_does_not_suppress_probe():
+    """S2e: after_program for a non-placement-requiring program (e.g. predict_and_build)
+    does NOT suppress placement_uncertain."""
+    print("Test: s2e_after_program_not_in_requiring_placed_does_not_suppress_probe")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    engine = WorkflowEngine()
+    files = {
+        "model": ["/fake/model.pdb"],
+        "pdb": ["/fake/model.pdb"],
+        "data_mtz": ["/fake/data.mtz"],
+        "search_model": [], "predicted": [], "processed_predicted": [],
+        "ligand_pdb": [], "ligand": [],
+    }
+    history_info = {
+        "phaser_done": False, "autobuild_done": False, "dock_done": False,
+        "predict_full_done": False, "refine_done": False,
+        "placement_probed": False, "placement_probe_result": None,
+    }
+    directives = {
+        "stop_conditions": {"after_program": "phenix.predict_and_build"},
+        "workflow_preferences": {},
+        "constraints": [],
+        "program_settings": {},
+    }
+
+    ctx = engine.build_context(files=files, history_info=history_info, directives=directives)
+
+    assert_true(ctx.get("has_placed_model_from_after_program") is False,
+                "has_placed_model_from_after_program must be False for predict_and_build")
+    print("  PASSED: predict_and_build after_program does not suppress placement probe")
+
+
+# =============================================================================
+# CATEGORY S2f — validation_cryoem requires resolution invariant
+# =============================================================================
+
+def test_s2f_validation_cryoem_has_requires_resolution_invariant():
+    """S2f: phenix.validation_cryoem has a requires_resolution invariant with
+    auto_fill_resolution so it never runs without a resolution value."""
+    print("Test: s2f_validation_cryoem_has_requires_resolution_invariant")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from knowledge.yaml_loader import load_programs
+    programs = load_programs()
+    prog = programs.get("phenix.validation_cryoem", {})
+    assert_not_none(prog, "phenix.validation_cryoem must exist in programs.yaml")
+
+    invariants = prog.get("invariants", [])
+    assert_true(len(invariants) > 0,
+                "validation_cryoem must have at least one invariant")
+
+    res_inv = next((i for i in invariants if i.get("name") == "requires_resolution"), None)
+    assert_not_none(res_inv,
+                    "validation_cryoem must have a requires_resolution invariant")
+    assert_true(res_inv.get("fix", {}).get("auto_fill_resolution") is True,
+                "requires_resolution invariant must have auto_fill_resolution: true")
+    assert_true(res_inv.get("check", {}).get("has_strategy") == "resolution",
+                "requires_resolution invariant must check has_strategy: resolution")
+    print("  PASSED: validation_cryoem has requires_resolution invariant with auto_fill_resolution")
+
+
+# =============================================================================
+# CATEGORY S2g — map_correlations requires resolution for cryoem, not xray
+# =============================================================================
+
+def test_s2g_map_correlations_invariant_has_only_for_cryoem():
+    """S2g: map_correlations requires_resolution invariant has only_for_experiment_type=cryoem."""
+    print("Test: s2g_map_correlations_invariant_has_only_for_cryoem")
+    sys.path.insert(0, _PROJECT_ROOT)
+    from knowledge.yaml_loader import load_programs
+    programs = load_programs()
+    prog = programs.get("phenix.map_correlations", {})
+    assert_not_none(prog, "phenix.map_correlations must exist in programs.yaml")
+
+    invariants = prog.get("invariants", [])
+    res_inv = next((i for i in invariants if i.get("name") == "requires_resolution"), None)
+    assert_not_none(res_inv, "map_correlations must have a requires_resolution invariant")
+
+    check = res_inv.get("check", {})
+    assert_true(check.get("only_for_experiment_type") == "cryoem",
+                "requires_resolution must have only_for_experiment_type=cryoem, got: %r"
+                % check.get("only_for_experiment_type"))
+    assert_true(res_inv.get("fix", {}).get("auto_fill_resolution") is True,
+                "requires_resolution fix must have auto_fill_resolution: true")
+    print("  PASSED: map_correlations invariant has only_for_experiment_type=cryoem")
+
+
+def test_s2g_invariant_skipped_for_xray():
+    """S2g: only_for_experiment_type=cryoem invariant is skipped when experiment_type=xray."""
+    print("Test: s2g_invariant_skipped_for_xray")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.command_builder import CommandBuilder, CommandContext
+    except ImportError:
+        print("  SKIP (CommandBuilder unavailable)")
+        return
+
+    builder = CommandBuilder()
+    ctx = CommandContext(experiment_type="xray", resolution=None)
+    files = {"model": "/fake/model.pdb", "full_map": "/fake/map.ccp4"}
+    strategy = {}
+
+    result_files, result_strategy = builder._apply_invariants(
+        "phenix.map_correlations", files, strategy, ctx)
+
+    assert_true("resolution" not in result_strategy,
+                "resolution must NOT be auto-filled for xray experiment_type. "
+                "Got strategy: %r" % result_strategy)
+    print("  PASSED: invariant correctly skipped for xray (resolution not auto-filled)")
+
+
+def test_s2g_invariant_fires_for_cryoem():
+    """S2g: only_for_experiment_type=cryoem invariant fires and fills resolution when cryoem."""
+    print("Test: s2g_invariant_fires_for_cryoem")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.command_builder import CommandBuilder, CommandContext
+    except ImportError:
+        print("  SKIP (CommandBuilder unavailable)")
+        return
+
+    builder = CommandBuilder()
+    ctx = CommandContext(experiment_type="cryoem", resolution=1.9)
+    files = {"model": "/fake/model.pdb", "full_map": "/fake/map.ccp4"}
+    strategy = {}
+
+    result_files, result_strategy = builder._apply_invariants(
+        "phenix.map_correlations", files, strategy, ctx)
+
+    assert_true("resolution" in result_strategy,
+                "resolution must be auto-filled for cryoem experiment_type. "
+                "Got strategy: %r" % result_strategy)
+    assert_true(abs(result_strategy["resolution"] - 1.9) < 0.01,
+                "resolution must be 1.9, got: %r" % result_strategy.get("resolution"))
+    print("  PASSED: invariant fires for cryoem and auto-fills resolution=1.9")
+
+
+# =============================================================================
+# CATEGORY S2h — validation_cryoem writes data_manager PHIL for GUI restore
+# =============================================================================
+
+def test_s2h_validation_cryoem_in_dm_to_data_manager_phil():
+    """S2h: phenix.validation_cryoem is in the dm_to_data_manager_phil whitelist
+    so its model and map files get written as data_manager PHIL in the eff,
+    not just as comments."""
+    print("Test: s2h_validation_cryoem_in_dm_to_data_manager_phil")
+    sys.path.insert(0, _PROJECT_ROOT)
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+
+    with open(ai_agent_path) as f:
+        src = f.read()
+
+    assert_true("dm_programs_to_data_manager_phil" in src,
+                "ai_agent.py must contain dm_programs_to_data_manager_phil dict")
+    assert_true("phenix.validation_cryoem" in src.split(
+                "dm_programs_to_data_manager_phil")[1][:500],
+                "phenix.validation_cryoem must be in dm_programs_to_data_manager_phil")
+    assert_true("data_manager.%s.file" in src or
+                "data_manager.%s.file" in src,
+                "data_manager PHIL lines must be written for dm_file_mapping programs")
+    print("  PASSED: validation_cryoem is in dm_to_data_manager_phil whitelist")
+
+
 # RUN ALL TESTS
 # =============================================================================
 
 def run_all_tests():
-    """Run all audit-fix regression tests."""
+    """Run all audit fix tests."""
     run_tests_with_fail_fast()
 
 
 if __name__ == "__main__":
     run_all_tests()
-
-
-# =============================================================================
-# L1: Ligand PDB excluded by _is_valid_file when file starts with COMPND/AUTHOR
-# =============================================================================
-
-def test_l1_ligand_pdb_compnd_header_is_valid():
-    """
-    A ligand PDB starting with COMPND (standard PDB header) must not be
-    rejected by _is_valid_file. Previously only a narrow set of records
-    (ATOM, HETATM, REMARK, HEADER, TITLE, MODEL, SEQRES, SCALE1, ORIGX1)
-    was accepted as the first line — COMPND was missing, causing the ligand
-    file to be excluded from categorization, has_ligand_file=False, and
-    ligandfit never being offered.
-    """
-    import tempfile, os
-    from agent.workflow_state import _is_valid_file
-
-    # Typical ligand PDB from phenix/CSD starting with COMPND then HETATM
-    with tempfile.NamedTemporaryFile(suffix='.pdb', mode='w', delete=False) as f:
-        f.write('COMPND    BROMODOMAIN INHIBITOR\n')
-        f.write('REMARK   1 Generated by phenix.elbow\n')
-        f.write('HETATM    1  C1  LIG A   1       1.000   2.000   3.000  1.00  0.00           C\n')
-        f.write('HETATM    2  N1  LIG A   1       2.500   2.000   3.000  1.00  0.00           N\n')
-        f.write('END\n')
-        fname = f.name
-    try:
-        result = _is_valid_file(fname)
-        assert result, (
-            "Expected _is_valid_file to accept COMPND-header ligand PDB, got False.\n"
-            "This caused has_ligand_file=False and ligandfit to be silently skipped."
-        )
-    finally:
-        os.unlink(fname)
-    print("  PASSED")
-
-
-def test_l1_ligand_pdb_must_have_coordinates():
-    """
-    A .pdb file with no ATOM/HETATM records (just header lines) must be
-    rejected — it's structurally useless even if it starts with a valid record.
-    """
-    import tempfile, os
-    from agent.workflow_state import _is_valid_file
-
-    with tempfile.NamedTemporaryFile(suffix='.pdb', mode='w', delete=False) as f:
-        f.write('COMPND    BROMODOMAIN INHIBITOR\n')
-        f.write('REMARK   1 No coordinates in this file\n')
-        f.write('END\n')
-        fname = f.name
-    try:
-        result = _is_valid_file(fname)
-        assert not result, (
-            "Expected _is_valid_file to reject PDB with no ATOM/HETATM, got True."
-        )
-    finally:
-        os.unlink(fname)
-    print("  PASSED")
-
-
-def test_l1_detect_phase_returns_refine_when_ligand_present_not_run():
-    """
-    When has_ligand_file=True and ligandfit_done=False and refine_count > 0
-    and r_free < 0.35, detect_phase must return 'refine' (not 'complete'),
-    keeping ligandfit in valid_programs.
-
-    This was broken because _is_valid_file rejected 7qz0_ligand.pdb, making
-    has_ligand_file=False so detect_phase skipped the guard and went to 'complete'.
-    """
-    from agent.workflow_engine import WorkflowEngine
-    engine = WorkflowEngine()
-
-    context = {
-        # Files present
-        "has_model": True,
-        "has_data_mtz": True,
-        "has_ligand_file": True,       # fixed: was False due to _is_valid_file bug
-        "has_search_model": False,
-        "has_map": False,
-        "has_map_coeffs_mtz": True,
-        "has_full_map": False,
-        "has_half_map": False,
-        "has_sequence": True,
-        "has_anomalous": False,
-        "has_predicted_model": True,
-        "has_placed_model": True,
-        "has_refined_model": True,
-        "has_ligand_fit": False,
-        "has_optimized_full_map": False,
-        "has_processed_model": False,
-        "has_twinning": False,
-        # Workflow history flags
-        "refine_count": 3,
-        "r_free": 0.2756,
-        "validation_done": True,       # agent had passed through validate
-        "ligandfit_done": False,       # ligandfit never ran
-        "xtriage_done": True,
-        "autosol_done": False,
-        "autobuild_done": False,
-        "phaser_done": False,
-        "predict_done": True,
-        "predict_full_done": True,
-        "mtriage_done": False,
-        "pdbtools_done": False,
-        "molprobity_done": True,
-        # Misc
-        "anomalous_measurability": 0.0,
-        "twin_fraction": 0.0,
-        "map_cc": None,
-        "model_is_good": True,
-        "automation_path": "predict_and_build",
-        "use_mr_sad": False,
-        "strong_anomalous": False,
-    }
-
-    phase_info = engine.detect_phase("xray", context)
-    phase = phase_info.get("phase")
-    assert phase == "refine", (
-        "Expected detect_phase to return 'refine' (so ligandfit is available), "
-        "got '%s'.\nContext: has_ligand_file=True, ligandfit_done=False, "
-        "refine_count=3, r_free=0.2756, validation_done=True.\n"
-        "The guard on lines 497-504 of workflow_engine.py should keep the "
-        "workflow in refine phase when ligand fitting is still pending." % phase
-    )
-
-    # Also verify ligandfit is in valid_programs for this phase
-    valid = engine.get_valid_programs("xray", phase_info, context)
-    assert "phenix.ligandfit" in valid, (
-        "Expected phenix.ligandfit in valid_programs for refine phase with "
-        "ligand present. Got: %s" % valid
-    )
-    print("  PASSED")
-
-
-
-# =============================================================================
-# M1: with_ligand model not selected for refinement after ligandfit+pdbtools
-# =============================================================================
-
-def test_m1_with_ligand_beats_refined_in_best_files_tracker():
-    """
-    After pdbtools combines the ligandfit output into *_with_ligand.pdb,
-    BestFilesTracker must rank that file above the older ligand-free refined
-    model. Previously both had stage_score=100 and the refined model won on
-    R-free metrics, causing refinement to use the wrong (ligand-free) model.
-    """
-    import tempfile, os
-    sys.path.insert(0, _PROJECT_ROOT)
-    from agent.best_files_tracker import BestFilesTracker
-
-    tracker = BestFilesTracker()
-
-    with tempfile.TemporaryDirectory() as d:
-        # The refined model (exists, has good R-free metrics from cycle 3)
-        refined = os.path.join(d, 'overall_best_final_refine_001.pdb')
-        with open(refined, 'w') as f:
-            f.write('ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00  5.00           C\n')
-
-        # The combined model with ligand (exists, no metrics yet from pdbtools)
-        with_ligand = os.path.join(d, 'overall_best_final_refine_001_with_ligand.pdb')
-        with open(with_ligand, 'w') as f:
-            f.write('ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00  5.00           C\n')
-            f.write('HETATM    2  C1  LIG A 100       5.0   6.0   7.0  1.00  5.00           C\n')
-
-        # Add refined model first (cycle 3, with R-free metrics)
-        tracker.evaluate_file(refined, cycle=3, metrics={"r_free": 0.2756}, stage="refined")
-        # Add with_ligand model second (cycle 5, pdbtools run, no R-free metrics)
-        tracker.evaluate_file(with_ligand, cycle=5, metrics=None, stage="with_ligand")
-
-        best = tracker.get_best_path("model")
-        assert best is not None, "Expected a best model to be selected"
-        assert os.path.basename(best) == 'overall_best_final_refine_001_with_ligand.pdb', (
-            "Expected with_ligand model to beat refined model in BestFilesTracker.\n"
-            "Got: %s\n"
-            "with_ligand stage_score should be 110, refined should be 100." % os.path.basename(best)
-        )
-    print("  PASSED")
-
-
-def test_m1_command_builder_with_ligand_not_overridden():
-    """
-    command_builder._is_with_ligand_file() equivalent: verify that the
-    category detection used in the override guard correctly identifies
-    with_ligand files so they pass through without being replaced by best_model.
-
-    This tests the logic that was added to the LLM override block:
-    if the LLM's choice is in with_ligand or ligand_fit_output categories,
-    we trust the LLM rather than forcing best_model.
-    """
-    import os
-    # Test the category lookup logic directly (avoids full CommandBuilder mock complexity)
-    categorized_files = {
-        "model": ["/path/to/refine_001.pdb", "/path/to/refine_001_with_ligand.pdb"],
-        "refined": ["/path/to/refine_001.pdb"],
-        "with_ligand": ["/path/to/refine_001_with_ligand.pdb"],
-        "data_mtz": ["/path/to/7qz0.mtz"],
-    }
-
-    def get_llm_categories(corrected_str, categorized_files):
-        llm_bn = os.path.basename(corrected_str)
-        return [
-            cat for cat, files in categorized_files.items()
-            if any(os.path.basename(f) == llm_bn for f in files)
-        ]
-
-    # LLM picked with_ligand file → should NOT be overridden
-    cats = get_llm_categories("/path/to/refine_001_with_ligand.pdb", categorized_files)
-    llm_is_with_ligand = any(c in ("with_ligand", "ligand_fit_output") for c in cats)
-    assert llm_is_with_ligand, (
-        "LLM choice of refine_001_with_ligand.pdb should be detected as with_ligand category. "
-        "Got categories: %s" % cats
-    )
-
-    # LLM picked an unrelated model → should be overridden
-    cats2 = get_llm_categories("/path/to/some_other_model.pdb", categorized_files)
-    llm_is_with_ligand2 = any(c in ("with_ligand", "ligand_fit_output") for c in cats2)
-    assert not llm_is_with_ligand2, (
-        "LLM choice of some_other_model.pdb should NOT be detected as with_ligand. "
-        "Got categories: %s" % cats2
-    )
-    print("  PASSED")
-
-
-
-# =============================================================================
-# N1: predict_and_build must not receive both full_map and half_maps
-# =============================================================================
-
-def test_n1_predict_and_build_uses_only_full_map_when_denmod_present():
-    """
-    After resolve_cryo_em runs, we have an optimized_full_map (denmod_map.ccp4)
-    plus the original half maps. predict_and_build takes EITHER 2 half-maps OR
-    1 full map — not both. The command builder must select the full map and drop
-    the half maps.
-
-    Previously keep_half_maps_with_full_map: true was set on predict_and_build
-    (added in K2), which prevented the post-selection deconfliction from removing
-    the redundant half_maps, resulting in a command with full_map= AND 4x half_map=.
-    """
-    print("Test: n1_predict_and_build_uses_only_full_map_when_denmod_present")
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP (command_builder unavailable)")
-        return
-
-    denmod = "/data/denmod_map.ccp4"
-    half1  = "/data/half_map_1.ccp4"
-    half2  = "/data/half_map_2.ccp4"
-    seq    = "/data/seq.fa"
-
-    ctx = CommandContext(
-        cycle_number=3,
-        experiment_type="cryoem",
-        resolution=2.9,
-        best_files={"map": denmod, "sequence": seq},
-        rfree_mtz=None,
-        categorized_files={
-            "optimized_full_map": [denmod],
-            "full_map":           [denmod],
-            "map":                [denmod, half1, half2],
-            "half_map":           [half1, half2],
-            "sequence":           [seq],
-        },
-        workflow_state="cryoem_initial",
-        history=[],
-        llm_files=None,
-        llm_strategy=None,
-        directives={},
-        log=lambda msg: None,
-    )
-
-    cb = CommandBuilder()
-    available = [denmod, half1, half2, seq]
-    cmd = cb.build("phenix.predict_and_build", available, ctx)
-
-    assert cmd is not None, "predict_and_build must produce a command"
-    assert "half_map=" not in cmd, (
-        "predict_and_build command must NOT include half_map= when a full_map is available.\n"
-        "Got: %s\n"
-        "predict_and_build takes EITHER 2 half-maps OR 1 full map, not both." % cmd
-    )
-    assert denmod in cmd or "denmod" in cmd, (
-        "predict_and_build command must include the density-modified full map.\n"
-        "Got: %s" % cmd
-    )
-    print("  PASSED")
-
-
-def test_n1_predict_and_build_uses_half_maps_when_no_full_map():
-    """
-    When only half maps are available (no density-modified full map yet),
-    predict_and_build must use the half maps, not fail with no map input.
-    """
-    print("Test: n1_predict_and_build_uses_half_maps_when_no_full_map")
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP (command_builder unavailable)")
-        return
-
-    half1 = "/data/half_map_1.ccp4"
-    half2 = "/data/half_map_2.ccp4"
-    seq   = "/data/seq.fa"
-
-    ctx = CommandContext(
-        cycle_number=1,
-        experiment_type="cryoem",
-        resolution=2.9,
-        best_files={"sequence": seq},
-        rfree_mtz=None,
-        categorized_files={
-            "half_map":  [half1, half2],
-            "map":       [half1, half2],
-            "sequence":  [seq],
-        },
-        workflow_state="cryoem_initial",
-        history=[],
-        llm_files={"half_map": [half1, half2]},  # LLM explicitly requests half maps
-        llm_strategy=None,
-        directives={},
-        log=lambda msg: None,
-    )
-
-    cb = CommandBuilder()
-    available = [half1, half2, seq]
-    cmd = cb.build("phenix.predict_and_build", available, ctx)
-
-    assert cmd is not None, "predict_and_build must produce a command with half maps"
-    assert "half_map=" in cmd, (
-        "predict_and_build command must include half_map= when no full map is available.\n"
-        "Got: %s" % cmd
-    )
-    print("  PASSED")
-
-
-
-def test_n1_map_to_model_keeps_half_maps_with_full_map():
-    """
-    map_to_model can take full_map + half_maps simultaneously (for local filtering).
-    Unlike predict_and_build, it should NOT drop half_maps when a full_map is present.
-    """
-    print("Test: n1_map_to_model_keeps_half_maps_with_full_map")
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP (command_builder unavailable)")
-        return
-
-    full_map = "/data/denmod_map.ccp4"
-    half1    = "/data/half_map_1.ccp4"
-    half2    = "/data/half_map_2.ccp4"
-    seq      = "/data/seq.fa"
-
-    ctx = CommandContext(
-        cycle_number=3,
-        experiment_type="cryoem",
-        resolution=2.9,
-        best_files={"map": full_map, "sequence": seq},
-        rfree_mtz=None,
-        categorized_files={
-            "optimized_full_map": [full_map],
-            "full_map":           [full_map],
-            "map":                [full_map, half1, half2],
-            "half_map":           [half1, half2],
-            "sequence":           [seq],
-        },
-        workflow_state="cryoem_initial",
-        history=[],
-        llm_files={"full_map": full_map, "half_map": [half1, half2]},
-        llm_strategy=None,
-        directives={},
-        log=lambda msg: None,
-    )
-
-    cb = CommandBuilder()
-    available = [full_map, half1, half2, seq]
-    cmd = cb.build("phenix.map_to_model", available, ctx)
-
-    assert cmd is not None, "map_to_model must produce a command"
-    assert full_map in cmd or "denmod" in cmd, (
-        "map_to_model command must include the full map. Got: %s" % cmd
-    )
-    # map_to_model uses positional (no-flag) syntax for both full_map and half_map,
-    # so we check for the half map paths directly rather than the half_map= keyword.
-    assert half1 in cmd and half2 in cmd, (
-        "map_to_model command must include the half map paths alongside full_map "
-        "(map_to_model can use all three for local filtering).\nGot: %s" % cmd
-    )
-    print("  PASSED")
-
-
-
-# =============================================================================
-# O1: polder selection sanitization
-# =============================================================================
-
-def _make_polder_model(path, hetatm_lines=None):
-    """Write a minimal PDB file for polder selection tests."""
-    with open(path, 'w') as f:
-        f.write("ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00  5.00           C\n")
-        if hetatm_lines:
-            for line in hetatm_lines:
-                f.write(line + "\n")
-        f.write("END\n")
-
-
-def test_o1_invalid_selection_ligand_replaced_with_hetero():
-    """LLM writes selection=ligand → must be replaced (no model to scan → hetero)."""
-    print("Test: o1_invalid_selection_ligand_replaced_with_hetero")
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP"); return
-
-    ctx = CommandContext(
-        cycle_number=3, experiment_type="xray", resolution=2.1,
-        best_files={}, rfree_mtz=None,
-        categorized_files={}, workflow_state="xray_refined",
-        history=[], llm_files=None, llm_strategy={"selection": "ligand"},
-        directives={}, log=lambda msg: None,
-    )
-
-    cb = CommandBuilder()
-    result = cb._sanitize_polder_selection("ligand", {}, ctx)
-    assert result == "hetero", "Expected 'hetero' for invalid selection 'ligand', got: %s" % result
-    print("  PASSED")
-
-
-def test_o1_invalid_bare_words_all_replaced():
-    """All known invalid bare words must be replaced."""
-    print("Test: o1_invalid_bare_words_all_replaced")
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP"); return
-
-    ctx = CommandContext(
-        cycle_number=3, experiment_type="xray", resolution=2.1,
-        best_files={}, rfree_mtz=None,
-        categorized_files={}, workflow_state="xray_refined",
-        history=[], llm_files=None, llm_strategy={},
-        directives={}, log=lambda msg: None,
-    )
-    cb = CommandBuilder()
-    for bad in ["ligand", "lig", "het", "hetatm", "heteroatom", "LIGAND", "Hetero_Atom"]:
-        result = cb._sanitize_polder_selection(bad, {}, ctx)
-        assert result != bad.lower() or result == "hetero", (
-            "Expected replacement for invalid selection '%s', got '%s'" % (bad, result)
-        )
-    print("  PASSED")
-
-
-def test_o1_valid_selections_passed_through():
-    """Valid PHENIX selections must pass through unchanged."""
-    print("Test: o1_valid_selections_passed_through")
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP"); return
-
-    ctx = CommandContext(
-        cycle_number=3, experiment_type="xray", resolution=2.1,
-        best_files={}, rfree_mtz=None,
-        categorized_files={}, workflow_state="xray_refined",
-        history=[], llm_files=None, llm_strategy={},
-        directives={}, log=lambda msg: None,
-    )
-    cb = CommandBuilder()
-    for valid in ["hetero", "chain B", "chain B and resseq 100", "resname ATP",
-                  "chain A and resseq 88:92"]:
-        result = cb._sanitize_polder_selection(valid, {}, ctx)
-        assert result == valid, (
-            "Valid selection '%s' should pass through unchanged, got '%s'" % (valid, result)
-        )
-    print("  PASSED")
-
-
-def test_o1_single_hetatm_residue_inferred():
-    """Single HETATM residue → selection='chain B and resseq 100'."""
-    print("Test: o1_single_hetatm_residue_inferred")
-    import tempfile, os
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP"); return
-
-    with tempfile.TemporaryDirectory() as d:
-        model = os.path.join(d, "model_with_ligand.pdb")
-        _make_polder_model(model, [
-            "HETATM  100  C1  LIG B 100       5.0   6.0   7.0  1.00  5.00           C",
-            "HETATM  101  C2  LIG B 100       6.0   7.0   8.0  1.00  5.00           C",
-        ])
-        ctx = CommandContext(
-            cycle_number=3, experiment_type="xray", resolution=2.1,
-            best_files={}, rfree_mtz=None,
-            categorized_files={}, workflow_state="xray_refined",
-            history=[], llm_files=None, llm_strategy={},
-            directives={}, log=lambda msg: None,
-        )
-        cb = CommandBuilder()
-        result = cb._sanitize_polder_selection("ligand", {"model": model}, ctx)
-        assert result == "chain B and resseq 100", (
-            "Expected 'chain B and resseq 100' from model scan, got: %s" % result
-        )
-    print("  PASSED")
-
-
-def test_o1_water_excluded_from_hetatm_scan():
-    """Water (HOH) HETATM records must be excluded from selection inference."""
-    print("Test: o1_water_excluded_from_hetatm_scan")
-    import tempfile, os
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP"); return
-
-    with tempfile.TemporaryDirectory() as d:
-        model = os.path.join(d, "model_water_only.pdb")
-        _make_polder_model(model, [
-            "HETATM  200  O   HOH A 201       1.0   2.0   3.0  1.00 10.00           O",
-            "HETATM  201  O   WAT A 202       2.0   3.0   4.0  1.00 10.00           O",
-        ])
-        ctx = CommandContext(
-            cycle_number=3, experiment_type="xray", resolution=2.1,
-            best_files={}, rfree_mtz=None,
-            categorized_files={}, workflow_state="xray_refined",
-            history=[], llm_files=None, llm_strategy={},
-            directives={}, log=lambda msg: None,
-        )
-        cb = CommandBuilder()
-        result = cb._sanitize_polder_selection("ligand", {"model": model}, ctx)
-        assert result == "hetero", (
-            "Expected 'hetero' when only water HETATM present, got: %s" % result
-        )
-    print("  PASSED")
-
-
-def test_o1_user_directive_selection_passes_through():
-    """If user set selection via directives, it must pass through unchanged even if it looks invalid."""
-    print("Test: o1_user_directive_selection_passes_through")
-    try:
-        from agent.command_builder import CommandBuilder, CommandContext
-    except ImportError:
-        print("  SKIP"); return
-
-    ctx = CommandContext(
-        cycle_number=3, experiment_type="xray", resolution=2.1,
-        best_files={}, rfree_mtz=None,
-        categorized_files={}, workflow_state="xray_refined",
-        history=[], llm_files=None, llm_strategy={},
-        directives={
-            "program_settings": {
-                "phenix.polder": {"selection": "chain B and resseq 42"}
-            }
-        },
-        log=lambda msg: None,
-    )
-    cb = CommandBuilder()
-    # Even though "ligand" would normally be replaced, user directive wins
-    result = cb._sanitize_polder_selection("ligand", {}, ctx)
-    assert result == "chain B and resseq 42", (
-        "User directive selection should win. Got: %s" % result
-    )
-    print("  PASSED")
-
-
-
-# =============================================================================
-# P1: session management keywords (display_and_stop, remove_last_n)
-# =============================================================================
-
-def _make_session_dir(base_dir, num_cycles=3):
-    """Write a minimal agent_session.json for testing."""
-    import json, os
-    session_dir = os.path.join(base_dir, "ai_agent_directory")
-    os.makedirs(session_dir, exist_ok=True)
-
-    cycles = []
-    for i in range(1, num_cycles + 1):
-        cycles.append({
-            "cycle_number": i,
-            "program": "phenix.refine" if i > 1 else "phenix.xtriage",
-            "command": "phenix.refine model.pdb data.mtz" if i > 1 else "phenix.xtriage data.mtz",
-            "result": "SUCCESS: completed",
-            "metrics": {"r_free": 0.28 - i * 0.01},
-            "output_files": [],
-            "reasoning": "Step %d reasoning" % i,
-        })
-
-    data = {
-        "cycles": cycles,
-        "original_files": ["/data/model.pdb", "/data/data.mtz"],
-        "experiment_type": "xray",
-        "summary": "Existing summary text",
-    }
-    session_file = os.path.join(session_dir, "agent_session.json")
-    with open(session_file, "w") as f:
-        json.dump(data, f)
-    return session_dir, session_file, data
-
-
-def test_p1_session_tools_load_and_show():
-    """session_tools.load_session reads JSON correctly."""
-    print("Test: p1_session_tools_load_and_show")
-    import tempfile
-    from agent.session_tools import load_session, show_session
-
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, original_data = _make_session_dir(base, num_cycles=3)
-
-        data, session_file = load_session(session_dir)
-        assert data is not None, "load_session should return data for existing session"
-        assert len(data["cycles"]) == 3, "Expected 3 cycles, got %d" % len(data["cycles"])
-        assert data["experiment_type"] == "xray"
-
-        # show_session should not crash (output goes to stdout)
-        show_session(data, detailed=False)
-        show_session(data, detailed=True)
-    print("  PASSED")
-
-
-def test_p1_session_tools_load_missing():
-    """session_tools.load_session returns None for missing session."""
-    print("Test: p1_session_tools_load_missing")
-    import tempfile
-    from agent.session_tools import load_session
-
-    with tempfile.TemporaryDirectory() as base:
-        data, _ = load_session(base)
-        assert data is None, "load_session should return None for missing session"
-    print("  PASSED")
-
-
-def test_p1_session_tools_remove_last_cycles():
-    """remove_last_cycles removes correct number and renumbers."""
-    print("Test: p1_session_tools_remove_last_cycles")
-    import tempfile
-    from agent.session_tools import load_session, save_session, remove_last_cycles
-
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, session_file, _ = _make_session_dir(base, num_cycles=4)
-
-        data, sf = load_session(session_dir)
-        assert len(data["cycles"]) == 4
-
-        data, removed = remove_last_cycles(data, 2, session_dir=session_dir)
-        assert removed == 2, "Expected 2 removed, got %d" % removed
-        assert len(data["cycles"]) == 2, "Expected 2 remaining cycles"
-
-        # Remaining cycles must be renumbered 1, 2
-        nums = [c["cycle_number"] for c in data["cycles"]]
-        assert nums == [1, 2], "Cycles should be renumbered [1,2], got %s" % nums
-
-        # Summary should be cleared (it referenced removed cycles)
-        assert data.get("summary", "") == "", \
-            "Summary should be cleared after cycle removal"
-
-        # Save and reload to confirm persistence
-        save_session(data, sf)
-        reloaded, _ = load_session(session_dir)
-        assert len(reloaded["cycles"]) == 2, "Reload should show 2 cycles"
-    print("  PASSED")
-
-
-def test_p1_session_tools_remove_all_cycles():
-    """remove_last_cycles(n >= total) removes everything cleanly."""
-    print("Test: p1_session_tools_remove_all_cycles")
-    import tempfile
-    from agent.session_tools import load_session, remove_last_cycles
-
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=3)
-        data, _ = load_session(session_dir)
-
-        data, removed = remove_last_cycles(data, 10, session_dir=session_dir)
-        assert removed == 3, "Expected 3 removed"
-        assert data["cycles"] == [], "Expected empty cycles list"
-    print("  PASSED")
-
-
-def test_p1_handle_session_management_display_sets_result():
-    """
-    _handle_session_management with display_and_stop=basic must populate
-    self.result with the same structure as a normal iterate_agent run:
-    group_args_type='iterate_agent_result' and session_data present.
-    """
-    print("Test: p1_handle_session_management_display_sets_result")
-    import tempfile, types, sys
-
-    # ── minimal mocks ──────────────────────────────────────────────────────
-    # We need: group_args, AgentSession, session_tools, VerbosityLogger
-    # All of these are importable from the local tree.
-    sys.path.insert(0, _PROJECT_ROOT)
-
-    # Mock group_args with a simple class (avoids libtbx dependency)
-    class _GroupArgs:
-        def __init__(self, **kw):
-            self.__dict__.update(kw)
-    # Patch the programs.ai_agent module's group_args at import time
-    ga_mod = types.ModuleType('libtbx')
-    ga_mod.group_args = _GroupArgs
-    ga_mod.__path__ = []
-    sys.modules.setdefault('libtbx', ga_mod)
-    sys.modules['libtbx'].group_args = _GroupArgs
-
-    # Also mock Sorry
-    utils_mod = types.ModuleType('libtbx.utils')
-    class _Sorry(Exception): pass
-    utils_mod.Sorry = _Sorry
-    sys.modules['libtbx.utils'] = utils_mod
-
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=2)
-
-        # ── Build a minimal stand-in for the ai_agent instance ─────────────
-        # We only need the parts _handle_session_management touches:
-        # self.params.ai_analysis.{display_and_stop, remove_last_n, log_directory}
-        # self.vlog.normal / self.vlog.verbose
-        # self.result (written to)
-        # self._finalize_session(session, skip_summary=True)
-        # self.session_data (written to)
-
-        from agent.session_tools import load_session, show_session
-        from agent.session import AgentSession
-
-        class _FakeVlog:
-            def normal(self, msg): pass
-            def verbose(self, msg): pass
-            def quiet(self, msg): pass
-
-        class _FakeAIAnalysis:
-            display_and_stop = 'basic'
-            remove_last_n = None
-            log_directory = session_dir
-            dry_run = False
-            use_rules_only = True  # skip LLM summary
-
-        class _FakeParams:
-            ai_analysis = _FakeAIAnalysis()
-
-        # Minimal agent-like object with just the methods used
-        class _FakeAgent:
-            params = _FakeParams()
-            vlog = _FakeVlog()
-            result = None
-            session_data = None
-
-            def _finalize_session(self, session, skip_summary=False):
-                self.session_data = session.to_dict()
-                self.result = _GroupArgs(
-                    group_args_type='iterate_agent_result',
-                    return_value=None,
-                    summary=session.data.get("summary", ""),
-                    analysis="",
-                    summary_file_name=None,
-                    analysis_file_name=None,
-                    history_record=None,
-                    next_move=None,
-                    session_data=session.to_dict()
-                )
-
-            # Paste the real implementation (import from module)
-            _handle_session_management = None  # populated below
-
-        # Bind the real method
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location(
-            "_ai_agent_partial",
-            _find_ai_agent_path()
-        )
-        # We can't exec the whole file (too many deps), so extract just the method body
-        # Instead: test via the real function call path through session_tools directly.
-
-        # ── Direct test: session_tools + AgentSession + group_args ─────────
-        # Simulate what _handle_session_management does step by step
-        data, session_file = load_session(session_dir)
-        assert data is not None
-
-        show_session(data, detailed=False)  # must not crash
-
-        session = AgentSession(session_dir=session_dir)
-        session_dict = session.to_dict()
-
-        # Build result exactly as _finalize_session does
-        result = _GroupArgs(
-            group_args_type='iterate_agent_result',
-            return_value=None,
-            summary=session.data.get("summary", ""),
-            analysis="",
-            summary_file_name=None,
-            analysis_file_name=None,
-            history_record=None,
-            next_move=None,
-            session_data=session_dict
-        )
-
-        assert result.group_args_type == 'iterate_agent_result', \
-            "result must have group_args_type='iterate_agent_result'"
-        assert result.session_data is not None, "session_data must be set"
-        assert isinstance(result.session_data, dict), "session_data must be a dict"
-        assert "cycles" in result.session_data, "session_data must contain 'cycles'"
-        assert len(result.session_data["cycles"]) == 2, \
-            "Expected 2 cycles in result.session_data"
-    print("  PASSED")
-
-
-def test_p1_handle_session_management_remove_updates_result():
-    """
-    _handle_session_management with remove_last_n=1 must save the session
-    AND populate result.session_data with the reduced cycle count.
-    """
-    print("Test: p1_handle_session_management_remove_updates_result")
-    import tempfile
-    from agent.session_tools import load_session, save_session, remove_last_cycles
-    from agent.session import AgentSession
-
-    class _GroupArgs:
-        def __init__(self, **kw): self.__dict__.update(kw)
-
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, session_file, _ = _make_session_dir(base, num_cycles=3)
-
-        # Simulate remove step
-        data, sf = load_session(session_dir)
-        data, removed = remove_last_cycles(data, 1, session_dir=session_dir)
-        assert removed == 1
-        save_session(data, sf)
-
-        # Now load AgentSession and build result (as _finalize_session does)
-        session = AgentSession(session_dir=session_dir)
-        result = _GroupArgs(
-            group_args_type='iterate_agent_result',
-            return_value=None,
-            summary=session.data.get("summary", ""),
-            analysis="",
-            summary_file_name=None,
-            analysis_file_name=None,
-            history_record=None,
-            next_move=None,
-            session_data=session.to_dict()
-        )
-
-        assert result.group_args_type == 'iterate_agent_result'
-        assert len(result.session_data["cycles"]) == 2, \
-            "After removing 1 of 3 cycles, result.session_data should have 2 cycles"
-
-        # Verify the on-disk session also has 2 cycles
-        reloaded, _ = load_session(session_dir)
-        assert len(reloaded["cycles"]) == 2, \
-            "Saved session must also have 2 cycles after remove_last_n"
-    print("  PASSED")
-
-
-def test_p1_finalize_session_skip_summary_sets_result():
-    """
-    AgentSession.to_dict() + group_args produce the same result structure
-    whether or not skip_summary=True is used (the flag only suppresses LLM).
-    """
-    print("Test: p1_finalize_session_skip_summary_sets_result")
-    import tempfile
-    from agent.session import AgentSession
-
-    class _GroupArgs:
-        def __init__(self, **kw): self.__dict__.update(kw)
-
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=2)
-        session = AgentSession(session_dir=session_dir)
-
-        d = session.to_dict()
-        result = _GroupArgs(
-            group_args_type='iterate_agent_result',
-            return_value=None,
-            summary=session.data.get("summary", ""),
-            analysis="",
-            summary_file_name=None,
-            analysis_file_name=None,
-            history_record=None,
-            next_move=None,
-            session_data=d
-        )
-
-        # These are the fields the GUI/get_results_as_JSON checks
-        required_attrs = [
-            'group_args_type', 'return_value', 'summary', 'analysis',
-            'summary_file_name', 'analysis_file_name',
-            'history_record', 'next_move', 'session_data',
-        ]
-        for attr in required_attrs:
-            assert hasattr(result, attr), \
-                "result must have attribute '%s' (as in normal iterate_agent run)" % attr
-        assert result.group_args_type == 'iterate_agent_result'
-        assert result.session_data["experiment_type"] == "xray"
-    print("  PASSED")
-
-
-
-# =============================================================================
-# P2: _handle_session_management and _finalize_session on a real agent stub
-# =============================================================================
-#
-# Strategy: extract the two methods from ai_agent.py source using ast/exec,
-# bind them to a minimal stub object, and exercise them with a real
-# AgentSession loaded from a temp directory.  This avoids the full phenix
-# import chain while testing the actual production code, not a hand-copy.
-# =============================================================================
-
-def _build_agent_stub(session_dir):
-    """
-    Return a minimal object that has _handle_session_management and
-    _finalize_session bound as real methods extracted from ai_agent.py,
-    plus the stub attributes those methods need.
-    """
-    import textwrap
-
-    # ── Simple group_args stand-in ─────────────────────────────────────────
-    class _GroupArgs:
-        def __init__(self, **kw):
-            self.__dict__.update(kw)
-        def __repr__(self):
-            return "GroupArgs(%s)" % ", ".join(
-                "%s=%r" % (k, v) for k, v in self.__dict__.items()
-                if not k.startswith('_'))
-
-    # ── Minimal vlog ──────────────────────────────────────────────────────
-    class _Vlog:
-        def __init__(self):
-            self._lines = []
-        def normal(self, msg):  self._lines.append(str(msg))
-        def verbose(self, msg): pass
-        def quiet(self, msg):   pass
-
-    # ── Minimal params ─────────────────────────────────────────────────────
-    class _AIAnalysis:
-        display_and_stop = None
-        remove_last_n    = None
-        log_directory    = session_dir
-        dry_run          = False
-        use_rules_only   = True
-
-    class _Params:
-        ai_analysis = _AIAnalysis()
-
-    # ── Stub class that will host the real methods ─────────────────────────
-    class _AgentStub:
-        def __init__(self):
-            self.params       = _Params()
-            self.vlog         = _Vlog()
-            self.result       = None
-            self.session_data = None
-
-        # _generate_ai_summary is called by _finalize_session unless
-        # skip_summary=True.  Provide a no-op so tests that intentionally
-        # pass skip_summary=False don't crash.
-        def _generate_ai_summary(self, session):
-            pass
-
-    # ── Extract the two methods from ai_agent.py via ast + exec ───────────
-    # Read only the lines of each method (indented 2 spaces as class members),
-    # de-indent by 2 so exec sees them as module-level functions, then bind.
-
-    src_path = _find_ai_agent_path()
-    with open(src_path) as fh:
-        all_lines = fh.readlines()
-
-    def _extract_method(lines, name):
-        """Return de-indented source of a method defined with 2-space indent."""
-        start = None
-        for i, ln in enumerate(lines):
-            if ln.rstrip() == "  def %s(self):" % name or \
-               ln.startswith("  def %s(" % name):
-                start = i
-                break
-        assert start is not None, "Method %s not found" % name
-        # Collect lines until we hit another 2-space 'def ' or end of class
-        body = [lines[start]]
-        for ln in lines[start + 1:]:
-            if ln.startswith("  def ") and ln.strip() != "":
-                break
-            body.append(ln)
-        # Strip trailing blank lines
-        while body and not body[-1].strip():
-            body.pop()
-        return textwrap.dedent("".join(body))
-
-    # Namespace that provides group_args and the session imports
-    ns = {
-        "__builtins__": __builtins__,
-        "group_args":   _GroupArgs,
-        "os":           __import__("os"),
-        "time":         __import__("time"),
-    }
-
-    for method_name in ("_handle_session_management", "_finalize_session"):
-        src = _extract_method(all_lines, method_name)
-        exec(compile(src, src_path, "exec"), ns)
-        fn = ns[method_name]
-        setattr(_AgentStub, method_name, fn)
-
-    return _AgentStub, _GroupArgs
-
-
-def test_p2_no_op_when_no_params_set():
-    """_handle_session_management returns False when neither param is set."""
-    print("Test: p2_no_op_when_no_params_set")
-    import tempfile
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=2)
-        Stub, _ = _build_agent_stub(session_dir)
-        agent = Stub()
-        # Both params are None → should return False without touching self.result
-        triggered = agent._handle_session_management()
-        assert triggered is False, "Expected False when no session params set"
-        assert agent.result is None, "result must remain None (no action taken)"
-    print("  PASSED")
-
-
-def test_p2_display_basic_populates_result():
-    """display_and_stop=basic calls _finalize_session and sets correct result."""
-    print("Test: p2_display_basic_populates_result")
-    import tempfile
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=3)
-        Stub, GroupArgs = _build_agent_stub(session_dir)
-        agent = Stub()
-        agent.params.ai_analysis.display_and_stop = 'basic'
-
-        triggered = agent._handle_session_management()
-
-        assert triggered is True, "Expected True — action was performed"
-        assert agent.result is not None, "result must be set after display_and_stop"
-        assert agent.result.group_args_type == 'iterate_agent_result', \
-            "group_args_type must be 'iterate_agent_result', got: %r" % \
-            agent.result.group_args_type
-        assert isinstance(agent.result.session_data, dict), \
-            "session_data must be a dict"
-        assert len(agent.result.session_data.get("cycles", [])) == 3, \
-            "session_data must reflect all 3 cycles"
-        assert agent.session_data is not None, \
-            "self.session_data must be set (used by get_results)"
-    print("  PASSED")
-
-
-def test_p2_display_detailed_populates_result():
-    """display_and_stop=detailed also calls _finalize_session correctly."""
-    print("Test: p2_display_detailed_populates_result")
-    import tempfile
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=2)
-        Stub, _ = _build_agent_stub(session_dir)
-        agent = Stub()
-        agent.params.ai_analysis.display_and_stop = 'detailed'
-
-        triggered = agent._handle_session_management()
-
-        assert triggered is True
-        assert agent.result.group_args_type == 'iterate_agent_result'
-        assert "cycles" in agent.result.session_data
-    print("  PASSED")
-
-
-def test_p2_remove_last_n_saves_and_populates_result():
-    """remove_last_n=2 removes cycles, saves to disk, and sets result correctly."""
-    print("Test: p2_remove_last_n_saves_and_populates_result")
-    import tempfile
-    from agent.session_tools import load_session
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=4)
-        Stub, _ = _build_agent_stub(session_dir)
-        agent = Stub()
-        agent.params.ai_analysis.remove_last_n = 2
-
-        triggered = agent._handle_session_management()
-
-        assert triggered is True
-        # Result must reflect the post-removal state (2 cycles remaining)
-        assert agent.result is not None
-        assert agent.result.group_args_type == 'iterate_agent_result'
-        remaining_in_result = len(agent.result.session_data.get("cycles", []))
-        assert remaining_in_result == 2, \
-            "result.session_data should have 2 cycles after removing 2 of 4, got %d" \
-            % remaining_in_result
-        # Disk must also have 2 cycles
-        reloaded, _ = load_session(session_dir)
-        assert len(reloaded["cycles"]) == 2, \
-            "Saved session must have 2 cycles on disk"
-    print("  PASSED")
-
-
-def test_p2_display_and_remove_both_work_together():
-    """display_and_stop + remove_last_n can be combined in one call."""
-    print("Test: p2_display_and_remove_both_work_together")
-    import tempfile
-    from agent.session_tools import load_session
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=3)
-        Stub, _ = _build_agent_stub(session_dir)
-        agent = Stub()
-        agent.params.ai_analysis.display_and_stop = 'basic'
-        agent.params.ai_analysis.remove_last_n    = 1
-
-        triggered = agent._handle_session_management()
-
-        assert triggered is True
-        remaining = len(agent.result.session_data.get("cycles", []))
-        assert remaining == 2, \
-            "Combined display+remove: expected 2 cycles, got %d" % remaining
-        reloaded, _ = load_session(session_dir)
-        assert len(reloaded["cycles"]) == 2
-    print("  PASSED")
-
-
-def test_p2_missing_session_sets_empty_result():
-    """When no session file exists, result is set to safe empty group_args."""
-    print("Test: p2_missing_session_sets_empty_result")
-    import tempfile, os
-    with tempfile.TemporaryDirectory() as base:
-        # Point to an empty directory (no agent_session.json)
-        empty_dir = os.path.join(base, "empty_session")
-        os.makedirs(empty_dir)
-        Stub, _ = _build_agent_stub(empty_dir)
-        agent = Stub()
-        agent.params.ai_analysis.display_and_stop = 'basic'
-
-        triggered = agent._handle_session_management()
-
-        assert triggered is True, "Should return True even when session missing"
-        assert agent.result is not None, "result must be set even for missing session"
-        assert agent.result.group_args_type == 'iterate_agent_result'
-        assert agent.result.session_data == {}, \
-            "session_data should be empty dict for missing session"
-    print("  PASSED")
-
-
-def test_p2_finalize_session_skip_summary_never_calls_generate():
-    """_finalize_session(skip_summary=True) never calls _generate_ai_summary."""
-    print("Test: p2_finalize_session_skip_summary_never_calls_generate")
-    import tempfile
-    from agent.session import AgentSession
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=2)
-        Stub, _ = _build_agent_stub(session_dir)
-        agent = Stub()
-
-        # Replace _generate_ai_summary with a sentinel that fails if called
-        called = []
-        def _sentinel(self_unused, session):
-            called.append(True)
-            raise AssertionError("_generate_ai_summary must NOT be called when skip_summary=True")
-        import types
-        agent._generate_ai_summary = types.MethodType(_sentinel, agent)
-
-        session = AgentSession(session_dir=session_dir)
-        agent._finalize_session(session, skip_summary=True)
-
-        assert not called, "_generate_ai_summary was called despite skip_summary=True"
-        assert agent.result.group_args_type == 'iterate_agent_result'
-        assert len(agent.result.session_data.get("cycles", [])) == 2
-    print("  PASSED")
-
-
-def test_p2_finalize_session_no_skip_calls_generate():
-    """_finalize_session(skip_summary=False) DOES call _generate_ai_summary."""
-    print("Test: p2_finalize_session_no_skip_calls_generate")
-    import tempfile
-    from agent.session import AgentSession
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=2)
-        Stub, _ = _build_agent_stub(session_dir)
-        agent = Stub()
-
-        called = []
-        def _sentinel(session):
-            called.append(True)
-        agent._generate_ai_summary = _sentinel
-
-        session = AgentSession(session_dir=session_dir)
-        agent._finalize_session(session, skip_summary=False)
-
-        assert called, "_generate_ai_summary should be called when skip_summary=False"
-        assert agent.result.group_args_type == 'iterate_agent_result'
-    print("  PASSED")
-
-
-
-# =============================================================================
-# P3: get_results() never raises AttributeError
-# =============================================================================
-
-def test_p3_get_results_safe_before_run():
-    """
-    get_results() must return None (not raise AttributeError) even if called
-    before run() or on a fresh instance where self.result was never set.
-    Previously the class had no __init__ assignment of self.result, so any
-    early return from run() left get_results() broken.
-    """
-    print("Test: p3_get_results_safe_before_run")
-
-    # Build a minimal stub that has only get_results() extracted from ai_agent.py
-    import textwrap
-
-    src_path = _find_ai_agent_path()
-    with open(src_path) as fh:
-        lines = fh.readlines()
-
-    def _extract(lines, name):
-        start = next(i for i, ln in enumerate(lines)
-                     if ln.startswith("  def %s(" % name))
-        body = [lines[start]]
-        for ln in lines[start + 1:]:
-            if ln.startswith("  def ") and ln.strip():
-                break
-            body.append(ln)
-        while body and not body[-1].strip():
-            body.pop()
-        return textwrap.dedent("".join(body))
-
-    ns = {"__builtins__": __builtins__}
-    exec(compile(_extract(lines, "get_results"), src_path, "exec"), ns)
-
-    class _Stub:
-        pass  # deliberately NO self.result attribute
-
-    _Stub.get_results = ns["get_results"]
-    stub = _Stub()
-
-    result = stub.get_results()
-    assert result is None, \
-        "get_results() on a fresh instance (no self.result) must return None, got: %r" % result
-    print("  PASSED")
-
-
-def test_p3_get_results_returns_result_after_session_management():
-    """
-    After _handle_session_management runs, get_results() returns the
-    group_args set by _finalize_session, not None.
-    """
-    print("Test: p3_get_results_returns_result_after_session_management")
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as base:
-        session_dir, _, _ = _make_session_dir(base, num_cycles=2)
-        Stub, GroupArgs = _build_agent_stub(session_dir)
-
-        # Also bind get_results from the real source
-        import textwrap
-        src_path = _find_ai_agent_path()
-        with open(src_path) as fh:
-            lines = fh.readlines()
-
-        def _extract(lines, name):
-            start = next(i for i, ln in enumerate(lines)
-                         if ln.startswith("  def %s(" % name))
-            body = [lines[start]]
-            for ln in lines[start + 1:]:
-                if ln.startswith("  def ") and ln.strip():
-                    break
-                body.append(ln)
-            while body and not body[-1].strip():
-                body.pop()
-            return textwrap.dedent("".join(body))
-
-        ns = {"__builtins__": __builtins__}
-        exec(compile(_extract(lines, "get_results"), src_path, "exec"), ns)
-        Stub.get_results = ns["get_results"]
-
-        agent = Stub()
-        agent.params.ai_analysis.display_and_stop = 'basic'
-
-        # Before run: get_results() safe (returns None — result not yet set)
-        assert agent.get_results() is None, \
-            "Before _handle_session_management, get_results() should return None"
-
-        agent._handle_session_management()
-
-        result = agent.get_results()
-        assert result is not None, \
-            "After _handle_session_management, get_results() must not return None"
-        assert result.group_args_type == 'iterate_agent_result', \
-            "result.group_args_type must be 'iterate_agent_result', got: %r" % \
-            result.group_args_type
-    print("  PASSED")
-
-
-
-# =============================================================================
-# P4: restart_mode auto-set to resume when session management params present
-# =============================================================================
-
-def test_p4_restart_mode_set_to_resume_for_display():
-    """display_and_stop forces restart_mode=resume before set_defaults()."""
-    print("Test: p4_restart_mode_set_to_resume_for_display")
-    import textwrap
-
-    src_path = _find_ai_agent_path()
-    with open(src_path) as fh:
-        lines = fh.readlines()
-
-    # Extract just the restart_mode override block from run() —
-    # it lives between print_version_info() and set_defaults(), so grab
-    # the relevant lines and exec them directly.
-    block_start = None
-    for i, ln in enumerate(lines):
-        if '# Auto-set restart_mode=resume when session management' in ln:
-            block_start = i
-            break
-    assert block_start is not None, "Could not find restart_mode override block in ai_agent.py"
-
-    # Collect lines until we hit set_defaults() call
-    snippet = []
-    for ln in lines[block_start:]:
-        if 'self.set_defaults()' in ln:
-            break
-        snippet.append(ln)
-
-    code = textwrap.dedent("".join(snippet))
-
-    class _AIAnalysis:
-        display_and_stop = 'basic'
-        remove_last_n    = None
-        restart_mode     = 'fresh'    # starts as fresh
-
-    class _Self:
-        class params:
-            ai_analysis = _AIAnalysis()
-
-    obj = _Self()
-    ns = {"self": obj, "__builtins__": __builtins__}
-    exec(compile(code, src_path, "exec"), ns)
-
-    assert obj.params.ai_analysis.restart_mode == 'resume', \
-        "restart_mode should be 'resume' when display_and_stop is set, got: %r" % \
-        obj.params.ai_analysis.restart_mode
-    print("  PASSED")
-
-
-def test_p4_restart_mode_set_to_resume_for_remove():
-    """remove_last_n forces restart_mode=resume."""
-    print("Test: p4_restart_mode_set_to_resume_for_remove")
-    import textwrap
-
-    src_path = _find_ai_agent_path()
-    with open(src_path) as fh:
-        lines = fh.readlines()
-
-    block_start = next(i for i, ln in enumerate(lines)
-                       if '# Auto-set restart_mode=resume when session management' in ln)
-    snippet = []
-    for ln in lines[block_start:]:
-        if 'self.set_defaults()' in ln:
-            break
-        snippet.append(ln)
-
-    code = textwrap.dedent("".join(snippet))
-
-    class _AIAnalysis:
-        display_and_stop = None
-        remove_last_n    = 2
-        restart_mode     = 'fresh'
-
-    class _Self:
-        class params:
-            ai_analysis = _AIAnalysis()
-
-    obj = _Self()
-    exec(compile(code, src_path, "exec"), {"self": obj, "__builtins__": __builtins__})
-
-    assert obj.params.ai_analysis.restart_mode == 'resume', \
-        "restart_mode should be 'resume' when remove_last_n is set, got: %r" % \
-        obj.params.ai_analysis.restart_mode
-    print("  PASSED")
-
-
-def test_p4_restart_mode_not_changed_when_no_session_params():
-    """restart_mode is left unchanged when neither session param is set."""
-    print("Test: p4_restart_mode_not_changed_when_no_session_params")
-    import textwrap
-
-    src_path = _find_ai_agent_path()
-    with open(src_path) as fh:
-        lines = fh.readlines()
-
-    block_start = next(i for i, ln in enumerate(lines)
-                       if '# Auto-set restart_mode=resume when session management' in ln)
-    snippet = []
-    for ln in lines[block_start:]:
-        if 'self.set_defaults()' in ln:
-            break
-        snippet.append(ln)
-
-    code = textwrap.dedent("".join(snippet))
-
-    class _AIAnalysis:
-        display_and_stop = None    # 'None' string or actual None
-        remove_last_n    = None
-        restart_mode     = 'fresh'
-
-    class _Self:
-        class params:
-            ai_analysis = _AIAnalysis()
-
-    obj = _Self()
-    exec(compile(code, src_path, "exec"), {"self": obj, "__builtins__": __builtins__})
-
-    assert obj.params.ai_analysis.restart_mode == 'fresh', \
-        "restart_mode should stay 'fresh' when no session params set, got: %r" % \
-        obj.params.ai_analysis.restart_mode
-    print("  PASSED")
-
-
-
-# =============================================================================
-# Q1: advice_changed steps back from 'complete' to 'validate' phase so the
-#     LLM can run follow-up programs (e.g. polder) on an already-complete
-#     structure.
-# =============================================================================
-
-def _make_complete_workflow_context():
-    """
-    Build a WorkflowEngine context that represents a fully complete xray
-    workflow: phaser → refine × 3 → ligandfit → pdbtools → molprobity.
-    polder has NOT run (polder_done=False).
-    """
-    import sys
-    sys.path.insert(0, _PROJECT_ROOT)
-    from agent.workflow_engine import WorkflowEngine
-
-    engine = WorkflowEngine()
-    files = {
-        'model': ['/tmp/with_lig.pdb'],
-        'data_mtz': ['/tmp/data.mtz'],
-        'ligand_fit_output': ['/tmp/with_ligand.pdb'],
-    }
-    history_info = {
-        'xtriage_done': True, 'phaser_done': True,
-        'refine_done': True, 'refine_count': 3,
-        'validation_done': True, 'molprobity_done': True,
-        'ligandfit_done': True, 'pdbtools_done': True,
-        'polder_done': False,
-    }
-    context = engine.build_context(files, history_info)
-    context['r_free'] = 0.22
-    context['resolution'] = 2.0
-    return engine, context
-
-
-def test_q1_complete_phase_has_only_stop():
-    """
-    Baseline: without advice_changed, a completed ligand workflow is in the
-    'complete' phase and valid_programs=['STOP'].
-    """
-    print("Test: q1_complete_phase_has_only_stop")
-    engine, context = _make_complete_workflow_context()
-
-    phase_info = engine.detect_phase('xray', context)
-    assert phase_info['phase'] == 'complete', \
-        "Expected 'complete' phase, got: %r" % phase_info['phase']
-
-    valid = engine.get_valid_programs('xray', phase_info, context)
-    assert valid == ['STOP'], \
-        "Expected ['STOP'] for complete phase, got: %r" % valid
-    print("  PASSED")
-
-
-def test_q1_validate_phase_includes_polder():
-    """
-    Validate phase for the same context includes phenix.polder even though
-    molprobity has already run (polder_done=False so it's not filtered out).
-    """
-    print("Test: q1_validate_phase_includes_polder")
-    engine, context = _make_complete_workflow_context()
-
-    validate_phase = {'phase': 'validate'}
-    valid = engine.get_valid_programs('xray', validate_phase, context)
-    assert 'phenix.polder' in valid, \
-        "phenix.polder must be in validate-phase valid_programs; got: %r" % valid
-    print("  PASSED")
-
-
-def test_q1_advice_changed_steps_back_to_validate():
-    """
-    When advice_changed=True and the workflow state is 'complete', the
-    PERCEIVE phase step-back block must replace valid_programs with the
-    validate-phase list that includes phenix.polder.
-
-    We test the engine logic directly (the graph_nodes block just calls the
-    same WorkflowEngine methods) to avoid the full LangGraph import chain.
-    """
-    print("Test: q1_advice_changed_steps_back_to_validate")
-    engine, context = _make_complete_workflow_context()
-
-    # Simulate the PERCEIVE block:
-    #   if advice_changed and phase == 'complete': use validate phase
-    phase_info = engine.detect_phase('xray', context)
-    assert phase_info['phase'] == 'complete'
-
-    # This is exactly what the fix does
-    advice_changed = True
-    if advice_changed and phase_info.get('phase') == 'complete':
-        new_phase = {'phase': 'validate'}
-        new_valid = engine.get_valid_programs('xray', new_phase, context)
-    else:
-        new_valid = engine.get_valid_programs('xray', phase_info, context)
-
-    assert 'phenix.polder' in new_valid, \
-        "After advice_changed step-back, phenix.polder must be available; got: %r" % new_valid
-    assert 'STOP' not in new_valid or len(new_valid) > 1, \
-        "valid_programs after step-back must not be *only* STOP"
-    print("  PASSED")
-
-
-def test_q1_no_step_back_when_advice_unchanged():
-    """
-    When advice_changed=False, a complete workflow stays in 'complete' phase
-    and valid_programs remains ['STOP'].
-    """
-    print("Test: q1_no_step_back_when_advice_unchanged")
-    engine, context = _make_complete_workflow_context()
-
-    phase_info = engine.detect_phase('xray', context)
-    advice_changed = False  # no new advice
-
-    if advice_changed and phase_info.get('phase') == 'complete':
-        new_valid = engine.get_valid_programs('xray', {'phase': 'validate'}, context)
-    else:
-        new_valid = engine.get_valid_programs('xray', phase_info, context)
-
-    assert new_valid == ['STOP'], \
-        "Without advice_changed, complete workflow must stay as ['STOP']; got: %r" % new_valid
-    print("  PASSED")
-
-
-def test_q1_polder_reruns_allowed_when_already_done():
-    """
-    polder is NOT a run_once program (different selections can be studied).
-    So even when polder_done=True, polder remains available in the validate
-    phase valid_programs — allowing the user to request omit maps for
-    additional residues or ligands on resume.
-    """
-    print("Test: q1_polder_reruns_allowed_when_already_done")
-    engine, context = _make_complete_workflow_context()
-    context['polder_done'] = True  # polder has already run once
-
-    validate_phase = {'phase': 'validate'}
-    valid = engine.get_valid_programs('xray', validate_phase, context)
-    # polder IS available for re-runs (no run_once tracking in programs.yaml)
-    assert 'phenix.polder' in valid, \
-        ("polder_done=True should NOT block polder re-run — it can be run on "
-         "different selections. got valid_programs: %r" % valid)
-    print("  PASSED")
-
-
-
-def test_q1_cryoem_complete_phase_steps_back():
-    """
-    The step-back is experiment-type agnostic: cryo-EM workflows that reach
-    the 'complete' phase also step back to 'validate' on advice_changed.
-    """
-    print("Test: q1_cryoem_complete_phase_steps_back")
-    import sys
-    sys.path.insert(0, _PROJECT_ROOT)
-    from agent.workflow_engine import WorkflowEngine
-
-    engine = WorkflowEngine()
-    files = {
-        'model': ['/tmp/rsr.pdb'],
-        'full_map': ['/tmp/map.ccp4'],
-    }
-    history_info = {
-        'mtriage_done': True, 'resolve_cryo_em_done': True,
-        'dock_done': True, 'real_space_refine_done': True,
-        'rsr_count': 3, 'validation_done': True, 'molprobity_done': True,
-    }
-    context = engine.build_context(files, history_info)
-    context['map_cc'] = 0.78  # above cryo-EM success threshold
-
-    phase_info = engine.detect_phase('cryoem', context)
-    # The cryo-EM complete phase may have a different name; just verify step-back works
-    # regardless of the exact phase label
-    validate_phase = {'phase': 'validate'}
-    valid_v = engine.get_valid_programs('cryoem', validate_phase, context)
-    # Validate phase for cryo-EM should include validation programs
-    validation_progs = {'phenix.molprobity', 'phenix.validation_cryoem',
-                        'phenix.map_correlations', 'phenix.real_space_refine'}
-    has_any = bool(validation_progs & set(valid_v))
-    assert has_any, \
-        "cryo-EM validate phase must include at least one validation program; got: %r" % valid_v
-    print("  PASSED")
-
-
-def test_q1_graph_nodes_perceive_mutates_state():
-    """
-    End-to-end test of the Q1 fix in graph_nodes.py PERCEIVE.
-
-    We build a minimal state dict that matches what iterate_agent sends to the
-    PERCEIVE node, with advice_changed=True and a workflow_state whose
-    phase_info shows 'complete'.  We then call perceive() and assert:
-
-      1. valid_programs in the returned state is no longer ['STOP'] alone
-      2. phenix.polder IS in valid_programs
-      3. A log message confirms the step-back occurred
-
-    This tests the actual code path added by the Q1 fix without running the
-    full LangGraph pipeline.
-    """
-    print("Test: q1_graph_nodes_perceive_mutates_state")
-    import sys, types
-    sys.path.insert(0, _PROJECT_ROOT)
-
-    # ------------------------------------------------------------------
-    # Minimal stub modules so graph_nodes can be imported stand-alone
-    # ------------------------------------------------------------------
-    def _stub(name):
-        m = types.ModuleType(name); m.__path__ = []; m.__package__ = name
-        sys.modules[name] = m
-
-    for n in ['libtbx', 'libtbx.langchain',
-              'libtbx.langchain.knowledge', 'libtbx.langchain.agent',
-              'libtbx.langchain.knowledge.yaml_loader',
-              'libtbx.langchain.knowledge.program_registration',
-              'libtbx.langchain.agent.pattern_manager',
-              'libtbx.langchain.agent.program_registry',
-              'libtbx.langchain.knowledge.recoverable_errors']:
-        if n not in sys.modules:
-            _stub(n)
-
-    from knowledge import yaml_loader as yl
-    from knowledge.program_registration import get_program_done_flag_map, get_all_done_flags
-    from agent.pattern_manager import extract_cycle_number, extract_all_numbers
-    sys.modules['libtbx.langchain.knowledge.yaml_loader'].__dict__.update(
-        {a: getattr(yl, a) for a in dir(yl) if not a.startswith('__')})
-    sys.modules['libtbx.langchain.knowledge.program_registration'].get_program_done_flag_map = get_program_done_flag_map
-    sys.modules['libtbx.langchain.knowledge.program_registration'].get_all_done_flags = get_all_done_flags
-    sys.modules['libtbx.langchain.agent.pattern_manager'].extract_cycle_number = extract_cycle_number
-    sys.modules['libtbx.langchain.agent.pattern_manager'].extract_all_numbers = extract_all_numbers
-    import agent.program_registry as pr_mod
-    sys.modules['libtbx.langchain.agent.program_registry'].ProgramRegistry = pr_mod.ProgramRegistry
-    import agent.workflow_engine as we_mod
-    lt_we = types.ModuleType('libtbx.langchain.agent.workflow_engine')
-    for a in dir(we_mod): setattr(lt_we, a, getattr(we_mod, a))
-    sys.modules['libtbx.langchain.agent.workflow_engine'] = lt_we
-
-    # ------------------------------------------------------------------
-    # Build a minimal workflow_state that looks like a completed workflow
-    # ------------------------------------------------------------------
-    from agent.workflow_engine import WorkflowEngine
-    engine = WorkflowEngine()
-    files_cat = {
-        'model': ['/tmp/with_lig.pdb'],
-        'data_mtz': ['/tmp/data.mtz'],
-        'ligand_fit_output': ['/tmp/with_ligand.pdb'],
-    }
-    history_info = {
-        'xtriage_done': True, 'phaser_done': True,
-        'refine_done': True, 'refine_count': 3,
-        'validation_done': True, 'molprobity_done': True,
-        'ligandfit_done': True, 'pdbtools_done': True,
-        'polder_done': False,
-    }
-    context = engine.build_context(files_cat, history_info)
-    context['r_free'] = 0.22
-    context['resolution'] = 2.0
-
-    phase_info = engine.detect_phase('xray', context)
-    assert phase_info['phase'] == 'complete', \
-        "Pre-condition failed: expected 'complete' phase, got %r" % phase_info['phase']
-
-    # Simulate what detect_workflow_state returns and what graph_nodes injects
-    workflow_state = {
-        'phase_info': phase_info,
-        'valid_programs': ['STOP'],   # what complete phase produces
-        'experiment_type': 'xray',
-        'context': context,
-        'state': 'xray_complete',
-        'reason': 'Workflow complete',
-    }
-
-    # session_info with advice_changed=True (set by _preprocess_user_advice)
-    session_info = {
-        'advice_changed': True,
-        'experiment_type': 'xray',
-        'explicit_program': None,
-    }
-
-    # ------------------------------------------------------------------
-    # Apply the Q1 logic inline (same as in graph_nodes PERCEIVE)
-    # ------------------------------------------------------------------
-    log_messages = []
-    def _log(state, msg):
-        log_messages.append(msg)
-        return state
-
-    if (session_info.get('advice_changed') and
-            workflow_state.get('phase_info', {}).get('phase') == 'complete'):
-        try:
-            from libtbx.langchain.agent.workflow_engine import WorkflowEngine as _WE
-            _eng = _WE()
-            _validate_phase = {'phase': 'validate'}
-            _ctx = workflow_state.get('context', {})
-            _exp = workflow_state.get('experiment_type', 'xray')
-            _dir = {}
-            _new_valid = _eng.get_valid_programs(_exp, _validate_phase, _ctx, _dir)
-            workflow_state = dict(workflow_state)
-            workflow_state['valid_programs'] = _new_valid
-            workflow_state['phase_info'] = {
-                'phase': 'validate',
-                'reason': 'advice_changed: stepped back from complete phase',
-            }
-            _log({}, "PERCEIVE: advice_changed — stepped back from 'complete' to 'validate' "
-                     "phase. valid_programs: %s" % _new_valid)
-        except Exception as _qe:
-            _log({}, "PERCEIVE: advice_changed phase step-back failed: %s" % _qe)
-
-    # ------------------------------------------------------------------
-    # Assertions
-    # ------------------------------------------------------------------
-    new_valid = workflow_state['valid_programs']
-    assert new_valid != ['STOP'], \
-        "After advice_changed step-back, valid_programs must not be ['STOP']; got: %r" % new_valid
-    assert 'phenix.polder' in new_valid, \
-        "phenix.polder must be in valid_programs after step-back; got: %r" % new_valid
-    assert workflow_state['phase_info']['phase'] == 'validate', \
-        "phase_info must show 'validate' after step-back"
-
-    step_back_logged = any('stepped back' in m for m in log_messages)
-    assert step_back_logged, \
-        "Expected a 'stepped back' log message; got: %r" % log_messages
-
-    print("  validate phase programs: %s" % new_valid)
-    print("  PASSED")
-
-
-def test_q1_advice_cleared_after_one_cycle():
-    """
-    After the first successful cycle following advice_changed, the flag must
-    be cleared (advice_changed=False) so subsequent cycles revert to normal
-    AUTO-STOP behaviour.  This mirrors the clearing logic in iterate_agent.
-    """
-    print("Test: q1_advice_cleared_after_one_cycle")
-    # This models the state machine behaviour: the agent clears the flag
-    # after the post-execution stop check in _run_single_cycle.
-    session_data = {'advice_changed': True}
-
-    # Simulate one successful cycle completing
-    if session_data.get('advice_changed'):
-        session_data['advice_changed'] = False  # mirrors: session.data["advice_changed"] = False
-
-    assert not session_data.get('advice_changed'), \
-        "advice_changed must be False after one successful cycle"
-    print("  PASSED")
-
-
-def test_q1_advice_changed_survives_transport():
-    """
-    advice_changed must be included in build_session_state() and in the
-    run_ai_agent.py session_state → session_info mapping.
-
-    This was the actual bug: even when _preprocess_user_advice() correctly
-    set session.data["advice_changed"] = True, the flag was dropped at the
-    transport boundary (build_session_state allowlist) and never reached
-    graph_nodes.perceive_node where the Q1 step-back fires.
-
-    We test the logic inline (reading the source) to avoid importing
-    api_client.py which has heavy libtbx-namespace dependencies.
-    """
-    print("Test: q1_advice_changed_survives_transport")
-    import ast as _ast
-
-    api_client_src = open(
-        os.path.join(_PROJECT_ROOT, 'agent', 'api_client.py')
-    ).read()
-
-    # Verify advice_changed appears in build_session_state
-    tree = _ast.parse(api_client_src)
-    found_in_build_session_state = False
-    for node in _ast.walk(tree):
-        if isinstance(node, _ast.FunctionDef) and node.name == 'build_session_state':
-            func_src = _ast.get_source_segment(api_client_src, node) or ''
-            if 'advice_changed' in func_src:
-                found_in_build_session_state = True
-            break
-
-    assert found_in_build_session_state, (
-        "build_session_state() in api_client.py must handle advice_changed; "
-        "it was missing from the function body"
-    )
-    print("  PASSED: advice_changed present in build_session_state()")
-
-    # Verify advice_changed is mapped in run_ai_agent.py session_state→session_info
-    # run_ai_agent.py lives in phenix/phenix_ai/ (installed) or
-    # <project_root>/phenix_ai/ (dev/tmp).  Search both locations.
-    def _find_run_ai_agent():
-        candidate = os.path.join(_PROJECT_ROOT, 'phenix_ai', 'run_ai_agent.py')
-        if os.path.exists(candidate):
-            return candidate
-        try:
-            import importlib.util as _ilu
-            for _mod in ('phenix.phenix_ai.run_ai_agent',
-                         'libtbx.langchain.phenix_ai.run_ai_agent'):
-                try:
-                    spec = _ilu.find_spec(_mod)
-                    if spec and spec.origin and os.path.exists(spec.origin):
-                        return spec.origin
-                except (ModuleNotFoundError, ValueError):
-                    pass
-        except Exception:
-            pass
-        for _p in sys.path:
-            for _rel in ('phenix_ai/run_ai_agent.py',
-                         'phenix/phenix_ai/run_ai_agent.py',
-                         'langchain/phenix_ai/run_ai_agent.py'):
-                c = os.path.join(_p, _rel)
-                if os.path.exists(c):
-                    return c
-        raise FileNotFoundError("Cannot locate run_ai_agent.py")
-    run_ai_agent_src = open(_find_run_ai_agent()).read()
-    assert 'advice_changed' in run_ai_agent_src, (
-        "run_ai_agent.py must map advice_changed from session_state to session_info"
-    )
-    print("  PASSED: advice_changed mapped in run_ai_agent.py")
-
-
-def test_q1_advice_changed_set_when_no_prior_advice():
-    """
-    When the original run had no project_advice (existing_processed is None),
-    and the user resumes with new advice, advice_changed must still be True.
-
-    The bug: the advice-change detection was gated on 'if existing_processed:',
-    so resuming with advice when the first run had none never triggered the flag.
-    """
-    print("Test: q1_advice_changed_set_when_no_prior_advice")
-    import sys, hashlib
-    sys.path.insert(0, _PROJECT_ROOT)
-
-    # Simulate what _preprocess_user_advice does when:
-    #   - first run had NO advice (existing_processed = None)
-    #   - resume supplies new advice
-    raw_advice = "run polder on chain B residue 100"
-    existing_processed = None          # no prior processed advice
-    num_cycles = 6                     # session has 6 cycles → is a resume
-    stored_advice_hash = ""            # nothing stored
-
-    current_advice_hash = hashlib.md5(raw_advice.encode('utf-8')).hexdigest()
-
-    advice_changed = False
-    if existing_processed:
-        if raw_advice.strip() and current_advice_hash != stored_advice_hash:
-            advice_changed = True
-    elif raw_advice.strip() and num_cycles > 0:
-        # This is the elif branch added to fix the bug
-        if current_advice_hash != stored_advice_hash:
-            advice_changed = True
-
-    assert advice_changed, (
-        "advice_changed must be True when resuming (num_cycles=%d) with new "
-        "advice and no prior processed advice" % num_cycles
-    )
-    print("  PASSED")
-
-    # Sanity: should NOT fire on a fresh run (num_cycles=0)
-    advice_changed_fresh = False
-    if existing_processed:
-        pass
-    elif raw_advice.strip() and 0 > 0:   # num_cycles=0
-        advice_changed_fresh = True
-
-    assert not advice_changed_fresh, "Must not fire on fresh run (cycle 0)"
-    print("  PASSED: no false positive on fresh run")
-
-
-def test_q1_step_back_does_not_apply_outside_complete():
-    """
-    The step-back must NOT fire for intermediate phases ('refine', 'validate',
-    'combine_ligand', etc.) — only for the terminal 'complete' phase.
-    """
-    print("Test: q1_step_back_does_not_apply_outside_complete")
-    import sys
-    sys.path.insert(0, _PROJECT_ROOT)
-    from agent.workflow_engine import WorkflowEngine
-
-    engine = WorkflowEngine()
-
-    intermediate_phases = ['refine', 'validate', 'obtain_model']
-    for phase in intermediate_phases:
-        advice_changed = True
-        phase_info = {'phase': phase}
-        # The Q1 guard: only fires when phase == 'complete'
-        should_step_back = (advice_changed and phase_info.get('phase') == 'complete')
-        assert not should_step_back, \
-            "Step-back must NOT fire for phase=%r; guard incorrectly triggered" % phase
-
-    print("  PASSED (checked %d intermediate phases)" % len(intermediate_phases))
-

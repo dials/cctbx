@@ -1,5 +1,488 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.36 (S2e — after_program Directive Correctly Suppresses Placement Probe)
+
+Fixes a regression introduced by S2b (v112.33). The S2b fix made
+`placement_uncertain` immune to the `model_is_placed` workflow preference
+(which can be hallucinated by the LLM). However, it also inadvertently made
+it immune to `after_program` directives, which are a reliable signal.
+
+### Problem
+
+`tst_workflow_state.py::test_model_placement_inferred_from_model_vs_data_directive`
+failed with `AssertionError: Expected NOT xray_analyzed when model_vs_data requested`.
+
+Scenario: user uploads `1aba.pdb + 1aba.mtz`, requests
+`after_program=phenix.model_vs_data`. After S2b, `placement_uncertain=True`
+because `has_placed_model_from_history=False` (no dock/refine in history).
+This routes to `probe_placement → xray_analyzed` instead of the expected
+`refine → xray_refine`.
+
+### Root cause
+
+S2b correctly distinguished two types of "placed" evidence:
+
+| Source | Reliable? | Used by S2b |
+|--------|-----------|-------------|
+| `model_is_placed: True` (workflow_preferences) | No — LLM hallucination | Ignored by `placement_uncertain` ✓ |
+| History/file evidence (dock_done, refined PDB, etc.) | Yes | `has_placed_model_from_history` ✓ |
+| `after_program` in programs_requiring_placed | Yes — explicit user request | **Not distinguished — treated as unreliable** ✗ |
+
+### Fix
+
+Added a third placement signal: `has_placed_model_from_after_program`.
+
+New method `_has_placed_model_from_after_program(files, directives)`:
+- Returns True when `after_program` is in `programs_requiring_placed`
+  (`phenix.refine`, `phenix.model_vs_data`, `phenix.polder`, etc.) AND a
+  non-ligand, non-search-model PDB is present
+- Returns False for all other cases (no directive, non-placement program, no PDB)
+
+Added to `build_context()` as `context["has_placed_model_from_after_program"]`.
+
+Added to `placement_uncertain` formula:
+```python
+context["placement_uncertain"] = (
+    not context["has_placed_model_from_history"] and
+    not context["has_placed_model_from_after_program"] and   # NEW
+    not context["cell_mismatch"] and
+    ...
+)
+```
+
+### What is and isn't suppressed
+
+| Directive | Suppresses probe? | Why |
+|-----------|-------------------|-----|
+| `workflow_preferences: {model_is_placed: True}` | No | LLM hallucination risk (S2b) |
+| `stop_conditions: {after_program: phenix.model_vs_data}` | Yes | Explicit program request |
+| `stop_conditions: {after_program: phenix.predict_and_build}` | No | Not in programs_requiring_placed |
+| History: dock_done / refine_done | Yes | Objective evidence |
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/workflow_engine.py` | New `_has_placed_model_from_after_program()` method; `"has_placed_model_from_after_program"` added to `build_context()`; added to `placement_uncertain` formula |
+| `tests/tst_audit_fixes.py` | 3 new S2e tests (110 total) |
+
+---
+
+## Version 112.35 (S2d — skip_map_model_overlap_check for real_space_refine)
+
+Adds `skip_map_model_overlap_check=True` as a permanent default for every
+`phenix.real_space_refine` run.
+
+### Problem
+
+`phenix.real_space_refine` performs a box/symmetry compatibility check before
+refining. When a docked model's CRYST1 record does not match the cryo-EM map
+box (common for crystal-structure templates that have been docked), this check
+raises a hard error and aborts the run before refinement even begins.
+
+### Fix
+
+Added to `knowledge/programs.yaml` under `phenix.real_space_refine`:
+
+```yaml
+defaults:
+  skip_map_model_overlap_check: True
+```
+
+The `defaults` section maps directly to `key=value` arguments appended to every
+command. This flag suppresses the overlap check for all RSR runs — no code
+changes required.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `knowledge/programs.yaml` | `defaults: skip_map_model_overlap_check: True` added to `phenix.real_space_refine` |
+| `tests/tst_audit_fixes.py` | 1 new S2d test (107 total) |
+
+---
+
+## Version 112.34 (S2c — Crystal PDB to search_model Promotion for Cryo-EM Docking)
+
+Fixes the second stage of the apoferritin AIAgent_104 crash. After S2b (v112.33)
+correctly routes unplaced crystal-structure PDBs to `dock_model`, the agent was
+immediately stuck because `phenix.dock_in_map` was blocked by a condition that
+required AlphaFold post-processing output (`processed_model`). This version
+makes the complete path from detection → docking → refinement work.
+
+### Background
+
+The live failure had two stages:
+
+1. **Stage 1 (S2b):** A hallucinated `model_is_placed: True` directive suppressed
+   both the cell-mismatch check and the placement-uncertainty probe, allowing
+   `phenix.real_space_refine` to run directly against an unplaced model →
+   symmetry/box mismatch crash. Fixed in v112.33.
+
+2. **Stage 2 (S2c, this version):** After S2b, detection fires correctly and
+   routes to `dock_model`. But `dock_in_map` requires `has_search_model=True`,
+   and `1aew_A.pdb` (a plain crystal-structure PDB) is categorised as
+   `unclassified_pdb → model` — never `search_model`. Three layered problems
+   block docking from ever running.
+
+### Three problems fixed
+
+**Problem 1 — Wrong YAML condition in `dock_model` phase (`knowledge/workflows.yaml`)**
+
+The `dock_model` phase was designed exclusively for the AlphaFold stepwise path
+(`predict_and_build → process_predicted_model → dock_in_map`). Its condition
+required `processed_model`, which is never set for a plain crystal-structure PDB.
+
+```yaml
+# Before:
+- has: processed_model
+
+# After:
+- has_any: [search_model, processed_model]
+```
+
+`has_any` was already supported by `_check_conditions`; no engine changes needed.
+The AlphaFold path is unaffected: `processed_predicted` bubbles to `search_model`,
+so `has_search_model=True` still holds.
+
+**Problem 2 — File never in `search_model` (`agent/workflow_engine.py`)**
+
+The filename-based categoriser runs at session start with no workflow context. A
+plain PDB like `1aew_A.pdb` cannot be distinguished from a positioned model by
+name alone, so it lands in `unclassified_pdb → model`. At runtime, once context
+confirms docking is needed, the new `_promote_unclassified_for_docking()` method
+copies the file into `files["search_model"]`.
+
+Promotion fires when **all** of these hold:
+- `experiment_type == "cryoem"` (X-ray unaffected)
+- `files["unclassified_pdb"]` non-empty
+- `not has_placed_model_from_history` (no dock/refine in session history)
+- `not has_search_model` (already populated → no-op)
+- Any one of: `placement_uncertain` (Tier 3 pre-probe), `placement_probed AND
+  needs_dock` (Tier 3 post-probe), or `cell_mismatch AND not from_history` (Tier 1)
+
+The method never mutates its input dicts. `files["model"]` and
+`files["unclassified_pdb"]` are left intact.
+
+**Problem 3 — Promoted files discarded before reaching command builder (`agent/workflow_state.py`)**
+
+`get_workflow_state()` returned the promoted `files` dict, but
+`detect_workflow_state()` immediately overwrote `state["categorized_files"]`
+with the original pre-promotion `files`. All downstream consumers (PLAN, BUILD,
+`CommandContext`) read from `workflow_state["categorized_files"]` and would have
+seen an empty `search_model` even after the fix to Problem 2.
+
+```python
+# Before (always overwrites with original):
+state["categorized_files"] = files
+
+# After (respects promoted files when present; falls back only when key absent):
+state["categorized_files"] = state.get("categorized_files", files)
+```
+
+Note: `... or files` would be wrong here — Python treats `{}` as falsy and would
+overwrite a legitimately empty dict. `.get(key, default)` only falls back when the
+key is strictly absent from the dict.
+
+### Data flow after fix
+
+```
+detect_workflow_state()
+  files = _categorize_files()           # unclassified_pdb=[1aew_A.pdb], search_model=[]
+  engine.get_workflow_state()
+      build_context(files, ...)          # placement_uncertain=True OR cell_mismatch=True
+      _promote_unclassified_for_docking  # files["search_model"]=[1aew_A.pdb]
+      detect_phase()                     # dock_model (Tier 1 or Tier 3)
+      get_valid_programs()               # dock_in_map: has_any([search_model✓]) + full_map✓
+      return {"categorized_files": files, ...}   # promoted files in return dict
+  state["categorized_files"] = state.get("categorized_files", files)  # kept ✓
+→ PLAN reads categorized_files["search_model"] = [1aew_A.pdb]
+→ BUILD / CommandContext: find_in_categories("search_model") → 1aew_A.pdb ✓
+→ phenix.dock_in_map 1aew_A.pdb denmod_map.ccp4 resolution=1.9
+```
+
+### Complete cycle trace (apoferritin scenario)
+
+| Cycle | Program | How |
+|-------|---------|-----|
+| 1 | `phenix.mtriage` | Map quality analysis |
+| 2 | `phenix.resolve_cryo_em` | Phase 1.5: half-maps → full map |
+| 3A | `phenix.dock_in_map` | Tier 1: cell mismatch (production, libtbx available); S2c 5c |
+| 3B | `phenix.map_correlations` | Tier 3: no libtbx fallback, probe fires; S2c 5a |
+| 4B | `phenix.dock_in_map` | Post-probe needs_dock; S2c 5b |
+| 4A/5B | `phenix.real_space_refine` | Model docked, ready to refine ✓ |
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `knowledge/workflows.yaml` | `dock_model` `dock_in_map`: `has: processed_model` → `has_any: [search_model, processed_model]` |
+| `agent/workflow_engine.py` | New `_promote_unclassified_for_docking()` method; call site after `build_context`; `"categorized_files"` added to return dict |
+| `agent/workflow_state.py` | Line 1187: `.get("categorized_files", files)` |
+| `agent/graph_nodes.py` | PERCEIVE log for S2c promotion (shows which files were promoted) |
+| `tests/tst_audit_fixes.py` | 6 new S2c tests; missing `__main__` runner block restored; SKIP guards added to 32 pre-existing tests that lacked them (no behaviour change, prevents false failures in non-PHENIX environments) |
+
+### Tests
+
+6 new tests in `tst_audit_fixes.py` (106 total, all passing):
+
+| Test | Verifies |
+|------|----------|
+| `test_s2c_promotion_fires_when_placement_uncertain` | Condition 5a: Tier 3 pre-probe path |
+| `test_s2c_promotion_fires_when_probe_says_needs_dock` | Condition 5b: Tier 3 post-probe path |
+| `test_s2c_promotion_fires_when_cell_mismatch` | Condition 5c: Tier 1 production path |
+| `test_s2c_no_promotion_when_placed_by_history` | Guard: `has_placed_model_from_history` blocks promotion |
+| `test_s2c_no_promotion_for_xray` | Guard: X-ray experiment type blocked |
+| `test_s2c_categorized_files_propagates_through_get_workflow_state` | Structural fix: promoted files reach command builder |
+
+---
+
+## Version 112.33 (S2b — Directive-Immune Placement Uncertainty)
+
+Fixes the first stage of the apoferritin AIAgent_104 crash. The directive
+extractor hallucinated `model_is_placed: True` for "solve the structure",
+which triggered a suppression cascade that bypassed both the Tier 1 cell-mismatch
+check and the Tier 3 placement probe — allowing `phenix.real_space_refine` to
+run directly against an unplaced crystal model in a cryo-EM map.
+
+### Root cause
+
+Two expressions in `workflow_engine.py` used `has_placed_model` (which respects
+the `model_is_placed` directive) where they should have used
+`has_placed_model_from_history` (directive-immune):
+
+1. **S1 short-circuit** — skips the expensive `phenix.show_map_info` subprocess
+   once placement is known. A wrong directive zeroed out `cell_mismatch` before
+   Tier 1 could act on it.
+
+2. **`placement_uncertain` formula** — the Tier 3 probe gate. A wrong directive
+   set this to `False`, suppressing the probe entirely.
+
+### Fix
+
+Both expressions changed from `has_placed_model` to
+`has_placed_model_from_history`. The S1 short-circuit and the probe gate are now
+immune to directive mistakes. Only history/file evidence (dock/refine completed,
+docked PDB present) can suppress these safety checks.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/workflow_engine.py` | S1 short-circuit: `has_placed_model` → `has_placed_model_from_history`; `placement_uncertain` formula: same change |
+
+### Tests
+
+Covered by existing S2 and R2/R3 tests in `tst_audit_fixes.py`.
+
+---
+
+## Version 112.32 (Probe-Based Model Placement Detection)
+
+Adds a three-tier decision framework that determines whether a supplied atomic
+model is already placed in the unit cell / map before choosing between
+refinement and MR/docking.  Previously the agent had a blind spot for generic
+PDB files with no history and no positioning metadata.
+
+### Background
+
+When a user supplies `model.pdb + data.mtz` (or `model.pdb + map.ccp4`) with
+no session history, the agent must decide: is the model already placed (→
+refine) or does it need to be placed first (→ MR / docking)?  The old
+heuristics relied on file subcategory (`positioned`) or history flags —
+neither of which are set for a freshly uploaded PDB.
+
+### Three-tier framework
+
+**Tier 1 — Unit cell comparison (free, instant)**
+- Reads CRYST1 from PDB (`read_pdb_unit_cell`) and cell from MTZ/map
+  (`read_mtz_unit_cell`, `read_map_unit_cells`)
+- Compatible within 5% → falls through to Tier 2
+- Incompatible → model cannot be placed here → immediately routes to MR / docking
+- Fail-safe: any parse failure returns `False` (no mismatch declared)
+
+**Tier 2 — Existing heuristics (`_has_placed_model`)**
+- History flags, file subcategory, user directive
+- Clear evidence → done; still ambiguous → Tier 3
+
+**Tier 3 — Diagnostic probe (one program cycle)**
+- X-ray: runs `phenix.model_vs_data`; R-free < 0.50 → placed
+- Cryo-EM: runs `phenix.map_correlations`; CC > 0.15 → placed
+- Probe never repeats: `placement_probed` flag persists in history
+- Probe result is detected positionally (first occurrence before any
+  refine/dock cycle) with no schema change to history entries
+
+### New module: `agent/placement_checker.py`
+
+Public API:
+
+| Function | Purpose |
+|---|---|
+| `read_pdb_unit_cell(path)` | Parse CRYST1 line → 6-tuple or None |
+| `read_mtz_unit_cell(path)` | iotbx.mtz → 6-tuple, falls back to mtzdump |
+| `read_map_unit_cells(path)` | `phenix.show_map_info` → full-map and present-portion cells |
+| `cells_are_compatible(a, b, tolerance=0.05)` | Fractional comparison; None → True |
+| `check_xray_cell_mismatch(pdb, mtz)` | True only when both readable AND incompatible |
+| `check_cryoem_cell_mismatch(pdb, map)` | True only when both readable AND model matches neither map cell |
+
+### Changes to `agent/workflow_engine.py`
+
+- `build_context()` gains four keys: `cell_mismatch`, `placement_probed`,
+  `placement_probe_result`, `placement_uncertain`
+- `placement_uncertain` is `True` when: model + data present, no history evidence,
+  no directive, not predicted, no cell mismatch, probe not yet run
+- When `placement_probe_result == "placed"`, `build_context` overrides
+  `has_placed_model = True` so normal refine routing takes over
+- `_check_cell_mismatch()` private method wires Tier 1 into context building
+- `_detect_xray_phase()` / `_detect_cryoem_phase()` each gain three routing
+  blocks: Tier 1 mismatch → MR/dock, Tier 3 result → MR/dock or fall-through,
+  Tier 3 uncertain → `probe_placement` phase
+- `probe_placement` added to both `XRAY_STATE_MAP` and `CRYOEM_STATE_MAP`
+
+### Changes to `agent/workflow_state.py`
+
+- `_analyze_history` initialises `placement_probed=False` and
+  `placement_probe_result=None`
+- Post-loop pass detects probe by position: `model_vs_data` or
+  `map_correlations` found before the first refine/dock cycle
+- Only successful cycles contribute (failed runs ignored)
+- `cc_volume` used as fallback if `cc_mask` absent
+
+### Changes to `knowledge/workflows.yaml`
+
+- `probe_placement` phase added to both `xray` and `cryoem` workflows
+  (positioned between `analyze` and `obtain_model`)
+- X-ray probe: `phenix.model_vs_data`, transitions `if_placed → refine`,
+  `if_not_placed → molecular_replacement`
+- Cryo-EM probe: `phenix.map_correlations`, transitions `if_placed → refine`,
+  `if_not_placed → dock_model`
+
+### Changes to `knowledge/programs.yaml`
+
+- `phenix.map_correlations`: added `done_tracking` (was missing entirely —
+  pre-existing bug where running it in the validate phase never set
+  `validation_done`)
+- `phenix.model_vs_data`: added clarifying comment explaining phase-aware
+  override (flag unchanged: `validation_done`)
+
+### New tests (34 across all steps, in `tests/tst_audit_fixes.py`)
+
+| Category | Count | What they verify |
+|---|---|---|
+| R1 | 11 | `placement_checker.py` unit cell parsing and comparison |
+| R2 | 11 | `workflow_engine.build_context()` new keys and `placement_uncertain` logic |
+| R3 | 12 | Phase routing: probe offered, Tier 1 mismatch bypass, probe results route correctly, probe not re-run |
+| R3-extra | 10 | Edge cases: failed probe ignored, CC fallback fields, cryo-EM paths, `build_context` override, `placement_uncertain` clears |
+
+### Directive override protection (S2 fixes — applied after log analysis)
+
+**Root cause identified from runtime log:** the directive extractor LLM set
+`model_is_placed: True` from the advice "solve the structure" — a case the
+prompt explicitly said should NOT trigger that flag. This cascaded:
+`_has_placed_model()` returned True → Tier 1 routing checked
+`cell_mismatch AND NOT has_placed_model` → False (model "appeared placed") →
+skipped docking → `phenix.real_space_refine` failed with
+"Symmetry and/or box (unit cell) dimensions mismatch".
+
+**S2 Fix A — Directive extractor prompt (`agent/directive_extractor.py`)**
+- `model_is_placed` is now labelled HIGH-PRECISION: when in doubt, do NOT set it.
+- Explicit DO NOT list expanded: "solve the structure", "refine this model",
+  "run refinement", "fit a ligand", PDB + cryo-EM map without explicit placement
+  confirmation, generic/ambiguous goals.
+- Added prominent note: a PDB alongside cryo-EM maps always requires docking first.
+
+**S2 Fix B — `has_placed_model_from_history` context key (`agent/workflow_engine.py`)**
+- New `_has_placed_model_from_history()` method — identical logic to
+  `_has_placed_model()` but intentionally ignores directives; returns True only
+  from history flags (`dock_done`, `phaser_done`, `autobuild_done`,
+  `predict_full_done`, `refine_done`) and positioned file subcategories.
+- New `has_placed_model_from_history` key in `build_context()` output.
+  `has_placed_model` remains the directive-inclusive version for program gating.
+
+**S2 Fix C — Tier 1 routing uses `has_placed_model_from_history`**
+- Both `_detect_xray_phase` (MR) and `_detect_cryoem_phase` (dock) changed from
+  `not context["has_placed_model"]` to `not context.get("has_placed_model_from_history")`.
+- A directive claiming the model is placed cannot override a definitive cell-dimension
+  mismatch. Only concrete history evidence (dock ran, phaser ran, etc.) suppresses the check.
+
+**S2 Fix D — S1 short-circuit also uses `has_placed_model_from_history`**
+- The subprocess short-circuit (skip `phenix.show_map_info` after placement resolved)
+  now checks `has_placed_model_from_history` instead of `has_placed_model`.
+  A wrong directive no longer suppresses the check on subsequent cycles either.
+
+### New tests (S2 category, 10 tests in `tests/tst_audit_fixes.py`)
+
+| Test | What it covers |
+|---|---|
+| `s2_has_placed_model_from_history_method_exists` | Method present on WorkflowEngine |
+| `s2_from_history_false_when_only_directive` | Directive cannot fool `_has_placed_model_from_history` |
+| `s2_from_history_true_when_dock_done` | `dock_done` history → True |
+| `s2_context_has_placed_from_history_key` | Key present in `build_context()` output |
+| `s2_directive_model_is_placed_does_not_suppress_cell_mismatch` | Core routing fix: cell_mismatch → dock despite directive |
+| `s2_history_placed_does_suppress_cell_mismatch` | `dock_done` history legitimately suppresses re-dock |
+| `s2_xray_tier1_uses_from_history` | X-ray MR routing: directive cannot block Tier 1 |
+| `s2_short_circuit_uses_from_history_not_directive` | Source-level: short-circuit references correct key |
+| `s2_directive_prompt_stronger_do_not_set` | Prompt contains explicit DO NOT cases |
+| `s2_full_cryoem_stack_routes_to_dock_not_rsr` | **Regression test for the apoferritin bug** |
+
+### Polish fixes (applied after initial implementation review)
+
+Four issues discovered during code review and corrected before release.
+
+**S1 Fix 1 — YAML validator warnings (`agent/yaml_tools.py`)**
+- `if_placed` and `if_not_placed` were not in `valid_transition_fields`, generating
+  4 spurious "unknown transition field" warnings every time `_validate_workflows()` ran.
+- Added both keys to the set.
+
+**S1 Fix 2 — Redundant import (`agent/workflow_state.py`)**
+- The probe detection block used `import re as _re2` inside the loop body.
+  `re` is already imported at module level.
+- Replaced `_re2.search(...)` with `re.search(...)`.
+
+**S1 Fix 3 — Missing local import fallback (`agent/workflow_engine.py`)**
+- `_check_cell_mismatch` only tried the `libtbx.langchain.agent.placement_checker`
+  import path; any environment without the libtbx namespace (tests, local dev) would
+  silently return `False` without trying the bare `agent.placement_checker` path.
+- Added a second `except ImportError` branch matching the pattern used everywhere
+  else in the codebase.
+
+**S1 Fix 4 — Subprocess per cycle (`agent/workflow_engine.py`)**
+- `_check_cell_mismatch` ran `phenix.show_map_info` as a subprocess on every
+  `build_context()` call.  For cryo-EM workflows with many cycles this is wasteful:
+  once placement is resolved the check can never change the outcome.
+- Added a post-processing short-circuit in `build_context`: after the context dict
+  is fully built, if `has_placed_model=True` **or** `placement_probed=True`,
+  `cell_mismatch` is forced to `False`.  The check still runs on the first cycle
+  when placement is genuinely unknown.  The routing conditions
+  (`cell_mismatch AND not has_placed_model`) provide a second safety net.
+
+### New tests (S1 category, 10 tests in `tests/tst_audit_fixes.py`)
+
+| Test | Fix covered |
+|---|---|
+| `s1_yaml_validator_no_if_placed_warnings` | Fix 1: no warnings from probe_placement transitions |
+| `s1_yaml_validator_if_placed_is_in_valid_set` | Fix 1: if_placed/if_not_placed in source |
+| `s1_no_redundant_import_re_in_probe_block` | Fix 2: no _re2 alias, module-level re used |
+| `s1_probe_re_fallback_still_works` | Fix 2: regex fallback still parses r_free from result text |
+| `s1_local_import_fallback_in_check_cell_mismatch` | Fix 3: local path fallback present |
+| `s1_placement_checker_importable_locally` | Fix 3: all public functions importable without libtbx |
+| `s1_cell_mismatch_short_circuits_when_placed` | Fix 4: False when has_placed_model=True |
+| `s1_cell_mismatch_short_circuits_when_probed` | Fix 4: False when placement_probed=True |
+| `s1_cell_mismatch_not_short_circuited_first_cycle` | Fix 4: check active on first cycle |
+| `s1_short_circuit_order_before_probe_override` | Fix 4: short-circuit before probe-result override |
+
+### Files modified
+
+- `agent/placement_checker.py` — **NEW**
+- `agent/workflow_engine.py` — plus S1 fix 3 (import fallback), fix 4 (short-circuit)
+- `agent/workflow_state.py` — plus S1 fix 2 (import cleanup)
+- `agent/yaml_tools.py` — S1 fix 1 (transition field set)
+- `knowledge/workflows.yaml`
+- `knowledge/programs.yaml`
+- `tests/tst_audit_fixes.py`
+
+---
+
 ## Version 112.31 (Session Management, Resume Enhancement, Completed-Workflow Extension)
 
 ### P1: Session management keywords populate `self.result` (Fix 27)
