@@ -1000,6 +1000,154 @@ required regardless of the current cycle count or R-free value.
 
 The validation gate prevents stopping without validation: if R-free is below the success threshold or 3+ refinement cycles have completed, STOP is removed from valid_programs until validation runs.
 
+## Client-Server Update Model
+
+Understanding which code runs where is essential for planning fixes and knowing
+whether a deployed fix reaches existing users without requiring them to reinstall.
+
+### The Core Principle
+
+**Decisions and knowledge → server. Execution and I/O → client.**
+
+The client's job is: receive user input → serialize it → send to server → receive
+a command string → run that command string locally. Everything in between happens
+on the server.
+
+### Execution split diagram
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        CLIENT (user install)                      │
+│                                                                   │
+│  run()  ──→  run_job_on_server_or_locally()                      │
+│                     │                                             │
+│                     ├── run_job_on_server()  ─── serialize ──────┐│
+│                     │   _inject_user_params()  ← RUNS CLIENT-SIDE││
+│                     │   _run_single_cycle()    ← RUNS CLIENT-SIDE││
+│                     │   phenix program execution                  ││
+│                     │   GUI components (wxGUI2/)                  ││
+│                     │   .eff / .pkl file generation               ││
+│                     │                                             ││
+│                     └── run_job_locally()  ─── (has local DB) ───┘│
+└────────────────────────────────────────────────────────────────── │
+                                           HTTP / REST               │
+                                               ▼                     │
+┌──────────────────────────────────────────────────────────────────┐│
+│                        SERVER (your install)                      ││
+│                                                                   ││
+│  run_ai_agent.run()                                               ││
+│     └── LangGraph pipeline                                        ││
+│          ├── PERCEIVE  (graph_nodes.py)                           ││
+│          ├── PLAN      (graph_nodes.py + prompts_hybrid.py)       ││
+│          ├── BUILD     (command_builder.py + program_registry.py) ││
+│          ├── VALIDATE  (graph_nodes.py)                           ││
+│          └── OUTPUT    (graph_nodes.py)                           ││
+│                                                                   ││
+│  Knowledge layer                                                  ││
+│     ├── knowledge/programs.yaml                                   ││
+│     ├── knowledge/workflows.yaml                                  ││
+│     ├── knowledge/prompts_hybrid.py                               ││
+│     └── agent/workflow_engine.py, workflow_state.py, session.py  ││
+└───────────────────────────────────────────────────────────────────┘│
+```
+
+### Always server-side (no user action needed)
+
+**LLM decision-making — the entire graph**
+Any change to how the agent thinks: PERCEIVE, PLAN, BUILD, VALIDATE, ACT nodes,
+workflow routing, phase detection, placement logic, error recovery. Users get
+this immediately.
+
+**Prompts and knowledge**
+`prompts_hybrid.py`, `programs.yaml`, `workflows.yaml`. Any improvement to how
+programs are described to the LLM, new invariants, strategy flag fixes, or stop
+conditions — effective immediately.
+
+**Command construction**
+`command_builder.py`, `program_registry.py`. Changes to passthrough filtering,
+invariant application, file selection — all server-side.
+
+**Session and history logic**
+`session.py`, `workflow_engine.py`, `workflow_state.py`. How history is
+interpreted, context built, S2c promotion, zombie detection — all server-side.
+
+**API schema and transport encoding**
+Changes to the request/response format take effect on the server. The client
+passes opaque encoded strings through without inspecting them.
+
+### Always client-side (requires user to update their install)
+
+**Post-command injection — `_inject_user_params()`**
+This function runs *after* the server returns a command, on the user's machine.
+It can corrupt an otherwise-correct server-built command. This is the most
+dangerous client-side code path because server fixes alone cannot protect against it.
+
+**The local execution loop**
+`_run_single_cycle()`, `_get_command()`, the `for cycle in range(...)` loop,
+`iterate_agent`. These control how commands get run, retried, and logged locally.
+
+**Phenix program execution**
+`_try_native_execution()`, `_run_easy_run()`, subprocess handling, output
+capture. The server does not run phenix programs; the client does.
+
+**GUI components**
+`wxGUI2/Programs/DockInMap.py` and all other `wxGUI2` files. Restoration,
+display widgets, and result panels are entirely client-side.
+
+**The .eff and .pkl generation**
+`generate_program_eff()`, DataManager PHIL mapping. File writing happens on the
+client.
+
+**The top-level branching**
+`run()`, `run_job_on_server_or_locally()`, `run_job_on_server()`. The logic that
+decides whether to call the server at all. A bug here means users might not
+reach the server.
+
+### The gray area: `programs/ai_agent.py`
+
+This single file straddles both worlds. The **top half** (through
+`run_job_on_server()`) runs client-side. The **bottom half** (when the server
+receives `run_on_server=False`) runs server-side. Changes in this file need user
+updates if in the client path, and don't if in the server path.
+
+**Practical rule:** if logic can live in `agent/`, `knowledge/`, or
+`phenix_ai/run_ai_agent.py` rather than in the client path of `ai_agent.py`,
+prefer that location — it turns a required user update into a free server update.
+The `_inject_user_params` bug (S2k) is a textbook example: if post-injection
+filtering were done server-side before returning the command string, no user
+update would ever be needed for that class of bug.
+
+### Practical decision rule for new fixes
+
+When writing a fix, ask: *does this code run before or after
+`run_job_on_server()` is called?*
+
+- **Before** (serialization, call site, result handling) → client-side → user must update
+- **After** (on the machine that received `run_on_server=False`) → server-side → free
+
+### Summary table
+
+| Component | Runs on | Update required? |
+|---|---|---|
+| `knowledge/prompts_hybrid.py` | Server | No |
+| `knowledge/programs.yaml` | Server | No |
+| `knowledge/workflows.yaml` | Server | No |
+| `agent/graph_nodes.py` | Server | No |
+| `agent/command_builder.py` | Server | No |
+| `agent/program_registry.py` | Server | No |
+| `agent/workflow_engine.py` | Server | No |
+| `agent/workflow_state.py` | Server | No |
+| `agent/session.py` | Server | No |
+| `phenix_ai/run_ai_agent.py` | Server | No |
+| `programs/ai_agent.py` — `_inject_user_params()` | **Client** | **Yes** |
+| `programs/ai_agent.py` — `_run_single_cycle()` | **Client** | **Yes** |
+| `programs/ai_agent.py` — `run_job_on_server()` | **Client** | **Yes** |
+| `programs/ai_agent.py` — `run()` top-level | **Client** | **Yes** |
+| `wxGUI2/Programs/DockInMap.py` | **Client** | **Yes** |
+| `phenix_ai/remote_agent.py` | **Client** | **Yes** |
+
+---
+
 ## Extension Points
 
 ### Adding a New Program

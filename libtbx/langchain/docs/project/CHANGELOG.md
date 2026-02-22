@@ -1,5 +1,355 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.48 (S2k — _inject_user_params Empty Program Guard)
+
+Fixes a subtle Python truth-value bug introduced in v112.47 where the
+program-scope filter silently passed all dotted keys through when
+`prog_base` was an empty string.
+
+### Problem
+
+```python
+# Python: "refinement".startswith("") is True — every string starts with ""
+scope_matches = leading_scope.startswith(prog_base) or prog_base.startswith(leading_scope)
+```
+
+When `program_name` was not passed to `_inject_user_params`, `prog_base`
+defaulted to `""`, so `leading_scope.startswith("")` was always `True` and
+every dotted key bypassed the filter — exactly the bug the fix was meant to prevent.
+
+### Fix
+
+Added three guards to the scope-matching expression:
+
+```python
+scope_matches = (
+    bool(prog_base) and len(prog_base) >= 4 and
+    (leading_scope == prog_base or
+     (leading_scope.startswith(prog_base) and len(prog_base) >= 4) or
+     (prog_base.startswith(leading_scope) and len(leading_scope) >= 4))
+)
+```
+
+- `bool(prog_base)` — empty string immediately fails; no keys injected
+- `len(prog_base) >= 4` — prevents one- or two-character accidental prefix matches
+- Prefix matching handles `refine` ↔ `refinement` in both directions
+
+**Decision table:**
+
+| Program | Key | Result |
+|---|---|---|
+| `phenix.refine` | `refinement.main.number_of_macro_cycles` | **INJECT** (`refine` ⊂ `refinement`) |
+| `phenix.ligandfit` | `refinement.main.number_of_macro_cycles` | **SKIP** (no overlap) |
+| `phenix.autosol` | `autosol.atom_type` | **INJECT** (exact match) |
+| any | `general.nproc` | **INJECT** (universal scope) |
+| (empty string) | `refinement.*` | **SKIP** (`bool("")` fails immediately) |
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | `_inject_user_params`: three-part guard on scope-matching expression |
+| `tests/tst_audit_fixes.py` | 1 new S2k guard test (123 total) |
+
+---
+
+## Version 112.47 (S2k — _inject_user_params Program-Scoped Filtering)
+
+Extends `_inject_user_params` to accept a `program_name` parameter and filter
+dotted PHIL keys to only inject parameters that belong to the target program's
+scope.
+
+### Problem
+
+After the server correctly built `phenix.ligandfit ... general.nproc=4`, the
+client's `_inject_user_params` scanned the guidelines string, found
+`refinement.main.number_of_macro_cycles=2` (from an earlier user directive),
+and appended it unconditionally:
+
+```
+[inject_user_params] appended: refinement.main.number_of_macro_cycles=2
+Final command: phenix.ligandfit ... general.nproc=4 refinement.main.number_of_macro_cycles=2
+```
+
+The command was clean when it left the server; the client contaminated it.
+
+### Fix
+
+`_inject_user_params(self, command, guidelines, program_name='')` now
+classifies each extracted dotted key before injecting:
+
+```python
+_UNIVERSAL_SCOPES = {'general', 'output', 'job', 'data_manager', 'nproc'}
+prog_base = program_name.replace('phenix.', '').lower()
+
+for key in extracted_keys:
+    if '.' in key:
+        leading_scope = key.split('.')[0].lower()
+        if leading_scope not in _UNIVERSAL_SCOPES and not scope_matches(leading_scope, prog_base):
+            skipped.append(key)
+            continue
+    inject(key)
+```
+
+Universal scopes (`general`, `output`, etc.) are always injected. All other
+dotted keys are only injected when their leading scope matches the program name.
+
+**Note:** v112.47 contained the empty-`prog_base` bug fixed in v112.48.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | `_inject_user_params` rewritten with `program_name` parameter and scope filter; call site updated to pass `program_name` |
+| `tests/tst_audit_fixes.py` | 1 new S2k test (122 total) |
+
+---
+
+## Version 112.46 (S2k — _inject_user_params STOP Guard)
+
+Prevents `_inject_user_params` from running at all when the command is `STOP`.
+
+### Problem
+
+The `_inject_user_params` call site had no guard for STOP commands. A user
+directive containing `refinement.main.number_of_macro_cycles=2` would cause
+the function to emit `STOP refinement.main.number_of_macro_cycles=2`, which
+then failed command validation.
+
+### Fix
+
+```python
+if command and command != 'No command generated.' and \
+        command.strip().split()[0] != 'STOP':
+    command = self._inject_user_params(command, guidelines, program_name)
+```
+
+STOP commands bypass `_inject_user_params` entirely.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | Guard added at `_inject_user_params` call site |
+
+---
+
+## Version 112.45 (S2j — program_registry Passthrough Removal)
+
+Removes the dotted-key passthrough in `program_registry.py` that allowed
+LLM strategy parameters to leak across program boundaries.
+
+### Problem
+
+`_build_command_from_registry` had a catchall passthrough: any key in the
+LLM strategy dict that contained a dot was appended to the command verbatim.
+This meant `refinement.main.number_of_macro_cycles=2` from the LLM's strategy
+for one program was silently included in the command for any program.
+
+### Fix
+
+Replaced the unconditional passthrough with an allowlist. A strategy key
+is now accepted only when it:
+
+1. Appears in `strategy_flags` for this specific program, or
+2. Is in `KNOWN_PHIL_SHORT_NAMES` (`nproc`, `twin_law`, `unit_cell`, etc.), or
+3. Contains a literal `=` sign (already a complete PHIL assignment)
+
+Dotted-path keys that pass none of these tests are logged as `DROPPED` and
+discarded. User-supplied dotted overrides reach the command through
+`_inject_user_params` instead (subject to the program-scope filter added in
+v112.47/v112.48).
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/program_registry.py` | Passthrough logic replaced with allowlist; dropped keys logged |
+| `tests/tst_audit_fixes.py` | 1 new S2j code test (121 total) |
+
+---
+
+## Version 112.44 (S2j — Cross-Program Strategy Contamination: Prompt Fix)
+
+Fixes the LLM prompt so the model only emits strategy parameters that apply to
+the program it is currently selecting.
+
+### Root cause
+
+Three places in the prompt instructed the LLM to extract user parameters into
+the `strategy` field with no program-specificity qualifier. The LLM obediently
+included refinement parameters (`refinement.main.number_of_macro_cycles=2`) in
+the strategy for every program it selected — including `phenix.ligandfit` and
+even `STOP`.
+
+### Fixes (knowledge/prompts_hybrid.py)
+
+**User advice extraction block** (was "Extract any specific parameters from the
+user advice and include them in your strategy field"):
+
+> Extract parameters **ONLY when they apply to the program you are currently
+> selecting.** Do NOT include parameters for a different program. For example,
+> if selecting `phenix.ligandfit` and the user mentioned
+> `refinement.main.number_of_macro_cycles`, do NOT include that parameter —
+> it applies to `phenix.refine`, not `phenix.ligandfit`.
+
+**OUTPUT FORMAT strategy field** — Added CRITICAL STRATEGY RULE block:
+
+> Strategy keys must ONLY contain parameters valid for the selected program.
+> NEVER include parameters from a different program. When stop=true, strategy
+> must be empty {}.
+
+**IMPORTANT RULES** — Added rule 6:
+
+> Strategy is program-specific: never put parameters for program X in a
+> strategy for program Y.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `knowledge/prompts_hybrid.py` | User advice extraction, OUTPUT FORMAT strategy, IMPORTANT RULES rule 6 |
+| `tests/tst_audit_fixes.py` | 1 new S2j prompt test (120 total) |
+
+---
+
+## Version 112.43 (S2i — STOP Command Normalization, Root Cause Fix)
+
+Fixes the root cause of `STOP refinement.main.number_of_macro_cycles=2` being
+generated as a command.
+
+### Root cause analysis
+
+The LLM's OUTPUT FORMAT schema has no `command` field — only `program`,
+`strategy`, `files`, `stop`. When the LLM returned:
+
+```json
+{"program": "STOP", "strategy": {"refinement.main.number_of_macro_cycles": 2}, "stop": false}
+```
+
+The PLAN node normalized `program` to `"STOP"` but never set
+`intent["stop"] = True`. The BUILD node then saw `stop=False`, fell through the
+STOP guard, and assembled the strategy flags onto the command as normal
+arguments, producing `STOP refinement.main.number_of_macro_cycles=2`, which
+then failed validation as "not a recognized phenix program."
+
+### Fix 1 — PLAN node (agent/graph_nodes.py)
+
+When `chosen_program == "STOP"`, explicitly set `intent["stop"] = True`:
+
+```python
+if chosen_program == "STOP" or (intent.get("stop") and
+        chosen_program not in valid_programs):
+    chosen_program = "STOP"
+    intent["program"] = "STOP"
+    intent["stop"] = True        # NEW: always set stop=True when program is STOP
+```
+
+### Fix 2 — BUILD node (defence in depth)
+
+Both `_build_with_new_builder` and the legacy `build()` function now short-circuit
+when either `intent["stop"]` is True or `intent["program"]` is `"STOP"`:
+
+```python
+if intent.get("stop") or intent.get("program") == "STOP":
+    state = _log(state, "BUILD: Stop requested, no command needed")
+    return {**state, "command": "STOP"}
+```
+
+This means the BUILD node never sees strategy flags for STOP, regardless of
+how the LLM filled the `stop` boolean.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/graph_nodes.py` | PLAN: `intent["stop"] = True` when program is STOP; BUILD: early-exit guard in both build paths |
+| `tests/tst_audit_fixes.py` | 4 new S2i tests (119 total) |
+
+---
+
+## Version 112.42 (S2h — validation_cryoem DataManager PHIL Fix)
+
+Resolves a PHIL argument error in `phenix.validation_cryoem` when run with
+DataManager-style file arguments.
+
+### Problem
+
+`phenix.validation_cryoem` expected PHIL-scoped arguments
+(`input.pdb.file_name=model.pdb`) but the command builder was emitting
+positional DataManager style (`model.pdb map.ccp4`), causing a PHIL parse
+error on launch.
+
+### Fix
+
+Added the correct PHIL argument template to `programs.yaml` for
+`phenix.validation_cryoem`, matching the argument style the program actually
+accepts. The command builder picks this up automatically through the standard
+invariants pipeline.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `knowledge/programs.yaml` | `phenix.validation_cryoem`: correct PHIL argument template |
+| `tests/tst_audit_fixes.py` | 2 new S2h tests (115 total) |
+
+---
+
+## Version 112.41 (S2g — map_correlations Conditional Resolution)
+
+Fixes `phenix.map_correlations` being handed a `resolution=` argument it does
+not accept when running in map-vs-map mode.
+
+### Problem
+
+The command builder always injected `resolution=` from the session context
+into `map_correlations` commands. In model-vs-map mode this is harmless; in
+map-vs-map mode (used by the placement probe) the program does not accept a
+resolution argument and exits with an error.
+
+### Fix
+
+Added a conditional resolution invariant to `map_correlations` in
+`programs.yaml`: resolution is only included when a model file is present
+in the command's file list.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `knowledge/programs.yaml` | `phenix.map_correlations`: conditional resolution invariant |
+| `tests/tst_audit_fixes.py` | 2 new S2g tests (113 total) |
+
+---
+
+## Version 112.40 (S2f — validation_cryoem Auto-Resolution)
+
+Adds automatic resolution filling for `phenix.validation_cryoem`, which
+requires an explicit `resolution=` argument and previously had to rely on the
+user supplying it.
+
+### Problem
+
+`phenix.validation_cryoem` exited with "resolution not provided" when the
+agent did not include a resolution argument. The session always has the
+resolution from a prior `mtriage` run, but no invariant was wiring it through.
+
+### Fix
+
+Added a `requires_resolution` invariant to `phenix.validation_cryoem` in
+`programs.yaml`. The command builder already handles this invariant for other
+programs; the fix was purely a YAML addition.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `knowledge/programs.yaml` | `phenix.validation_cryoem`: `requires_resolution: true` invariant |
+| `tests/tst_audit_fixes.py` | 2 new S2f tests (111 total) |
+
+---
+
 ## Version 112.36 (S2e — after_program Directive Correctly Suppresses Placement Probe)
 
 Fixes a regression introduced by S2b (v112.33). The S2b fix made

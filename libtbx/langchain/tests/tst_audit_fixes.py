@@ -3869,6 +3869,46 @@ def test_s2j_known_short_names_still_pass_through():
     print("  PASSED: nproc still passes through correctly")
 
 
+# =============================================================================
+# CATEGORY S2k — _inject_user_params skips STOP commands
+# =============================================================================
+
+def test_s2k_inject_user_params_skips_stop():
+    """S2k: _inject_user_params call site must guard against command starting with STOP."""
+    print("Test: s2k_inject_user_params_skips_stop")
+    sys.path.insert(0, _PROJECT_ROOT)
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+    with open(ai_agent_path) as f:
+        src = f.read()
+    # The guard must be at the call site, not just inside _inject_user_params
+    assert_true("split()[0] != 'STOP'" in src or 'split()[0] != "STOP"' in src,
+                "_inject_user_params call site must skip when command starts with STOP")
+    print("  PASSED: _inject_user_params call site skips STOP commands")
+
+
+def test_s2k_inject_user_params_filters_wrong_program_scope():
+    """S2k: refinement.main.number_of_macro_cycles must not be injected into ligandfit."""
+    print("Test: s2k_inject_user_params_filters_wrong_program_scope")
+    sys.path.insert(0, _PROJECT_ROOT)
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+    with open(ai_agent_path) as f:
+        src = f.read()
+    assert_true("def _inject_user_params(self, command, guidelines, program_name" in src,
+                "_inject_user_params must accept program_name parameter")
+    assert_true("leading_scope" in src and "_UNIVERSAL_SCOPES" in src,
+                "_inject_user_params must filter by leading_scope against _UNIVERSAL_SCOPES")
+    universal_line = next((l for l in src.split('\n') if '_UNIVERSAL_SCOPES' in l and '=' in l), "")
+    assert_true("refinement" not in universal_line,
+                "'refinement' must not be in _UNIVERSAL_SCOPES")
+    print("  PASSED: _inject_user_params filters dotted keys by program scope")
+
+
 # RUN ALL TESTS
 # =============================================================================
 
