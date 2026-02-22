@@ -3733,6 +3733,74 @@ def test_s2h_validation_cryoem_in_dm_to_data_manager_phil():
     print("  PASSED: validation_cryoem is in dm_to_data_manager_phil whitelist")
 
 
+# =============================================================================
+# CATEGORY S2i — STOP command recognized even with trailing tokens
+# =============================================================================
+
+def test_s2i_stop_alone_is_valid_command():
+    """S2i: bare 'STOP' passes _is_valid_command."""
+    print("Test: s2i_stop_alone_is_valid_command")
+    sys.path.insert(0, _PROJECT_ROOT)
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+    with open(ai_agent_path) as f:
+        src = f.read()
+    assert_true('program == "STOP"' in src or "program == 'STOP'" in src,
+                "_is_valid_command must explicitly allow STOP as first token")
+    print("  PASSED: STOP is whitelisted in _is_valid_command")
+
+
+def test_s2i_stop_with_trailing_tokens_detected():
+    """S2i: 'STOP <args>' is recognized as a STOP command (first-token check)."""
+    print("Test: s2i_stop_with_trailing_tokens_detected")
+    sys.path.insert(0, _PROJECT_ROOT)
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+    with open(ai_agent_path) as f:
+        src = f.read()
+    assert_true('.split()[0] == "STOP"' in src or ".split()[0] == 'STOP'" in src,
+                "STOP detection must use first-token check (.split()[0]) "
+                "not exact-match to handle 'STOP <args>'")
+    print("  PASSED: STOP detection uses first-token check for trailing-args case")
+
+
+def test_s2i_plan_sets_stop_true_when_program_is_stop():
+    """S2i root cause: PLAN must set intent['stop']=True when normalizing to STOP,
+    so BUILD short-circuits and never assembles 'STOP <strategy_flags>'."""
+    print("Test: s2i_plan_sets_stop_true_when_program_is_stop")
+    sys.path.insert(0, _PROJECT_ROOT)
+    graph_path = os.path.join(_PROJECT_ROOT, "agent", "graph_nodes.py")
+    if not os.path.isfile(graph_path):
+        print("  SKIP (graph_nodes.py not found)")
+        return
+    with open(graph_path) as f:
+        src = f.read()
+    # The fix: after intent["program"] = "STOP", also set intent["stop"] = True
+    assert_true('intent["stop"] = True' in src or "intent['stop'] = True" in src,
+                "PLAN must set intent['stop']=True when normalizing program to STOP")
+    print("  PASSED: PLAN sets intent['stop']=True when normalizing to STOP")
+
+
+def test_s2i_build_short_circuits_on_program_stop():
+    """S2i root cause: BUILD must short-circuit on program=='STOP' as well as stop==True."""
+    print("Test: s2i_build_short_circuits_on_program_stop")
+    sys.path.insert(0, _PROJECT_ROOT)
+    graph_path = os.path.join(_PROJECT_ROOT, "agent", "graph_nodes.py")
+    if not os.path.isfile(graph_path):
+        print("  SKIP (graph_nodes.py not found)")
+        return
+    with open(graph_path) as f:
+        src = f.read()
+    assert_true('intent.get("program") == "STOP"' in src or
+                "intent.get('program') == 'STOP'" in src,
+                "BUILD must check program=='STOP' in addition to stop==True")
+    print("  PASSED: BUILD short-circuits on program=='STOP'")
+
+
 # RUN ALL TESTS
 # =============================================================================
 

@@ -1480,6 +1480,7 @@ def plan(state):
         if chosen_program == "STOP" or (intent.get("stop") and chosen_program not in valid_programs):
             chosen_program = "STOP"
             intent["program"] = "STOP"
+            intent["stop"] = True  # Always set stop=True when program is STOP so BUILD short-circuits
         elif intent.get("stop") and chosen_program in valid_programs and chosen_program != "STOP":
             # LLM chose a valid program but also set stop=true
             # Trust the program choice - the stop might have been set for "after this program"
@@ -1913,7 +1914,7 @@ def _build_with_new_builder(state):
     """
     intent = state.get("intent", {})
 
-    if intent.get("stop"):
+    if intent.get("stop") or intent.get("program") == "STOP":
         state = _log(state, "BUILD: Stop requested, no command needed")
         return {**state, "command": "STOP"}
 
@@ -1922,8 +1923,6 @@ def _build_with_new_builder(state):
 
     # Get the CommandBuilder and CommandContext classes
     CommandBuilder, CommandContext = _get_command_builder()
-
-    # Sanitize LLM strategy
     raw_strategy = intent.get("strategy", {})
     if not isinstance(raw_strategy, dict):
         state = _log(state, "BUILD: LLM returned invalid strategy type, using empty dict")
@@ -2155,7 +2154,7 @@ def build(state):
 
     intent = state.get("intent", {})
 
-    if intent.get("stop"):
+    if intent.get("stop") or intent.get("program") == "STOP":
         state = _log(state, "BUILD: Stop requested, no command needed")
         return {**state, "command": "STOP"}
 

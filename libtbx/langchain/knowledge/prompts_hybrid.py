@@ -227,6 +227,14 @@ You must output a SINGLE JSON object matching this schema:
     "stop_reason": null
 }
 
+**CRITICAL STRATEGY RULE**: Strategy keys must ONLY contain parameters that are valid for
+the selected program. NEVER include parameters from a different program:
+- Do NOT put refinement.* parameters in a ligandfit or dock_in_map strategy
+- Do NOT put autosol.* parameters in a refine strategy
+- Do NOT put any parameters in a STOP response (strategy must be empty when stop=true)
+If you want to remember a parameter for a future cycle, omit it now — the agent will
+reconstruct it when the correct program runs.
+
 ### PROGRAM REFERENCE
 
 **phenix.xtriage** - Data quality analysis (X-ray)
@@ -402,6 +410,7 @@ Set "stop": true when:
 3. **Don't repeat failing commands** - change strategy or try different program
 4. **Always set resolution for predict_and_build** if building
 5. **Files must exist** - only use files from the inventory
+6. **Strategy is program-specific** - never put parameters for program X in a strategy for program Y; when stop=true, strategy must be empty
 """
 
 
@@ -862,13 +871,13 @@ You must adapt:
 ### USER ADVICE (FOLLOW THIS)
 %s
 
-**IMPORTANT**: Extract any specific parameters from the user advice above (wavelength, atom type,
-resolution, number of sites, etc.) and include them in your "strategy" field. For example:
-- If user mentions wavelength 0.9792 → add to strategy: "wavelength": 0.9792
-- If user mentions Se atoms → add to strategy: "atom_type": "Se"
-- If user mentions additional S atoms → add to strategy: "additional_atom_types": "S"
-- If user mentions 5 sites → add to strategy: "sites": 5
-- If user mentions resolution 2.5 Å → add to strategy: "resolution": 2.5
+**IMPORTANT**: Extract parameters from the user advice above ONLY when they apply to the
+program you are currently selecting. Do NOT carry over parameters that belong to a different
+program. For example:
+- If user mentions wavelength 0.9792 AND you selected phenix.autosol → add to strategy: "wavelength": 0.9792
+- If user mentions Se atoms AND you selected phenix.autosol → add to strategy: "atom_type": "Se"
+- If user mentions resolution 2.5 Å AND the selected program uses resolution → add to strategy: "resolution": 2.5
+- If user mentions refinement parameters (e.g. number_of_macro_cycles) AND you selected phenix.ligandfit → DO NOT add them; they don't apply
 
 """ % escape_percent(user_advice)
 
