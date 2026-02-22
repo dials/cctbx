@@ -93,6 +93,10 @@ def build_session_state(session_info, session_resolution=None):
         if session_info.get("advice_changed"):
             session_state["advice_changed"] = True
 
+        # S2L: client-side model CRYST1 cell for server-side Tier 1 mismatch check
+        if session_info.get("unplaced_model_cell"):
+            session_state["unplaced_model_cell"] = session_info["unplaced_model_cell"]
+
     return session_state
 
 

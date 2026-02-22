@@ -1,5 +1,142 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.52 (S2L — Probe Crash Interpreted + Client Cell Transport)
+
+Fixes the apoferritin AIAgent_165 scenario where the placement probe
+(`phenix.map_correlations`) crashed with "model is entirely outside map",
+ran a second time with the same result, then caused the agent to quit —
+never routing to `dock_in_map`.
+
+### Root cause analysis — three independent failures
+
+**Failure 1 — Tier 1 (cell mismatch) is non-functional in production.**
+`_check_cell_mismatch` calls `check_cryoem_cell_mismatch(pdb_path, map_path)`
+which immediately calls `os.path.exists(pdb_path)`. On the server, `pdb_path`
+is `/Users/terwill/.../1aew_A.pdb` — a client-side path. `os.path.exists`
+returns `False`. Function returns `False` (fail-safe). The 4× unit cell
+mismatch (184 Å F432 crystal vs 32.5 × 39.65 × 36.4 Å P1 sub-box) is never
+detected. **Tier 1 has been silently broken for all RemoteAgent users.**
+
+**Failure 2 — The crash itself carries the answer, but the code discards it.**
+The probe runs correctly. `map_correlations` raises:
+
+```
+Sorry: Stopping as model is entirely outside map and wrapping=False
+```
+
+This is a stronger signal than a low CC — it's categorical proof the model
+is not placed. But `_analyze_history` has this at the top of the probe loop:
+
+```python
+if _is_failed_result(_result):
+    continue   # Ignore failed cycles for probe detection
+```
+
+The entire entry is discarded. `placement_probed` stays `False`.
+
+**Failure 3 — The loop.**
+With `placement_probed=False`, `placement_uncertain` is still `True` on the
+next cycle. The agent runs `map_correlations` again → same crash → same discard
+→ eventually the LLM consecutive-failure counter trips and the run stops with
+no docking ever attempted.
+
+### Fix 1 — Probe crash detection in `_analyze_history` (workflow_state.py)
+
+Before the `continue`, inspect failed `map_correlations` entries that occurred
+before any refine/dock cycle:
+
+```python
+if _is_failed_result(_result):
+    if "map_correlations" in _ecomb and not _seen_refine_or_dock:
+        _rl = (_result or "").lower()
+        _outside_signals = [
+            "entirely outside map", "outside map", "model is outside",
+            "model entirely outside", "stopping as model",
+        ]
+        if any(s in _rl for s in _outside_signals):
+            # Hard evidence: model is not in the map at all
+            info["placement_probed"] = True
+            info["placement_probe_result"] = "needs_dock"
+        elif not info.get("placement_probed"):
+            # Unknown failure — prevent infinite probe retry
+            info["placement_probed"] = True
+            # Leave placement_probe_result as None (inconclusive)
+    continue
+```
+
+Three outcomes:
+- **"outside map" crash** → `placement_probed=True, result="needs_dock"` → routes to `dock_model`
+- **Other crash** → `placement_probed=True, result=None` → inconclusive, falls through to `obtain_model`
+- **Second failed probe** → `placement_probed` already set, no overwrite; guard on `not info.get("placement_probed")` prevents the inconclusive case from clobbering an earlier definitive result
+
+### Fix 2 — Client-side model cell transport (S2L-b)
+
+The client reads the model's CRYST1 cell (which it has access to) and transmits
+it in `session_state["unplaced_model_cell"]`. The server uses this pre-read cell
+in `_check_cell_mismatch` instead of trying to open the file:
+
+**Client side** (`programs/ai_agent.py`): Before assembling `session_info`,
+read the CRYST1 cell from the first unplaced PDB in `active_files` and add it
+to `session_info["unplaced_model_cell"]`. Only populated when placement hasn't
+been confirmed by history (no `dock_done`, no `refine_done`).
+
+**Transport** (`agent/api_client.py`): `build_session_state` passes
+`unplaced_model_cell` through to `session_state`.
+
+**Server receipt** (`phenix_ai/run_ai_agent.py`): Maps `unplaced_model_cell`
+from `session_state` into `session_info`.
+
+**Server use** (`agent/workflow_engine.py`): `build_context` passes
+`session_info` down to `_check_cell_mismatch(files, model_cell=...)`.
+`_check_cell_mismatch` uses the pre-read cell for comparison against the map
+(which the server **can** read — it was just created by `resolve_cryo_em`
+on the server). Tier 1 now fires correctly in production:
+
+```
+model cell  = (184, 184, 184, 90, 90, 90)   # F432 crystal
+map cell    = (32.5, 39.65, 36.4, 90, 90, 90)  # P1 sub-box
+→ mismatch > 5% on all three axes → cell_mismatch=True → dock_model
+```
+
+### Also fixed: `optimized_full_map` not checked by `_check_cell_mismatch`
+
+After `resolve_cryo_em`, the output `denmod_map.ccp4` is categorized as
+`optimized_full_map` (not `full_map`). The original code only checked
+`files.get("full_map") or files.get("map")`. Added `optimized_full_map`
+as a priority-2 fallback so the freshly-generated density-modified map is
+always found.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/workflow_state.py` | `_analyze_history`: probe-crash handler before `continue`; `detect_workflow_state` gains `session_info` parameter |
+| `agent/workflow_engine.py` | `_check_cell_mismatch` rewritten with `model_cell` parameter and S2L fast-path; `optimized_full_map` added to map search; `build_context` accepts `session_info`; `get_workflow_state` accepts `session_info` |
+| `agent/api_client.py` | `build_session_state` passes `unplaced_model_cell` through |
+| `phenix_ai/run_ai_agent.py` | Maps `unplaced_model_cell` from `session_state` → `session_info` |
+| `programs/ai_agent.py` | Reads CRYST1 cell client-side, adds to `session_info["unplaced_model_cell"]` |
+| `agent/graph_nodes.py` | Passes `session_info=state.get("session_info",{})` to `detect_workflow_state` |
+| `tests/tst_audit_fixes.py` | 8 new S2L tests (131 total) |
+
+### Corrected cycle trace for AIAgent_165
+
+| Cycle | Program | Why (after fix) |
+|-------|---------|-----------------|
+| 1 | `phenix.mtriage` | Map analysis |
+| 2 | `phenix.resolve_cryo_em` | Half-maps → denmod_map |
+| **3** | **`phenix.dock_in_map`** | **Tier 1: cell_mismatch=True (client cell + server map) → dock_model** |
+| 4 | `phenix.real_space_refine` | Model docked, refine |
+
+Without the fix, cycle 3 ran `map_correlations` twice (probe crash not interpreted), then stopped.
+
+### Note on test coverage
+
+Tests 5 and 6 (api_client and workflow_engine) are marked SKIP in non-PHENIX
+environments because they require the production libtbx import path. They pass
+fully in a PHENIX installation. Tests 1–4, 7–8 pass in all environments.
+
+---
+
 ## Version 112.48 (S2k — _inject_user_params Empty Program Guard)
 
 Fixes a subtle Python truth-value bug introduced in v112.47 where the

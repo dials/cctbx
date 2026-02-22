@@ -590,7 +590,8 @@ def perceive(state):
         analysis=analysis,
         maximum_automation=state.get("maximum_automation", True),
         use_yaml_engine=use_yaml_workflow,
-        directives=state.get("directives", {})
+        directives=state.get("directives", {}),
+        session_info=state.get("session_info", {}),
     )
 
     # Q1: When the user provides new advice on resume and the workflow is

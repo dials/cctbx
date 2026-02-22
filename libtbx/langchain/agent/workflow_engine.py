@@ -51,7 +51,7 @@ class WorkflowEngine:
     # CONTEXT BUILDING
     # =========================================================================
 
-    def build_context(self, files, history_info, analysis=None, directives=None):
+    def build_context(self, files, history_info, analysis=None, directives=None, session_info=None):
         """
         Build a context dict from files, history, and analysis.
 
@@ -147,7 +147,9 @@ class WorkflowEngine:
             # Note: short-circuit against history_info is applied after the
             # dict is fully built (see below) — context self-reference is not
             # possible inside the literal.
-            "cell_mismatch": self._check_cell_mismatch(files),
+            "cell_mismatch": self._check_cell_mismatch(
+                files,
+                model_cell=(session_info or {}).get("unplaced_model_cell")),
 
             # Tier 3: diagnostic probe results (set by history after
             # phenix.model_vs_data / phenix.map_correlations ran as a probe).
@@ -284,7 +286,7 @@ class WorkflowEngine:
         """
         return bool(files.get("search_model"))
 
-    def _check_cell_mismatch(self, files):
+    def _check_cell_mismatch(self, files, model_cell=None):
         """
         Tier 1 placement check: compare model and data unit cells.
 
@@ -298,6 +300,10 @@ class WorkflowEngine:
 
         Args:
             files (dict): Categorised files dict from the agent.
+            model_cell (list|tuple|None): Pre-read CRYST1 cell transmitted from
+                the client (S2L).  When supplied, skips opening the PDB file —
+                which would always fail on the server because the file lives on
+                the client filesystem and os.path.exists() returns False there.
 
         Returns:
             bool: True → definitive mismatch; False → compatible or unknown.
@@ -306,16 +312,62 @@ class WorkflowEngine:
             from libtbx.langchain.agent.placement_checker import (
                 check_xray_cell_mismatch,
                 check_cryoem_cell_mismatch,
+                cells_are_compatible,
+                read_mtz_unit_cell,
+                read_map_unit_cells,
             )
         except ImportError:
             try:
                 from agent.placement_checker import (
                     check_xray_cell_mismatch,
                     check_cryoem_cell_mismatch,
+                    cells_are_compatible,
+                    read_mtz_unit_cell,
+                    read_map_unit_cells,
                 )
             except ImportError:
                 return False   # Module not available — fail-safe
 
+        # ── S2L: use pre-read cell from client when available ────────────────
+        # The server cannot open files that only exist on the client filesystem.
+        # When the client transmitted unplaced_model_cell in session_info, use it
+        # directly for comparison rather than trying to open the PDB file.
+        if model_cell is not None:
+            try:
+                _mc = tuple(float(v) for v in model_cell)
+            except (TypeError, ValueError):
+                _mc = None
+
+            if _mc is not None:
+                # X-ray: compare against MTZ (MTZ lives on the server in LocalAgent
+                # mode, or the comparison is run locally for RemoteAgent via the
+                # client-side CRYST1 cell here)
+                mtz_files = files.get("data_mtz", [])
+                if mtz_files:
+                    mtz_cell = read_mtz_unit_cell(mtz_files[0])
+                    if mtz_cell is not None:
+                        return not cells_are_compatible(_mc, mtz_cell)
+                    return False   # MTZ unreadable → fail-safe
+
+                # Cryo-EM: compare against map file (map is server-accessible
+                # because it was just created by resolve_cryo_em on the server,
+                # or transmitted as a path the server can reach)
+                map_files = (files.get("full_map", []) or
+                             files.get("optimized_full_map", []) or
+                             files.get("map", []))
+                if map_files:
+                    full_cell, present_cell = read_map_unit_cells(map_files[0])
+                    if full_cell is None and present_cell is None:
+                        return False   # Map unreadable → fail-safe
+                    if full_cell is not None and cells_are_compatible(_mc, full_cell):
+                        return False
+                    if present_cell is not None and cells_are_compatible(_mc, present_cell):
+                        return False
+                    if full_cell is not None or present_cell is not None:
+                        return True  # At least one cell readable; model matched neither
+                return False
+
+        # ── Fallback: read cell from file (works for LocalAgent / test mode) ─
         # Get the first model file (generic PDB, not a positioned subcategory)
         model_files = files.get("model", [])
         pdb_path = model_files[0] if model_files else None
@@ -327,8 +379,10 @@ class WorkflowEngine:
         if mtz_files:
             return check_xray_cell_mismatch(pdb_path, mtz_files[0])
 
-        # Cryo-EM: compare against map (full_map preferred, fall back to map)
-        map_files = files.get("full_map", []) or files.get("map", [])
+        # Cryo-EM: compare against map (full_map preferred, then optimized, then map)
+        map_files = (files.get("full_map", []) or
+                     files.get("optimized_full_map", []) or
+                     files.get("map", []))
         if map_files:
             return check_cryoem_cell_mismatch(pdb_path, map_files[0])
 
@@ -1805,7 +1859,7 @@ class WorkflowEngine:
     # =========================================================================
 
     def get_workflow_state(self, experiment_type, files, history_info, analysis=None,
-                           directives=None, maximum_automation=True):
+                           directives=None, maximum_automation=True, session_info=None):
         """
         Get complete workflow state (compatible with workflow_state.py output).
 
@@ -1816,11 +1870,14 @@ class WorkflowEngine:
             analysis: Current log analysis
             directives: Optional user directives dict
             maximum_automation: If False, use stepwise path (process_predicted -> phaser)
+            session_info: Optional session state dict; used for client-supplied
+                          data that the server cannot read directly (e.g.
+                          unplaced_model_cell — CRYST1 from the client-side PDB)
 
         Returns:
             dict: Workflow state compatible with existing code
         """
-        context = self.build_context(files, history_info, analysis, directives)
+        context = self.build_context(files, history_info, analysis, directives, session_info)
 
         # Add automation_path to context for program filtering
         context["automation_path"] = "automated" if maximum_automation else "stepwise"

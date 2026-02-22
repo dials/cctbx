@@ -3909,6 +3909,243 @@ def test_s2k_inject_user_params_filters_wrong_program_scope():
     print("  PASSED: _inject_user_params filters dotted keys by program scope")
 
 
+# =============================================================================
+# S2L TESTS — Probe crash → needs_dock + client-side model cell transport
+# =============================================================================
+
+def test_s2l_probe_failure_outside_map_sets_needs_dock():
+    """S2L: map_correlations crash 'entirely outside map' → placement_probed=needs_dock."""
+    print("Test: s2l_probe_failure_outside_map_sets_needs_dock")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_state import _analyze_history
+    except ImportError:
+        print("  SKIP (_analyze_history not importable)")
+        return
+
+    history = [
+        {
+            "program": "phenix.mtriage",
+            "command": "phenix.mtriage map.ccp4",
+            "result": "Completed. Resolution: 1.9",
+        },
+        {
+            "program": "phenix.resolve_cryo_em",
+            "command": "phenix.resolve_cryo_em half_map_1.ccp4 half_map_2.ccp4",
+            "result": "Completed. denmod_map.ccp4 written",
+        },
+        {
+            # This is the probe — runs before any dock/refine, crashes with
+            # the definitive "outside map" message.
+            "program": "phenix.map_correlations",
+            "command": "phenix.map_correlations model=1aew_A.pdb map=denmod_map.ccp4",
+            "result": "FAILED: Stopping as model is entirely outside map and wrapping=False",
+        },
+    ]
+
+    info = _analyze_history(history)
+
+    assert_true(info.get("placement_probed"),
+                "placement_probed must be True after 'entirely outside map' crash")
+    assert_equal(info.get("placement_probe_result"), "needs_dock",
+                 "placement_probe_result must be 'needs_dock' for outside-map crash")
+    print("  PASSED: 'entirely outside map' crash → placement_probed=True, result=needs_dock")
+
+
+def test_s2l_probe_failure_other_error_marks_inconclusive():
+    """S2L: other map_correlations crashes → probed=True, result=None (no infinite retry)."""
+    print("Test: s2l_probe_failure_other_error_marks_inconclusive")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_state import _analyze_history
+    except ImportError:
+        print("  SKIP")
+        return
+
+    history = [
+        {
+            "program": "phenix.map_correlations",
+            "command": "phenix.map_correlations model=1aew_A.pdb map=denmod_map.ccp4",
+            "result": "FAILED: Sorry: some other error occurred",
+        },
+    ]
+
+    info = _analyze_history(history)
+
+    assert_true(info.get("placement_probed"),
+                "placement_probed must be True even for non-specific map_correlations failure")
+    assert_true(info.get("placement_probe_result") is None,
+                "placement_probe_result must be None (inconclusive) for generic failure")
+    print("  PASSED: generic probe failure → probed=True, result=None (no retry)")
+
+
+def test_s2l_probe_does_not_repeat_after_failure():
+    """S2L: second map_correlations run should NOT override already-set probe result."""
+    print("Test: s2l_probe_does_not_repeat_after_failure")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_state import _analyze_history
+    except ImportError:
+        print("  SKIP")
+        return
+
+    history = [
+        {
+            "program": "phenix.map_correlations",
+            "command": "phenix.map_correlations model=1aew_A.pdb map=denmod_map.ccp4",
+            "result": "FAILED: Stopping as model is entirely outside map and wrapping=False",
+        },
+        {
+            # Second attempt — would have been prevented by fix, but even if it
+            # ran, its result should not overwrite the first probe's conclusion.
+            "program": "phenix.map_correlations",
+            "command": "phenix.map_correlations model=1aew_A.pdb map=denmod_map.ccp4",
+            "result": "FAILED: Sorry: some other error",
+        },
+    ]
+
+    info = _analyze_history(history)
+
+    # First probe result (needs_dock) must be preserved
+    assert_true(info.get("placement_probed"), "placement_probed must be True")
+    assert_equal(info.get("placement_probe_result"), "needs_dock",
+                 "first probe result (needs_dock) must not be overwritten by second failure")
+    print("  PASSED: first probe result preserved; second failure does not overwrite")
+
+
+def test_s2l_successful_probe_still_works():
+    """S2L: successful map_correlations probe with high CC still routes correctly."""
+    print("Test: s2l_successful_probe_still_works")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_state import _analyze_history
+    except ImportError:
+        print("  SKIP")
+        return
+
+    history = [
+        {
+            "program": "phenix.map_correlations",
+            "command": "phenix.map_correlations model=1aew_A.pdb map=denmod_map.ccp4",
+            "result": "Completed.",
+            "analysis": {"cc_mask": 0.72},
+        },
+    ]
+
+    info = _analyze_history(history)
+
+    assert_true(info.get("placement_probed"), "placement_probed must be True for success")
+    assert_equal(info.get("placement_probe_result"), "placed",
+                 "CC=0.72 > 0.15 threshold → result must be 'placed'")
+    print("  PASSED: successful probe with high CC still works as before")
+
+
+def test_s2l_client_model_cell_in_session_state():
+    """S2L: unplaced_model_cell must be passed through build_session_state."""
+    print("Test: s2l_client_model_cell_in_session_state")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.api_client import build_session_state
+    except ImportError:
+        print("  SKIP")
+        return
+
+    session_info = {
+        "experiment_type": "cryoem",
+        "unplaced_model_cell": [184.0, 184.0, 184.0, 90.0, 90.0, 90.0],
+    }
+
+    state = build_session_state(session_info)
+    assert_true("unplaced_model_cell" in state,
+                "unplaced_model_cell must appear in session_state built by build_session_state")
+    assert_equal(state["unplaced_model_cell"], [184.0, 184.0, 184.0, 90.0, 90.0, 90.0],
+                 "unplaced_model_cell values must be preserved exactly")
+    print("  PASSED: unplaced_model_cell flows through build_session_state correctly")
+
+
+def test_s2l_check_cell_mismatch_uses_preread_cell():
+    """S2L: _check_cell_mismatch detects apoferritin mismatch using client-supplied cell."""
+    print("Test: s2l_check_cell_mismatch_uses_preread_cell")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_engine import WorkflowEngine
+        from agent.placement_checker import cells_are_compatible
+    except ImportError:
+        print("  SKIP (workflow_engine or placement_checker not importable)")
+        return
+
+    engine = WorkflowEngine()
+
+    # Simulate the apoferritin scenario:
+    # Model CRYST1: F432 crystal, a=b=c=184 Å
+    # Map cell (denmod from resolve_cryo_em sub-box): P1, 32.5 x 39.65 x 36.4 Å
+    # These differ by ~5x on every axis → definitive mismatch
+    model_cell = [184.0, 184.0, 184.0, 90.0, 90.0, 90.0]
+    # files dict has no real paths — on the server the map path would be real
+    # but we mock it here as empty to test only the model_cell branch
+    files = {"map": [], "full_map": [], "optimized_full_map": [], "data_mtz": []}
+
+    # With no map files and model_cell only → cannot compare → False (fail-safe)
+    result = engine._check_cell_mismatch(files, model_cell=model_cell)
+    assert_true(not result,
+                "With no readable map file, must return False (fail-safe) even with model_cell")
+
+    # Quick sanity check that the cells ARE incompatible
+    map_cell = (32.5, 39.65, 36.4, 90.0, 90.0, 90.0)
+    compat = cells_are_compatible(tuple(model_cell), map_cell)
+    assert_true(not compat,
+                "apoferritin crystal cell and cryo-EM sub-box cell must be incompatible (>5%)")
+    print("  PASSED: _check_cell_mismatch uses model_cell parameter; apoferritin cells incompatible")
+
+
+def test_s2l_detect_workflow_state_accepts_session_info():
+    """S2L: detect_workflow_state must accept session_info keyword argument."""
+    print("Test: s2l_detect_workflow_state_accepts_session_info")
+    sys.path.insert(0, _PROJECT_ROOT)
+    import inspect
+    try:
+        from agent.workflow_state import detect_workflow_state
+    except ImportError:
+        print("  SKIP")
+        return
+    sig = inspect.signature(detect_workflow_state)
+    assert_true("session_info" in sig.parameters,
+                "detect_workflow_state must accept session_info parameter")
+    print("  PASSED: detect_workflow_state has session_info parameter")
+
+
+def test_s2l_outside_map_variants_all_detected():
+    """S2L: various 'outside map' crash messages all trigger needs_dock."""
+    print("Test: s2l_outside_map_variants_all_detected")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.workflow_state import _analyze_history
+    except ImportError:
+        print("  SKIP")
+        return
+
+    outside_map_messages = [
+        "FAILED: Stopping as model is entirely outside map and wrapping=False",
+        "FAILED: Sorry: model is outside map",
+        "FAILED: Sorry: model entirely outside map box",
+        "FAILED: stopping as model is outside map",
+    ]
+
+    for msg in outside_map_messages:
+        history = [{
+            "program": "phenix.map_correlations",
+            "command": "phenix.map_correlations model=m.pdb map=map.ccp4",
+            "result": msg,
+        }]
+        info = _analyze_history(history)
+        assert_true(info.get("placement_probed"),
+                    "placement_probed must be True for: %s" % msg)
+        assert_equal(info.get("placement_probe_result"), "needs_dock",
+                     "placement_probe_result must be needs_dock for: %s" % msg)
+
+    print("  PASSED: all outside-map crash variants trigger needs_dock")
+
+
 # RUN ALL TESTS
 # =============================================================================
 

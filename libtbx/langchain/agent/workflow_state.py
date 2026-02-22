@@ -939,7 +939,37 @@ def _analyze_history(history):
             _result = _entry.get("result", "")
 
             if _is_failed_result(_result):
-                continue   # Ignore failed cycles for probe detection
+                # ── S2L: probe failures that carry placement information ──────
+                # A failed map_correlations run before any refine/dock is the
+                # placement probe.  Some crashes are themselves definitive
+                # answers — extract the signal before discarding the entry.
+                #
+                # "entirely outside map": model coordinates are completely
+                #   outside the map box → model is definitively not placed →
+                #   needs_dock.
+                #
+                # Any other failure: mark placement_probed=True with result=None
+                #   (inconclusive) so the probe never runs a third time.
+                #   Routing: placement_uncertain becomes False, falls through to
+                #   obtain_model → predict/dock fallback.
+                if "map_correlations" in _ecomb and not _seen_refine_or_dock:
+                    _rl = (_result or "").lower()
+                    _outside_signals = [
+                        "entirely outside map",
+                        "outside map",
+                        "model is outside",
+                        "model entirely outside",
+                        "stopping as model",
+                    ]
+                    if any(s in _rl for s in _outside_signals):
+                        # Hard evidence: model is not in the map at all
+                        info["placement_probed"] = True
+                        info["placement_probe_result"] = "needs_dock"
+                    elif not info.get("placement_probed"):
+                        # Unknown failure — prevent infinite probe retry
+                        info["placement_probed"] = True
+                        # Leave placement_probe_result as None (inconclusive)
+                continue   # Ignore failed cycles for all other probe detection
 
             # Once refinement or docking has run, anything after is validation
             if ("refine" in _ecomb and "real_space" not in _ecomb and
@@ -1132,7 +1162,7 @@ def _clear_zombie_done_flags(history_info, available_files, log_func=None):
 
 
 def detect_workflow_state(history, available_files, analysis=None, maximum_automation=True,
-                         use_yaml_engine=True, directives=None):
+                         use_yaml_engine=True, directives=None, session_info=None):
     """
     Determine current workflow state based on history and files.
 
@@ -1182,7 +1212,7 @@ def detect_workflow_state(history, available_files, analysis=None, maximum_autom
 
             engine = WorkflowEngine()
             state = engine.get_workflow_state(experiment_type, files, history_info, analysis,
-                                             directives, maximum_automation)
+                                             directives, maximum_automation, session_info)
 
             state["categorized_files"] = state.get("categorized_files", files)  # S2c: respect promoted files
             # Set automation_path for both experiment types
