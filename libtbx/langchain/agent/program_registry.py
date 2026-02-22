@@ -628,17 +628,23 @@ class ProgramRegistry:
 
             for key, value in strategy.items():
                 if key not in strategy_defs:
-                    # Check if this looks like a PHENIX parameter (contains dots)
-                    # or is a known short PHIL name from directives/LLM
-                    if '.' in key or '=' in key or key in KNOWN_PHIL_SHORT_NAMES:
-                        # Pass through as key=value.  If the value contains
-                        # spaces (e.g. selection expressions) wrap it in single
-                        # quotes so the shell sees it as one argument.
+                    # Allow known short PHIL names (nproc, twin_law, etc.) that
+                    # are not program-specific and don't need to be in strategy_flags.
+                    if key in KNOWN_PHIL_SHORT_NAMES or '=' in key:
                         val_str = str(value)
                         if ' ' in val_str and not (val_str.startswith("'") or val_str.startswith('"')):
                             val_str = "'%s'" % val_str
                         cmd_parts.append("%s=%s" % (key, val_str))
-                        log("PASSTHROUGH: Adding %s=%s (not in strategy_defs)" % (key, val_str))
+                        log("PASSTHROUGH: Adding %s=%s (known short PHIL name)" % (key, val_str))
+                    elif '.' in key:
+                        # Dotted-path PHIL keys (e.g. refinement.main.number_of_macro_cycles)
+                        # are always program-specific. If they are not in strategy_flags for
+                        # this program they almost certainly came from LLM history contamination
+                        # (copying parameters from a previous program into the current strategy).
+                        # Drop them here; user-supplied dotted overrides go through
+                        # _inject_user_params which appends them directly to the command string.
+                        log("DROPPED: '%s' is a dotted PHIL key not in strategy_flags for %s "
+                            "(likely history contamination from another program)" % (key, program_name))
                     else:
                         log("WARNING: Unknown strategy '%s' for %s" % (key, program_name))
                     continue

@@ -3801,6 +3801,74 @@ def test_s2i_build_short_circuits_on_program_stop():
     print("  PASSED: BUILD short-circuits on program=='STOP'")
 
 
+# =============================================================================
+# CATEGORY S2j — dotted strategy keys from other programs are dropped
+# =============================================================================
+
+def test_s2j_refinement_key_dropped_from_ligandfit_strategy():
+    """S2j: refinement.main.number_of_macro_cycles in ligandfit strategy is dropped,
+    not passed through to the ligandfit command."""
+    print("Test: s2j_refinement_key_dropped_from_ligandfit_strategy")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.program_registry import ProgramRegistry
+    except ImportError:
+        print("  SKIP (ProgramRegistry unavailable)")
+        return
+
+    registry = ProgramRegistry(use_yaml=True)
+    dropped = []
+    passed = []
+
+    def log(msg):
+        if "DROPPED" in msg:
+            dropped.append(msg)
+        elif "PASSTHROUGH" in msg:
+            passed.append(msg)
+
+    strategy = {
+        "refinement.main.number_of_macro_cycles": 2,  # belongs to phenix.refine — must be dropped
+    }
+    files = {"model": "/fake/placed.pdb", "data": "/fake/data.mtz"}
+    cmd = registry.build_command("phenix.ligandfit", files, strategy, log=log)
+
+    assert_true(len(dropped) > 0,
+                "refinement.main.number_of_macro_cycles must be DROPPED for ligandfit, "
+                "but got cmd: %r" % cmd)
+    assert_true("number_of_macro_cycles" not in (cmd or ""),
+                "refinement.main.number_of_macro_cycles must not appear in ligandfit command, "
+                "got: %r" % cmd)
+    assert_true(len(passed) == 0,
+                "No dotted key should be passed through, got: %r" % passed)
+    print("  PASSED: refinement.main.number_of_macro_cycles correctly dropped from ligandfit")
+
+
+def test_s2j_known_short_names_still_pass_through():
+    """S2j: KNOWN_PHIL_SHORT_NAMES (nproc, twin_law, etc.) still pass through normally."""
+    print("Test: s2j_known_short_names_still_pass_through")
+    sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        from agent.program_registry import ProgramRegistry
+    except ImportError:
+        print("  SKIP (ProgramRegistry unavailable)")
+        return
+
+    registry = ProgramRegistry(use_yaml=True)
+    passed = []
+
+    def log(msg):
+        if "PASSTHROUGH" in msg and "nproc" in msg:
+            passed.append(msg)
+
+    strategy = {"nproc": 4}
+    files = {"model": "/fake/model.pdb", "data": "/fake/data.mtz"}
+    cmd = registry.build_command("phenix.ligandfit", files, strategy, log=log)
+
+    assert_true(len(passed) > 0 or (cmd and "nproc=4" in cmd),
+                "nproc should still pass through as a KNOWN_PHIL_SHORT_NAME")
+    print("  PASSED: nproc still passes through correctly")
+
+
 # RUN ALL TESTS
 # =============================================================================
 
