@@ -446,6 +446,79 @@ def test_history_preserves_anomalous_across_restart():
     print("  PASSED")
 
 
+def test_summary_includes_working_directory():
+    """
+    _extract_summary_data must include working_dir, and _format_summary_markdown
+    must render it as '**Working directory:** `<path>`' in the Results page.
+    """
+    print("Test: summary_includes_working_directory")
+
+    session, temp_dir = create_test_session()
+
+    # Verify it appears in extracted data
+    data = session._extract_summary_data()
+    assert "working_dir" in data, \
+        "_extract_summary_data must include 'working_dir' key"
+    # The value is a string (may be temp_dir itself or its parent)
+    assert isinstance(data["working_dir"], str), \
+        "working_dir must be a string path"
+    assert len(data["working_dir"]) > 0, \
+        "working_dir must be non-empty"
+
+    # Verify it appears in the rendered Markdown
+    result = session.generate_agent_session_summary(include_llm_assessment=False)
+    markdown = result["markdown"]
+    assert "**Working directory:**" in markdown, \
+        "Results page must contain '**Working directory:**'"
+
+    import shutil
+    shutil.rmtree(temp_dir)
+    print("  PASSED")
+
+
+def test_failure_diagnosis_path_in_summary():
+    """
+    When session.data['failure_diagnosis_path'] is set (a fatal terminal error
+    fired), _extract_summary_data must include it and _format_summary_markdown
+    must render a 'Failure Diagnosis' section with the path.
+
+    When no failure occurred (path not set), no such section appears.
+    """
+    print("Test: failure_diagnosis_path_in_summary")
+
+    # --- Case 1: diagnosis fired ---
+    session, temp_dir = create_test_session()
+    diag_path = "/my/job/dir/ai_failure_diagnosis.html"
+    session.data["failure_diagnosis_path"] = diag_path
+
+    data = session._extract_summary_data()
+    assert data.get("failure_diagnosis_path") == diag_path, \
+        "_extract_summary_data must propagate failure_diagnosis_path"
+
+    result = session.generate_agent_session_summary(include_llm_assessment=False)
+    markdown = result["markdown"]
+    assert "## Failure Diagnosis" in markdown, \
+        "Results markdown must contain '## Failure Diagnosis' section when diagnosis fired"
+    assert diag_path in markdown, \
+        "Results markdown must contain the full path to the diagnosis HTML"
+
+    import shutil
+    shutil.rmtree(temp_dir)
+
+    # --- Case 2: no diagnosis (normal run) ---
+    session2, temp_dir2 = create_test_session()
+    # Ensure key is absent
+    session2.data.pop("failure_diagnosis_path", None)
+
+    result2 = session2.generate_agent_session_summary(include_llm_assessment=False)
+    markdown2 = result2["markdown"]
+    assert "## Failure Diagnosis" not in markdown2, \
+        "Results markdown must NOT contain 'Failure Diagnosis' on a normal run"
+
+    shutil.rmtree(temp_dir2)
+    print("  PASSED")
+
+
 def run_all_tests():
     """Run all tests with fail-fast behavior (cctbx style)."""
     from tests.tst_utils import run_tests_with_fail_fast

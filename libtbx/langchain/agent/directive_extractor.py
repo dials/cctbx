@@ -135,6 +135,13 @@ Output a JSON object with these sections. Include ONLY sections that have releva
      * sites: int (number of anomalous sites)
      * twin_law: string (e.g., "-h,-k,l")
      * riding_hydrogens: bool
+     * unit_cell: string — space-separated "a b c alpha beta gamma" (e.g., "116.097 116.097 44.175 90 90 120")
+     * space_group: string (e.g., "P 32 2 1", "P 1", "C 2 2 21")
+   - IMPORTANT: unit_cell and space_group apply to ALL programs — always place them under "default", not under a specific program
+   - unit_cell FORMAT: always convert the user's value to a space-separated string of 6 numbers in order a b c alpha beta gamma
+     * "(116.097, 116.097, 44.175, 90, 90, 120)" → "116.097 116.097 44.175 90 90 120"
+     * "116 116 44 90 90 120" → "116 116 44 90 90 120"
+     * Never use parentheses or commas in the extracted string value
    - For phenix.map_sharpening specifically:
      * resolution: float (required for model-based sharpening)
      * sharpening_method: string (e.g., "b-factor", "model_sharpening")
@@ -189,6 +196,14 @@ IMPORTANT GUIDELINES:
 - Wavelength (in Angstroms) is the X-ray beam wavelength, typically 0.5-2.5 Å. Extract as wavelength, NEVER as resolution.
 - Resolution is the diffraction limit (d_min), typically 1.5-4.0 Å. Only extract as resolution if explicitly stated as resolution/d_min.
 - If the text says "Resolution limit: Not mentioned" or similar, do NOT extract a resolution value from anywhere else in the text.
+
+**CRITICAL: unit_cell and space_group — always use "default" scope**
+- When the user specifies a unit cell or space group, put it under "default" so it applies to all programs:
+  ```json
+  {"program_settings": {"default": {"unit_cell": "116.097 116.097 44.175 90 90 120"}}}
+  ```
+- Convert any parenthesized comma-separated tuple to a plain space-separated string: strip `(`, `)`, and replace `,` with spaces.
+- Example triggers: "use unit cell (a, b, c, α, β, γ)", "the specified unit cell is ...", "space group P 32 2 1"
 
 **CRITICAL: max_refine_cycles vs after_program vs after_cycle**
 - max_refine_cycles=N: Limits the NUMBER of refinement jobs to N. The workflow continues normally until refinement, then stops after N refinement jobs.
@@ -413,6 +428,12 @@ def extract_directives(user_advice, provider="google", model=None, log_func=None
 
         # Validate and clean directives
         directives = validate_directives(directives, log)
+
+        # Regex fallback: ensure unit_cell and space_group are always captured.
+        # The LLM sometimes returns an empty dict (or only stop_conditions) even
+        # when the advice contains an explicit unit cell.  This pass is
+        # deterministic and only fills in fields the LLM left empty.
+        directives = _apply_crystal_symmetry_fallback(directives, user_advice, log)
 
         # If validation stripped everything for ollama, try simple extraction
         if not directives and provider == "ollama":
@@ -750,6 +771,8 @@ VALID_SETTINGS = {
     "tls": bool,
     "sharpening_method": str,
     "selection": str,
+    "unit_cell": str,    # space-separated "a b c alpha beta gamma"
+    "space_group": str,  # e.g. "P 32 2 1"
 }
 
 # Valid stop condition keys
@@ -761,6 +784,123 @@ VALID_STOP_CONDITIONS = {
     "r_free_target": float,
     "map_cc_target": float,
 }
+
+
+def _normalize_unit_cell(value):
+    """
+    Normalise a unit-cell value to a plain space-separated string.
+
+    The LLM may return the value in several formats:
+        "(116.097, 116.097, 44.175, 90, 90, 120)"   ← parenthesised tuple
+        "116.097, 116.097, 44.175, 90, 90, 120"     ← comma-separated
+        "116.097 116.097 44.175 90 90 120"           ← already correct
+
+    All are normalised to "116.097 116.097 44.175 90 90 120".
+
+    Returns the normalised string, or None if the value doesn't parse as
+    six numbers.
+    """
+    if not isinstance(value, str):
+        return None
+    # Strip outer brackets/parens
+    cleaned = value.strip().strip("()[]")
+    # Replace commas (with optional surrounding whitespace) with a single space
+    cleaned = re.sub(r'\s*,\s*', ' ', cleaned).strip()
+    # Verify we have exactly 6 numeric tokens
+    tokens = cleaned.split()
+    if len(tokens) != 6:
+        return None
+    try:
+        floats = [float(t) for t in tokens]
+    except ValueError:
+        return None
+    # Reconstruct with minimal precision (strip trailing zeros)
+    return ' '.join(('%g' % f) for f in floats)
+
+
+def _apply_crystal_symmetry_fallback(directives, user_advice, log):
+    """
+    Regex-based fallback for unit_cell and space_group extraction.
+
+    Called unconditionally after LLM extraction so that an explicit unit cell
+    or space group in the user's advice is always captured, even when the LLM
+    returns an otherwise empty or incomplete dict.  Only fills in fields that
+    the LLM left empty — never overwrites a value the LLM already extracted.
+
+    This is critical because the directive-extraction LLM sometimes returns {}
+    for complex advice that mixes stop-conditions with crystal-symmetry data.
+
+    Args:
+        directives: Already-validated directive dict (may be {})
+        user_advice: Raw advice text to scan
+        log: Logging callable
+
+    Returns:
+        Updated directives dict (new dict; caller's dict is not mutated)
+    """
+    if not user_advice:
+        return directives
+
+    existing_default = (
+        (directives.get("program_settings") or {}).get("default") or {}
+    )
+    needs_uc = "unit_cell" not in existing_default
+    needs_sg = "space_group" not in existing_default
+    if not needs_uc and not needs_sg:
+        return directives   # both already set — nothing to do
+
+    directives = dict(directives)   # shallow copy so we don't mutate caller's dict
+
+    def _ensure_default():
+        """Return (possibly freshly created) default settings dict."""
+        if "program_settings" not in directives:
+            directives["program_settings"] = {}
+        if "default" not in directives["program_settings"]:
+            directives["program_settings"]["default"] = {}
+        return directives["program_settings"]["default"]
+
+    # ------------------------------------------------------------------
+    # unit_cell — match: "unit cell (116.097, 116.097, 44.175, 90, 90, 120)"
+    #             or  "unit_cell = 116 116 44 90 90 120"
+    #             or  "unit cell: 116.097 116.097 44.175 90 90 120"
+    # ------------------------------------------------------------------
+    if needs_uc:
+        _NUM = r'[-+]?\d+(?:\.\d+)?'
+        _SEP = r'[\s,]+'
+        _uc_pat = (
+            r'unit[_ ]cell'
+            r'(?:\s*[=:(\s]\s*|\s+(?:is|of|=|:)?\s*[(]?)'
+            r'(' + _NUM + _SEP + _NUM + _SEP + _NUM + _SEP
+              + _NUM + _SEP + _NUM + _SEP + _NUM + r')'
+        )
+        uc_match = re.search(_uc_pat, user_advice, re.IGNORECASE)
+        if uc_match:
+            nums = re.findall(r'[-+]?\d+(?:\.\d+)?', uc_match.group(1))
+            if len(nums) == 6:
+                normalized = _normalize_unit_cell(" ".join(nums))
+                if normalized:
+                    _ensure_default()["unit_cell"] = normalized
+                    log("DIRECTIVES: Regex fallback extracted "
+                        "unit_cell=%s" % normalized)
+
+    # ------------------------------------------------------------------
+    # space_group — match: "space group P 32 2 1"  "space_group=P63"
+    # ------------------------------------------------------------------
+    if needs_sg:
+        _sg_pat = (
+            r'space[_ ]group'
+            r'(?:\s*[=:]\s*|\s+(?:is|of|=|:)?\s*)'
+            r'([A-Za-z][A-Za-z0-9 /_-]{1,20})'
+        )
+        sg_match = re.search(_sg_pat, user_advice, re.IGNORECASE)
+        if sg_match:
+            sg_str = sg_match.group(1).strip().rstrip('.')
+            if sg_str:
+                _ensure_default()["space_group"] = sg_str
+                log("DIRECTIVES: Regex fallback extracted "
+                    "space_group=%s" % sg_str)
+
+    return directives
 
 
 def validate_directives(directives, log=None):
@@ -817,6 +957,19 @@ def validate_directives(directives, log=None):
                         # Keep unknown settings but log them
                         valid_settings[key] = value
                         _log("DIRECTIVES: Unknown setting %s=%s (keeping)" % (key, value))
+
+                # Normalize unit_cell to a plain space-separated string regardless
+                # of how the LLM formatted it (parentheses, commas, etc.)
+                if "unit_cell" in valid_settings:
+                    raw_uc = valid_settings["unit_cell"]
+                    normalized = _normalize_unit_cell(str(raw_uc))
+                    if normalized:
+                        if normalized != raw_uc:
+                            _log("DIRECTIVES: Normalised unit_cell %r → %r" % (raw_uc, normalized))
+                        valid_settings["unit_cell"] = normalized
+                    else:
+                        _log("DIRECTIVES: Dropping malformed unit_cell %r (need 6 numbers)" % raw_uc)
+                        del valid_settings["unit_cell"]
 
                 if valid_settings:
                     valid_prog_settings[prog] = valid_settings
@@ -1675,6 +1828,54 @@ def extract_directives_simple(user_advice):
             directives["program_settings"]["phenix.refine"] = {}
         directives["program_settings"]["phenix.refine"]["anisotropic_adp"] = True
 
+    # ==========================================================================
+    # UNIT CELL EXTRACTION
+    # ==========================================================================
+    # Match forms like:
+    #   "unit cell (116.097, 116.097, 44.175, 90, 90, 120)"
+    #   "unit_cell = 116 116 44 90 90 120"
+    #   "the specified unit cell (a, b, c, α, β, γ) must be used"
+    #   "unit cell: 116.097 116.097 44.175 90 90 120"
+    _NUM = r'[-+]?\d+(?:\.\d+)?'
+    _SEP = r'[\s,]+'
+    _uc_pattern = (
+        r'unit[_ ]cell'
+        r'(?:\s*[=:(\s]\s*|\s+(?:is|of|=|:)?\s*[(]?)'    # separator
+        r'(' + _NUM + _SEP + _NUM + _SEP + _NUM + _SEP
+          + _NUM + _SEP + _NUM + _SEP + _NUM + r')'       # 6 numbers
+    )
+    uc_match = re.search(_uc_pattern, user_advice, re.IGNORECASE)
+    if uc_match:
+        # Normalise to 6 space-separated numbers (strip parens/commas)
+        raw = uc_match.group(1)
+        nums = re.findall(r'[-+]?\d+(?:\.\d+)?', raw)
+        if len(nums) == 6:
+            uc_str = " ".join(nums)
+            if "program_settings" not in directives:
+                directives["program_settings"] = {}
+            if "default" not in directives["program_settings"]:
+                directives["program_settings"]["default"] = {}
+            directives["program_settings"]["default"]["unit_cell"] = uc_str
+
+    # ==========================================================================
+    # SPACE GROUP EXTRACTION
+    # ==========================================================================
+    # Match: "space group P 32 2 1", "space_group=P63", "space group: C 2 2 21"
+    _sg_pattern = (
+        r'space[_ ]group'
+        r'(?:\s*[=:]\s*|\s+(?:is|of|=|:)?\s*)'
+        r'([A-Za-z][A-Za-z0-9 /_-]{1,20})'  # Herman–Mauguin symbol
+    )
+    sg_match = re.search(_sg_pattern, user_advice, re.IGNORECASE)
+    if sg_match:
+        sg_str = sg_match.group(1).strip().rstrip('.')
+        if sg_str:
+            if "program_settings" not in directives:
+                directives["program_settings"] = {}
+            if "default" not in directives["program_settings"]:
+                directives["program_settings"]["default"] = {}
+            directives["program_settings"]["default"]["space_group"] = sg_str
+
     # Check for macro_cycles / number of refinement cycles
     cycle_patterns = [
         r'(\d+)\s*(?:macro[- ]?)?cycle',  # "1 macro cycle", "3 cycles"
@@ -2003,4 +2204,71 @@ def extract_directives_simple(user_advice):
                     directives["stop_conditions"]["skip_validation"] = True
                     break
 
+    # Extract unit_cell and space_group if mentioned
+    _extract_crystal_symmetry_simple(user_advice, directives)
+
     return directives
+
+
+# =============================================================================
+# CRYSTAL SYMMETRY EXTRACTION HELPER (shared by simple and LLM paths)
+# =============================================================================
+
+def _extract_crystal_symmetry_simple(user_advice, directives):
+    """
+    Extract unit_cell and space_group from user advice using regex patterns.
+
+    Mutates *directives* in place (adding/merging program_settings.default).
+
+    Handles common formats::
+
+        "unit cell (116.097, 116.097, 44.175, 90, 90, 120)"
+        "unit_cell = 116.097 116.097 44.175 90 90 120"
+        "use unit cell 116 116 44 90 90 120"
+        "space group P 32 2 1"  /  "space_group=P212121"
+    """
+    NUMBER = r'[0-9]+(?:\.[0-9]*)?'
+    SEP    = r'[\s,]+'
+
+    # --- unit cell ---
+    UC_PATTERNS = [
+        # parenthesised: (a, b, c, al, be, ga)
+        r'unit[_ ]?cell\s*[=:]?\s*\(\s*'
+        r'(?P<a>{n}){s}(?P<b>{n}){s}(?P<c>{n}){s}'
+        r'(?P<al>{n}){s}(?P<be>{n}){s}(?P<ga>{n})\s*\)',
+        # plain key=value: unit_cell = a b c al be ga
+        r'unit[_ ]?cell\s*[=:]\s*'
+        r'(?P<a>{n})\s+(?P<b>{n})\s+(?P<c>{n})\s+'
+        r'(?P<al>{n})\s+(?P<be>{n})\s+(?P<ga>{n})',
+        # prose: "use unit cell a b c al be ga"
+        r'unit\s+cell\s+'
+        r'(?P<a>{n})\s+(?P<b>{n})\s+(?P<c>{n})\s+'
+        r'(?P<al>{n})\s+(?P<be>{n})\s+(?P<ga>{n})',
+    ]
+    for raw_pat in UC_PATTERNS:
+        pat = raw_pat.format(n=NUMBER, s=SEP)
+        m = re.search(pat, user_advice, re.IGNORECASE)
+        if m:
+            raw = '%s %s %s %s %s %s' % (
+                m.group('a'), m.group('b'), m.group('c'),
+                m.group('al'), m.group('be'), m.group('ga'))
+            normalized = _normalize_unit_cell(raw)
+            if normalized:
+                if "program_settings" not in directives:
+                    directives["program_settings"] = {}
+                if "default" not in directives["program_settings"]:
+                    directives["program_settings"]["default"] = {}
+                directives["program_settings"]["default"]["unit_cell"] = normalized
+            break
+
+    # --- space group ---
+    m = re.search(r'space[_ ]?group\s*[=:]?\s*([A-Za-z][A-Za-z0-9 _\-]{1,20})',
+                  user_advice, re.IGNORECASE)
+    if m:
+        sg = m.group(1).strip().rstrip('.,;')
+        if sg:
+            if "program_settings" not in directives:
+                directives["program_settings"] = {}
+            if "default" not in directives["program_settings"]:
+                directives["program_settings"]["default"] = {}
+            directives["program_settings"]["default"]["space_group"] = sg

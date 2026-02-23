@@ -633,9 +633,17 @@ class ProgramRegistry:
                     if key in KNOWN_PHIL_SHORT_NAMES or '=' in key:
                         val_str = str(value)
                         if ' ' in val_str and not (val_str.startswith("'") or val_str.startswith('"')):
-                            val_str = "'%s'" % val_str
-                        cmd_parts.append("%s=%s" % (key, val_str))
-                        log("PASSTHROUGH: Adding %s=%s (known short PHIL name)" % (key, val_str))
+                            val_str = '"%s"' % val_str
+                        # unit_cell and space_group must use the full crystal_symmetry
+                        # scope on the command line.  The bare form (unit_cell=...) is
+                        # not universally accepted by PHENIX programs; the scoped form
+                        # (crystal_symmetry.unit_cell=...) always works.
+                        if key in ('unit_cell', 'space_group'):
+                            cmd_key = 'crystal_symmetry.%s' % key
+                        else:
+                            cmd_key = key
+                        cmd_parts.append("%s=%s" % (cmd_key, val_str))
+                        log("PASSTHROUGH: Adding %s=%s (known short PHIL name)" % (cmd_key, val_str))
                     elif '.' in key:
                         # Dotted-path PHIL keys (e.g. refinement.main.number_of_macro_cycles)
                         # are always program-specific. If they are not in strategy_flags for

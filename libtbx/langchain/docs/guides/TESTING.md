@@ -133,7 +133,7 @@ The `run_tests_with_fail_fast()` function automatically discovers tests:
 
 | File | Tests | Description |
 |------|-------|-------------|
-| `tst_directive_extractor.py` | 73 | Directive extraction and validation |
+| `tst_directive_extractor.py` | 87 | Directive extraction and validation; crystal symmetry (unit_cell/space_group) extraction and normalisation |
 | `tst_transport.py` | 66 | REST transport sanitization |
 | `tst_workflow_state.py` | 66 | Workflow state detection, done flags, refine counting, MR-SAD |
 | `tst_best_files_tracker.py` | 50 | File tracking, scoring, model stage detection |
@@ -160,7 +160,7 @@ The `run_tests_with_fail_fast()` function automatically discovers tests:
 | `tst_advice_preprocessing.py` | 11 | README discovery, advice processing |
 | `tst_metric_patterns.py` | 11 | Log parsing patterns |
 | `tst_history_analysis.py` | 10 | History analysis, anomalous workflow support |
-| `tst_session_summary.py` | 10 | Session summary generation, STOP cycle exclusion |
+| `tst_session_summary.py` | 12 | Session summary generation, STOP cycle exclusion, working directory in output, failure diagnosis reference |
 | `tst_yaml_tools.py` | 9 | YAML validation and inspection |
 | `tst_docs_tools.py` | 8 | Documentation generation |
 | `tst_dry_run.py` | 8 | Dry run manager functionality |
@@ -169,14 +169,35 @@ The `run_tests_with_fail_fast()` function automatically discovers tests:
 | `tst_phaser_multimodel.py` | 3 | Phaser multi-model handling |
 | `tst_utils.py` | 2 | Assert helpers |
 | `tst_v112_13_fixes.py` | — | Companion files, intermediate filtering, file categorisation (v112.13) |
-| `tst_audit_fixes.py` | 74 | Audit regressions: `_is_failed_result`, zombie state, xtriage resolution, RSR map_cc, max_refine_cycles landing (v112.14); session management keywords, `get_results()` safety, restart_mode auto-set (v112.31 P1/P3/P4); completed-workflow extension via `advice_changed` phase step-back (v112.31 Q1) |
+| `tst_audit_fixes.py` | 154 | Audit regressions: `_is_failed_result`, zombie state, xtriage resolution, RSR map_cc, max_refine_cycles landing (v112.14); session management keywords, `get_results()` safety, restart_mode auto-set (v112.31 P1/P3/P4); completed-workflow extension via `advice_changed` phase step-back (v112.31 Q1); S2L probe crash detection (v112.52); diagnosable terminal errors — detection, HTML report, no-Sorry UX (v112.55–56); HETATM-based ligand detection, noligand false-positive fix (v112.57–59); Results page working directory + failure diagnosis reference, fatal-diagnosis skip (v112.60–62); crystal symmetry regex fallback, scoped PHIL form (v112.64) |
+| `tst_hardcoded_cleanup.py` | 36 | Hardcoded categorizer cleanup tests |
 
-Total: **878+ tests across 37 files**
+Total: **1005+ tests across 38 files**
 
 ### Key Tests for Recent Fixes
 
 | Test | File | What It Verifies |
 |------|------|------------------|
+| `test_summary_includes_working_directory` | tst_session_summary.py | `_extract_summary_data` includes `working_dir`; markdown renders `**Working directory:**` |
+| `test_failure_diagnosis_path_in_summary` | tst_session_summary.py | "Failure Diagnosis" section appears when `failure_diagnosis_path` set; absent on normal runs |
+| `test_normalize_unit_cell_parenthesised` | tst_directive_extractor.py | `_normalize_unit_cell` converts `(a, b, c, al, be, ga)` to space-separated string |
+| `test_validate_directives_normalises_unit_cell` | tst_directive_extractor.py | `validate_directives` normalises parenthesised unit_cell in program_settings |
+| `test_extract_crystal_symmetry_simple_parenthesised` | tst_directive_extractor.py | Rules extractor captures unit cell from prose like "unit cell (116.097, …)" |
+| `test_extract_directives_simple_unit_cell_end_to_end` | tst_directive_extractor.py | Full extraction from real nsf-d2 preprocessed advice (the AIAgent_35 failure case) |
+| `test_unit_cell_in_valid_settings` | tst_directive_extractor.py | `unit_cell` and `space_group` present in `VALID_SETTINGS` with `str` type |
+| `test_s3a_detect_crystal_symmetry_mismatch` | tst_audit_fixes.py | DiagnosisDetector matches crystal symmetry mismatch pattern |
+| `test_s3a_build_html_new_fields` | tst_audit_fixes.py | Diagnosis HTML: heading is "Error diagnosis", file path, job name, and working dir are shown |
+| `test_s3a_diagnose_returns_true_no_sorry` | tst_audit_fixes.py | `_diagnose_terminal_failure` returns True (no Sorry); `_finalize_session` skips Results page on fatal diagnosis |
+| `test_s3a_finalize_runs_after_diagnosis` | tst_audit_fixes.py | `_finalize_session` runs unconditionally even when diagnosis fires; Results summary suppressed |
+| `test_pdb_is_small_molecule_helper` | tst_audit_fixes.py | `_pdb_is_small_molecule` correctly identifies HETATM-only files as small molecules |
+| `test_hetcode_ligand_not_used_as_refine_model` | tst_audit_fixes.py | atp.pdb / gdp.pdb (HETATM-only) not selected as refinement model |
+| `test_is_ligand_file_noligand_false_positive` | tst_audit_fixes.py | `nsf-d2_noligand.pdb` not classified as ligand; word-boundary regex works correctly |
+| `test_s4b_fallback_populates_unit_cell_from_empty_directives` | tst_audit_fixes.py | `_apply_crystal_symmetry_fallback` extracts unit_cell when LLM returns {} |
+| `test_s4b_fallback_does_not_overwrite_llm_unit_cell` | tst_audit_fixes.py | Fallback preserves an existing LLM-extracted unit_cell, never overwrites |
+| `test_s4b_fallback_populates_space_group_only_when_missing` | tst_audit_fixes.py | Partial fill: space_group added without disturbing existing unit_cell |
+| `test_s4b_program_registry_uses_crystal_symmetry_scope` | tst_audit_fixes.py | `program_registry` PASSTHROUGH emits `crystal_symmetry.unit_cell=` form |
+| `test_s4b_inject_crystal_symmetry_uses_scoped_form` | tst_audit_fixes.py | `_inject_crystal_symmetry` appends `crystal_symmetry.unit_cell=` not bare form |
+| `test_s4b_fallback_called_in_extract_directives` | tst_audit_fixes.py | `_apply_crystal_symmetry_fallback` called after `validate_directives` in source |
 | `tst_automation_path_in_workflow_state` | tst_workflow_state.py | automation_path correctly set in state |
 | `tst_stepwise_mode_blocks_predict_and_build_after_prediction` | tst_workflow_state.py | predict_and_build blocked in stepwise mode after prediction |
 | `tst_autobuild_beats_earlier_refine_with_better_metrics` | tst_best_files_tracker.py | Autobuild with better R-free becomes best model |

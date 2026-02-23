@@ -407,8 +407,9 @@ unclassified_pdb:
   parent_category: model  # Default to positioned model - user can provide model directly
   extensions: [".pdb"]
   patterns:
-    - "*model*"  # Generic model files
-    - "*"  # Catch-all for any PDB
+    - "*model*"   # Generic model files
+    - "*noligand*"  # Protein structure explicitly described as lacking ligand (e.g. nsf-d2_noligand.pdb)
+    - "*"         # Catch-all for any PDB
   excludes:
     # Exclude everything that should be in a more specific category
     - "*refine*"
@@ -431,8 +432,17 @@ unclassified_pdb:
     - "*search*"  # Search models for MR
     - "*sculptor*"  # Sculptor output (processed search models)
     - "*chainsaw*"  # Chainsaw output (processed search models)
-    - "lig*"
-    - "*ligand*"
+    # Ligand files — use SPECIFIC word-boundary patterns to avoid matching
+    # files whose names contain 'ligand' as part of a different word (e.g. 'noligand').
+    # The HETATM content check in _categorize_files catches hetcode files (atp.pdb etc.).
+    - "lig.*"         # lig.pdb, lig.cif (exact ligand files)
+    - "lig_*"         # lig_001.pdb etc.
+    - "LIG.*"         # uppercase variants
+    - "LIG_*"
+    - "ligand.*"      # ligand.pdb itself
+    - "ligand_*"      # ligand_001.pdb etc.
+    - "*_ligand.*"    # my_model_ligand.pdb (ligand as suffix)
+    - "*_ligand_*"    # foo_ligand_bar.pdb
     - "EDITED*"          # Intermediate files from ligandfit processing
     - "TEMP*"            # Temporary files
     - "path_[0-9]*.pdb"    # trace-and-build fragments (intermediate)

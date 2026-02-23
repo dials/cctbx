@@ -1321,19 +1321,145 @@ with patterns defined in `knowledge/recoverable_errors.yaml`.
 - `agent/error_analyzer.py` — Detection, extraction, and resolution logic
 - `agent/graph_nodes.py` — Fallback node triggers error analysis on failure
 
+---
+
+## Diagnosable Terminal Errors
+
+Some program failures are categorically unrecoverable — for example, a crystal symmetry
+mismatch between input files, or a model entirely outside the cryo-EM map. Rather than
+stopping silently or showing a generic error, the agent detects these, asks the LLM to
+diagnose the specific cause, and presents a self-contained HTML report to the user.
+
+### Overview
+
+When a recognized terminal failure occurs the agent:
+
+1. Identifies the error type via `DiagnosisDetector` (pattern matching against
+   `knowledge/diagnosable_errors.yaml`)
+2. Calls the LLM on the server (`analysis_mode=failure_diagnosis`) with the error
+   excerpt, a domain hint from the YAML, and the tail of the failing program's log
+3. Writes `ai_failure_diagnosis.html` to the job's working directory
+4. Opens the report in the user's browser automatically
+5. Returns `True` from `_run_single_cycle` to stop the cycle loop cleanly —
+   **no `Sorry` exception is raised**; the ai_agent job is considered successful
+   because it correctly identified and diagnosed the sub-job failure
+6. `_finalize_session` runs unconditionally (saves the session, populates
+   `self.result`), but **skips the Results summary page** — the diagnosis HTML
+   is the user's sole output window, so a second page would only bury it
+
+### Error flow diagram
+
+```
+Program fails
+      │
+      ▼
+DiagnosisDetector.detect(result_text)
+      │
+      ├── No match → normal failure handling (agent may retry or move on)
+      │
+      └── Match found: (error_type, description, excerpt)
+                │
+                ▼
+       _diagnose_terminal_failure()
+                │
+                ├── 1. Read log tail (client-side, 150 lines / 4 000 chars)
+                ├── 2. LLM call: analysis_mode=failure_diagnosis
+                │         └── fallback: rules-only text if LLM unavailable
+                ├── 3. Build & write ai_failure_diagnosis.html
+                │         ├── Heading: "Error diagnosis"
+                │         ├── Meta bar: program, cycle, job name, working dir
+                │         ├── Error excerpt (red box)
+                │         ├── AI diagnosis (three paragraphs: what/cause/fix)
+                │         └── Footer: full path to the saved file
+                ├── 4. Open HTML in browser (load_url)
+                ├── 5. Store path in session.data["failure_diagnosis_path"]
+                ├── 6. Print diagnosis to CLI log
+                └── 7. return True  ← cycle loop breaks; no Sorry raised
+
+_finalize_session()
+      │
+      ├── Saves session JSON
+      ├── Detects failure_diagnosis_path in session.data
+      └── Skips _generate_ai_summary() and display_results()
+              (Results page suppressed; diagnosis page is the output)
+```
+
+### HTML report content
+
+The report (`ai_failure_diagnosis.html`) is self-contained — no CDN dependencies —
+so it renders correctly when opened directly from a local path. It includes:
+
+| Section | Content |
+|---------|---------|
+| Header | "⚠ PHENIX AI Agent — Error diagnosis" |
+| Meta bar | Failed program, cycle number, job name, working directory |
+| Error | Human-readable error type label + the raw error excerpt |
+| AI Diagnosis | Three plain-text paragraphs: WHAT WENT WRONG / MOST LIKELY CAUSE / HOW TO FIX IT |
+| Footer | Full path where the file is saved |
+
+### Configuration
+
+`knowledge/diagnosable_errors.yaml` defines each recognizable error type:
+
+```yaml
+errors:
+  crystal_symmetry_mismatch:
+    display_name: "Unit cell or space group mismatch between input files"
+    detection_patterns:
+      - "crystal symmetry mismatch"
+      - "incompatible crystal symmetry"
+    diagnosis_hint: |
+      Check that all input files were processed from the same crystal form.
+      ...
+```
+
+Fields:
+
+| Field | Purpose |
+|-------|---------|
+| `display_name` | Human-readable label shown on the error page and in the log |
+| `detection_patterns` | Strings that, if found in the failing program's output, trigger diagnosis |
+| `diagnosis_hint` | Domain knowledge injected into the LLM prompt to guide the diagnosis |
+
+### Adding a new diagnosable error
+
+1. Add an entry in `knowledge/diagnosable_errors.yaml` with `display_name`,
+   `detection_patterns`, and a `diagnosis_hint`
+2. No code changes required — `DiagnosisDetector` and `_diagnose_terminal_failure`
+   handle all new entries automatically
+3. Add a detection test in `tests/tst_audit_fixes.py` following the `test_s3a_detect_*`
+   pattern
+
+### Key files
+
+| File | Role |
+|------|------|
+| `knowledge/diagnosable_errors.yaml` | Error definitions and LLM hints |
+| `agent/error_analyzer.py` | `DiagnosisDetector` — pattern matching and hint lookup |
+| `agent/failure_diagnoser.py` | Prompt builder, Markdown sanitiser, HTML report builder |
+| `programs/ai_agent.py` | `_diagnose_terminal_failure()` — orchestrates steps 1–7 |
+| `tests/tst_audit_fixes.py` | `test_s3a_*` tests covering detection, HTML output, UX flow |
+
+---
+
 ## Session Summary Generation
 
 The agent generates structured summaries of completed sessions with optional LLM assessment.
 
 ### Summary Components
 
-1. **Input Section**: Files, user advice, experiment type, resolution
-2. **Input Data Quality**: Metrics from xtriage/mtriage (resolution, completeness, twinning)
-3. **Workflow Path**: High-level description of strategy taken
-4. **Steps Performed**: Table of all cycles with key metrics
-5. **Final Quality**: Final metrics with quality assessments
-6. **Output Files**: Key output files from the session
-7. **Assessment** (optional): LLM-generated evaluation
+1. **Header**: Run name derived from the working directory basename
+2. **Session line**: Session ID, cycle count (successful / total), and **working directory path**
+3. **Input Section**: Files, user advice, experiment type, resolution
+4. **Input Data Quality**: Metrics from xtriage/mtriage (resolution, completeness, twinning)
+5. **Workflow Path**: High-level description of strategy taken
+6. **Steps Performed**: Table of all cycles with key metrics
+7. **Final Quality**: Final metrics with quality assessments
+8. **Key Output Files**: Output files from the session with relative paths
+9. **Failure Diagnosis** *(only on fatal error)*: Path to `ai_failure_diagnosis.html` — shown when the session ended due to a diagnosable terminal failure; see [Diagnosable Terminal Errors](#diagnosable-terminal-errors)
+10. **Assessment** (optional): LLM-generated evaluation
+
+> **Note**: When a fatal error diagnosis was produced, the Results summary page is suppressed entirely — `_finalize_session` detects `session.data["failure_diagnosis_path"]` and skips `_generate_ai_summary()`. The diagnosis HTML is the user's sole output window.
 
 ### Quality Assessments
 

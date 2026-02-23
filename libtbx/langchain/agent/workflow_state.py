@@ -172,6 +172,50 @@ def _match_pattern(filename, pattern):
     return fnmatch.fnmatch(filename.lower(), pattern.lower())
 
 
+def _pdb_is_small_molecule(path, max_bytes=8192):
+    """
+    Return True if the PDB file contains only HETATM records and no ATOM
+    chain records — the reliable signature of a small-molecule coordinate file
+    (ligand, cofactor, ion, etc.).
+
+    Rationale
+    ---------
+    Polymer chains (protein, DNA, RNA) MUST use ATOM records.  Only HET-group
+    atoms (ligands, cofactors, metals, water) use HETATM.  Therefore a PDB
+    file with HETATM but no ATOM is definitively a small molecule, regardless
+    of what its filename says.
+
+    This catches ligand files named after their PDB hetcode, e.g. atp.pdb,
+    gdp.pdb, hem.pdb — names that have no 'lig' or 'ligand' substring and so
+    escape all pattern-based categorization.
+
+    Args:
+        path:      Full path to the PDB file.
+        max_bytes: How much of the file to read (default 8 KB — enough to see
+                   all records in a typical ligand file, plus headers of any
+                   larger file).
+
+    Returns:
+        True  → file is a small molecule (HETATM only, no ATOM)
+        False → file has ATOM records (polymer), or is unreadable, or empty
+    """
+    has_atom   = False
+    has_hetatm = False
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            content = fh.read(max_bytes)
+        for line in content.splitlines():
+            if line.startswith('ATOM  ') or line.startswith('ATOM '):
+                has_atom = True
+                break               # Definitive: it's a polymer file
+            if line.startswith('HETATM'):
+                has_hetatm = True
+        return has_hetatm and not has_atom
+    except Exception:
+        return False                # Be conservative on read errors
+
+
+
 def _categorize_files(available_files):
     """
     Categorize files by type and purpose.
@@ -205,6 +249,39 @@ def _categorize_files(available_files):
 
     # Bubble up subcategories to their parent semantic categories
     files = _bubble_up_to_parents(files, category_rules)
+
+    # Post-processing: Reclassify HETATM-only PDB files that pattern matching
+    # placed in 'unclassified_pdb' (and therefore 'model').
+    #
+    # Files named after PDB het-codes (atp.pdb, gdp.pdb, hem.pdb, …) have no
+    # 'lig' or 'ligand' in their name, so they slip through to unclassified_pdb
+    # → model.  Content inspection is the reliable tiebreaker: if a PDB file
+    # contains only HETATM records and no ATOM chain records, it is a small
+    # molecule — not a macromolecular model.
+    #
+    # Only files that are SOLELY in 'unclassified_pdb' are inspected here.
+    # Files that have already matched a more specific model subcategory (refined,
+    # phaser_output, docked, etc.) are left alone regardless of content.
+    _model_subcats = {
+        "refined", "rsr_output", "phaser_output", "autobuild_output",
+        "docked", "with_ligand", "ligand_fit_output", "model_cif",
+    }
+    for f in list(files.get("unclassified_pdb", [])):
+        # Skip if already in a specific model subcategory (content check not needed)
+        if any(f in files.get(sc, []) for sc in _model_subcats):
+            continue
+        if _pdb_is_small_molecule(f):
+            # Move: unclassified_pdb → ligand_pdb, model → ligand
+            files["unclassified_pdb"].remove(f)
+            if f in files.get("model", []):
+                files["model"].remove(f)
+            if f in files.get("pdb", []):
+                files["pdb"].remove(f)
+            for lst_key in ("ligand_pdb", "ligand"):
+                if lst_key not in files:
+                    files[lst_key] = []
+                if f not in files[lst_key]:
+                    files[lst_key].append(f)
 
     # Post-processing: If we have exactly one half-map and no full maps,
     # treat it as a full map. Half-maps only make sense in pairs for FSC.
@@ -559,9 +636,23 @@ def _categorize_files_hardcoded(available_files):
             if basename.startswith('run_mr') or fnmatch.fnmatch(basename, '*mr.[0-9]*'):
                 files["intermediate_mr"].append(f)
 
-            if (basename.startswith('lig') and len(basename) < 20) or 'ligand' in basename:
+            # Ligand coordinate files — require 'lig' or 'ligand' at a word boundary
+            # to avoid false positives on names like 'nsf-d2_noligand.pdb' where
+            # 'ligand' appears as a suffix of a different word.
+            _is_ligand_name = (
+                (re.search(r'(^|[_\-\.])lig([_\-\.]|\.pdb$|$)', basename) and
+                 len(basename) < 20) or
+                re.search(r'(^|[_\-\.])ligand([_\-\.]|\.pdb$|$)', basename)
+            )
+            if _is_ligand_name:
                 if not any(x in basename for x in ['ligand_fit', 'ligandfit', 'with_ligand']):
                     files["ligand_pdb"].append(f)
+            elif _pdb_is_small_molecule(f):
+                # Content-based detection: HETATM-only files whose names don't
+                # contain 'lig' or 'ligand' (e.g. atp.pdb, gdp.pdb, hem.pdb).
+                # Remove from generic 'pdb' and add to ligand_pdb instead.
+                files["pdb"].remove(f)
+                files["ligand_pdb"].append(f)
 
         elif f_lower.endswith(('.fa', '.fasta', '.seq', '.dat')):
             files["sequence"].append(f)

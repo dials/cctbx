@@ -2349,6 +2349,9 @@ FINAL REPORT:"""
                                     and "SUCCESS" in str(c.get("result", ""))),
             "run_name": run_name,
             "is_tutorial": is_tutorial,
+            # Job context
+            "working_dir": self._get_working_directory_path(),
+            "failure_diagnosis_path": self.data.get("failure_diagnosis_path"),
         }
 
     def _get_run_name(self):
@@ -3177,6 +3180,10 @@ FINAL REPORT:"""
         # Session info line
         session_id = data['session_id']
         lines.append(f"**Session:** {session_id} | **Cycles:** {data['total_cycles']} ({data['successful_cycles']} successful)")
+        # Working directory (item 4) — always show so the user knows where output went
+        working_dir = data.get("working_dir")
+        if working_dir:
+            lines.append(f"**Working directory:** `{working_dir}`")
         if include_llm_assessment:
             lines.append("")
             lines.append("_[STATUS_PLACEHOLDER]_")
@@ -3296,6 +3303,16 @@ FINAL REPORT:"""
                 display_path = self._get_display_path(f)
                 lines.append(f"| {display_path} | {file_type} | {description} |")
             lines.append("")
+            lines.append("")
+
+        # Failure Diagnosis reference (item 5) — only shown when a diagnosis was generated
+        failure_diagnosis_path = data.get("failure_diagnosis_path")
+        if failure_diagnosis_path:
+            lines.append("## Failure Diagnosis")
+            lines.append("")
+            lines.append("A terminal error was encountered during this run. "
+                         "An AI-generated diagnosis report was saved:")
+            lines.append(f"`{failure_diagnosis_path}`")
             lines.append("")
 
         # LLM Assessment placeholder

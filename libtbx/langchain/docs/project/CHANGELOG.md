@@ -1,6 +1,281 @@
 # PHENIX AI Agent - Changelog
 
-## Version 112.52 (S2L — Probe Crash Interpreted + Client Cell Transport)
+## Version 112.64 (Unit cell / space group reliably propagated to commands)
+
+When the user specifies a unit cell or space group in their advice (e.g.
+`"The specified unit cell (116.097, 116.097, 44.175, 90, 90, 120) must be
+used for the procedure"`), the value was previously silently ignored — it
+never appeared in the command sent to `phenix.model_vs_data` or any other
+program.
+
+### Root cause (two independent bugs)
+
+**Bug 1 — LLM returns empty directives despite the correct schema being present.**
+The LLM prompt already listed `unit_cell` and `space_group` as extractable
+`program_settings` parameters, but when the advice mixes crystal symmetry with
+stop-conditions and file preferences, the LLM sometimes returns `{}` for the
+entire directive dict (logged as "No actionable directives found"). The
+`extract_directives_simple` regex fallback was only called for the ollama
+provider, not for the main Google/OpenAI path.
+
+**Bug 2 — Wrong PHIL scope in emitted commands.**
+Two code paths (`_inject_crystal_symmetry` in `ai_agent.py`, and the
+`KNOWN_PHIL_SHORT_NAMES` PASSTHROUGH in `program_registry.py`) appended bare
+`unit_cell="..."` and `space_group=...`, which PHENIX programs may not accept
+without the fully-scoped `crystal_symmetry.unit_cell=` form.
+
+### Fix — three layers
+
+**1. Deterministic regex fallback** (`agent/directive_extractor.py`) — New
+`_apply_crystal_symmetry_fallback()` function is called inside
+`extract_directives()` immediately after `validate_directives()`. It runs the
+same regex patterns as `extract_directives_simple` but only fills in fields
+that the LLM left empty — it never overwrites a value the LLM extracted
+correctly. This means the unit cell is captured even when the LLM returns
+`{}`.
+
+**2. Scoped PHIL form in `_inject_crystal_symmetry`** (`programs/ai_agent.py`)
+— Changed both append statements from `unit_cell="..."` and `space_group=...`
+to `crystal_symmetry.unit_cell="..."` and `crystal_symmetry.space_group=...`.
+The fully-scoped form is accepted by all X-ray PHENIX programs.
+
+**3. Scoped PHIL form in `program_registry.py`** — The `KNOWN_PHIL_SHORT_NAMES`
+PASSTHROUGH block now maps `unit_cell` and `space_group` to
+`crystal_symmetry.unit_cell` / `crystal_symmetry.space_group` before appending
+to the command string.
+
+### End-to-end result for the nsf-d2 example
+
+After the fix, even when the LLM returns empty directives, the deterministic
+fallback extracts the unit cell and the command becomes:
+
+```
+phenix.model_vs_data nsf-d2_noligand.pdb nsf-d2.mtz \
+    crystal_symmetry.unit_cell="116.097 116.097 44.175 90 90 120"
+```
+
+The same symmetry is also injected into subsequent programs:
+`phenix.ligandfit`, `phenix.refine`, `phenix.xtriage`, etc.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/directive_extractor.py` | New `_apply_crystal_symmetry_fallback()` function; called at end of `extract_directives()` after `validate_directives()` |
+| `agent/program_registry.py` | `KNOWN_PHIL_SHORT_NAMES` PASSTHROUGH uses `crystal_symmetry.unit_cell=` / `crystal_symmetry.space_group=` scoped form |
+| `programs/ai_agent.py` | `_inject_crystal_symmetry()` uses `crystal_symmetry.unit_cell=` and `crystal_symmetry.space_group=` scoped form |
+| `tests/tst_audit_fixes.py` | 6 new `test_s4b_*` tests: fallback behavior, non-overwrite, partial fill, source-inspection checks for scoped form |
+
+---
+
+## Version 112.62 (Remove Results page on fatal diagnosis)
+
+When `_diagnose_terminal_failure` fires, `_finalize_session` now skips the
+Results summary page entirely.  The diagnosis HTML is already open in the
+user's browser — a second Results window saying "1 cycle, 1 failure" adds no
+value and risks burying the actionable diagnosis.
+
+### How it works
+
+`_diagnose_terminal_failure` writes `session.data["failure_diagnosis_path"]`
+before returning.  `_finalize_session` checks this key:
+
+```python
+has_fatal_diagnosis = bool(session.data.get("failure_diagnosis_path"))
+if (session.get_num_cycles() > 0
+    and not skip_summary
+    and not has_fatal_diagnosis   # ← new guard
+    and not dry_run):
+    self._generate_ai_summary(session)
+```
+
+When the key is present, `_generate_ai_summary` (and therefore
+`display_results`) is skipped.  The session is still saved to disk and
+`self.result` is still populated — only the browser window is suppressed.
+A one-line note is printed to the log: `Skipping Results summary — error
+diagnosis report already shown. See: <path>`.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | `_finalize_session`: `has_fatal_diagnosis` guard skips summary |
+| `tests/tst_audit_fixes.py` | Updated `test_s3a_diagnose_returns_true_no_sorry` and `test_s3a_finalize_runs_after_diagnosis` to verify suppression |
+
+---
+
+## Version 112.61 (Remove Sorry from terminal failure path)
+
+The `_diagnose_terminal_failure` method no longer raises `Sorry`.  Previously
+the PHENIX GUI showed a blocking modal error dialog that could end up behind
+other windows, preventing the user from proceeding.  The ai_agent job is now
+considered successful when it correctly identifies and diagnoses a sub-job
+failure.
+
+### Changes
+
+**`_diagnose_terminal_failure`** — Steps 1–4 unchanged.  Step 5 replaced:
+- Old: `raise Sorry(short_sorry)` — blocking modal, potentially hidden
+- New: `return True` — signals `_run_single_cycle` to break the loop
+
+**`_run_single_cycle`** — Changed from discarding the return value to
+propagating it: `return self._diagnose_terminal_failure(...)`.
+
+**`iterate_agent` cycle loop** — Removed the entire `_pending_sorry`
+try/except/re-raise scaffold (12 lines).  The loop is now:
+
+```python
+for cycle in range(start_cycle, start_cycle + max_cycles):
+    should_break = self._run_single_cycle(cycle, session, session_start_time)
+    if should_break:
+        break
+self._finalize_session(session)    # always runs regardless
+```
+
+`_finalize_session` remains unconditional.
+
+### User experience
+
+Fatal sub-job failure: diagnosis HTML opens in browser → agent finishes
+cleanly → one window, no modals, no buried dialogs.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | `_diagnose_terminal_failure` returns `True`; `_run_single_cycle` propagates it; `iterate_agent` drops `_pending_sorry` |
+| `tests/tst_audit_fixes.py` | Replaced `test_s3a_html_write_failure_produces_full_sorry` and `test_s3a_sorry_deferred_until_finalize` with `test_s3a_diagnose_returns_true_no_sorry` and `test_s3a_finalize_runs_after_diagnosis` |
+
+---
+
+## Version 112.60 (Error page and Results page improvements)
+
+Five UX improvements to the terminal error and Results pages.
+
+### Changes
+
+**(1) Heading rename** — `failure_diagnoser.py`: "Terminal Error Diagnosis" →
+"Error diagnosis".  Tab title also updated.
+
+**(2) File location on error page** — `build_diagnosis_html` now shows the
+full path of the saved HTML file in the footer: `Saved to: <path>`.
+
+**(3) Job context on error page** — `build_diagnosis_html` now accepts
+`job_name` and `working_dir`; these appear in the meta bar alongside Program
+and Cycle.  `_diagnose_terminal_failure` derives them from `log_dir`.
+
+**(4) Working directory on Results page** — `_extract_summary_data` now
+includes the working directory via `_get_working_directory_path()`.
+`_format_summary_markdown` shows it as
+`**Working directory:** \`/full/path\`` on every run, immediately below the
+Session/Cycles line.
+
+**(5) Failure diagnosis reference on Results page** — When a fatal diagnosis
+fires, `session.data["failure_diagnosis_path"]` is set and appears in a
+"Failure Diagnosis" section of the Results markdown, just above Assessment,
+with the full path to `ai_failure_diagnosis.html`.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/failure_diagnoser.py` | `build_diagnosis_html` gains `html_path`, `job_name`, `working_dir` params; heading renamed |
+| `programs/ai_agent.py` | `_diagnose_terminal_failure` passes new params; stores `failure_diagnosis_path` in session |
+| `agent/session.py` | `_extract_summary_data` adds `working_dir` and `failure_diagnosis_path`; `_format_summary_markdown` renders them |
+| `tests/tst_audit_fixes.py` | `test_s3a_build_html_new_fields` verifies heading, path, job name, working dir |
+
+---
+
+## Version 112.59 (Noligand false-positive fix)
+
+Fixes `nsf-d2_noligand.pdb` (a protein structure explicitly lacking a ligand)
+being classified as a ligand file due to substring matching: `'ligand.pdb' in
+'noligand.pdb'` evaluates to `True`.
+
+### Root cause
+
+`BestFilesTracker._is_ligand_file()` used `any(p in basename for p in
+ligand_patterns)` where `ligand_patterns` included `'ligand.pdb'`.  Substring
+matching has no concept of word boundaries.
+
+### Fix — word-boundary regex
+
+Replaced substring matching with a regex that requires `ligand` or `lig` to
+appear at a word boundary (start of name, or after `_`, `-`, or `.`):
+
+```python
+WORD_SEP = r'(?:^|[_\-\.])'
+AFTER    = r'(?=[_\-\.]|\.(?:pdb|cif)$|$)'
+word_boundary_ligand = re.search(
+    r'(?:' + WORD_SEP + r'lig' + AFTER + r'|'
+           + WORD_SEP + r'ligand' + AFTER + r')',
+    basename
+)
+```
+
+Matches: `lig.pdb`, `lig_001.pdb`, `ligand.pdb`, `my_ligand.pdb`
+Rejects: `nsf-d2_noligand.pdb`, `noligand_model.pdb`
+
+The same pattern was applied to `workflow_state.py`'s hardcoded categorizer
+and to `file_categories.yaml`'s `unclassified_pdb` exclude list.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/best_files_tracker.py` | `_is_ligand_file` rewritten with word-boundary regex |
+| `agent/workflow_state.py` | `_categorize_files_hardcoded` updated to match |
+| `knowledge/file_categories.yaml` | `unclassified_pdb` excludes use specific patterns; `*noligand*` added as positive |
+| `tests/tst_audit_fixes.py` | `test_is_ligand_file_noligand_false_positive` (15 cases) |
+
+---
+
+## Version 112.58 (Test path fix)
+
+Fixed `test_s3a_sorry_deferred_until_finalize` using a hard-coded path
+(`_PROJECT_ROOT/programs/ai_agent.py`) instead of calling `_find_ai_agent_path()`.
+All other tests already used the helper; this was the only outlier.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `tests/tst_audit_fixes.py` | `test_s3a_sorry_deferred_until_finalize`: use `_find_ai_agent_path()` |
+
+---
+
+## Version 112.57 (HETATM-based ligand detection)
+
+Fixes `atp.pdb`, `gdp.pdb`, and similar hetcode-named files being classified as
+protein models rather than ligands.  Previously, files named after their PDB
+hetcode had no keyword-based ligand signal, so they fell through to the model
+category.
+
+### Fix — content-based detection
+
+Added `_pdb_is_small_molecule(path)` which reads the PDB file and returns
+`True` when all coordinate records are `HETATM` (no `ATOM` records).  This is
+applied as a post-processing pass in three locations:
+
+1. `best_files_tracker.py` `_is_ligand_file()` — content fallback after
+   keyword checks
+2. `workflow_state.py` YAML categorizer post-processing pass
+3. `workflow_state.py` hardcoded categorizer post-processing pass
+
+A file that passes the HETATM test is re-assigned from `model` / `unclassified_pdb`
+to `ligand_pdb`, preventing it from being selected as the refinement model.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/workflow_state.py` | `_pdb_is_small_molecule()` helper; post-processing in YAML and hardcoded categorizers |
+| `agent/best_files_tracker.py` | HETATM content fallback in `_is_ligand_file()` |
+| `tests/tst_audit_fixes.py` | `test_pdb_is_small_molecule_helper`, `test_hetcode_ligand_not_used_as_refine_model` |
+
+---
+
+
 
 Fixes the apoferritin AIAgent_165 scenario where the placement probe
 (`phenix.map_correlations`) crashed with "model is entirely outside map",

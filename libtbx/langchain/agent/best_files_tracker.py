@@ -1033,7 +1033,7 @@ class BestFilesTracker:
         lower = path.lower()
 
         # First check for ligands (small molecules)
-        if self._is_ligand_file(basename):
+        if self._is_ligand_file(basename, path=path):
             return "ligand"
 
         # Check for SEARCH_MODEL indicators FIRST (templates, NOT positioned)
@@ -1109,17 +1109,63 @@ class BestFilesTracker:
         # Default: assume it's a model (conservative - better to try refinement)
         return "model"
 
-    def _is_ligand_file(self, basename):
-        """Check if file is a ligand (small molecule)."""
-        ligand_patterns = ['lig.pdb', 'lig.cif', 'ligand.pdb', 'ligand.cif',
-                          'lig_', 'ligand_', 'restraint', 'constraint']
-        not_ligand = ['ligand_fit', 'ligandfit', 'with_ligand', '_liganded']
+    def _is_ligand_file(self, basename, path=None):
+        """
+        Check if file is a ligand (small molecule).
 
-        is_ligand = any(p in basename for p in ligand_patterns)
-        is_excluded = any(p in basename for p in not_ligand)
-        is_small_name = len(basename) < 20
+        Strategy:
+        1. Fast exclusion — output files that happen to contain 'ligand' in a
+           different sense (ligand_fit output, with_ligand model, etc.) are
+           NOT small-molecule ligands.
+        2. Word-boundary pattern matching on the filename to catch names like
+           lig.pdb, LIG_001.pdb, ligand.pdb, atp_ligand.pdb etc.  Uses fnmatch
+           so '*' matches any prefix/suffix without false-positives on substrings
+           like 'noligand' (which DOES contain 'ligand.pdb' as a substring!).
+        3. Content fallback — HETATM-only PDB files (e.g. atp.pdb, gdp.pdb)
+           that carry a hetcode name pass even when the name gives no hint.
+        """
+        import fnmatch, re as _re
 
-        return is_ligand and not is_excluded and is_small_name
+        # Step 1: These are output/composite files, NOT small-molecule ligands
+        not_ligand_patterns = [
+            'ligand_fit*', '*ligand_fit*',
+            'ligandfit*',  '*ligandfit*',
+            '*with_ligand*',
+            '*_liganded*',
+        ]
+        if any(fnmatch.fnmatch(basename, p) for p in not_ligand_patterns):
+            return False
+
+        # Step 2: Word-boundary ligand patterns.
+        # Match 'lig' or 'ligand' only when they appear at the START of the name
+        # or immediately after a separator (_  -  .), and before a separator or
+        # end-of-stem.  This prevents 'noligand' from matching.
+        WORD_SEP = r'(?:^|[_\-\.])'
+        AFTER    = r'(?=[_\-\.]|\.(?:pdb|cif)$|$)'
+        word_boundary_ligand = _re.search(
+            r'(?:' + WORD_SEP + r'lig' + AFTER + r'|'
+                   + WORD_SEP + r'ligand' + AFTER + r')',
+            basename
+        )
+        # Also catch pure restraint/constraint files
+        restraint_match = any(p in basename for p in ('restraint', 'constraint'))
+
+        if word_boundary_ligand or restraint_match:
+            return True
+
+        # Step 3: Content-based fallback for PDB files (e.g. atp.pdb, gdp.pdb,
+        # hem.pdb) whose names give no ligand hint.
+        if path and basename.endswith('.pdb'):
+            try:
+                from libtbx.langchain.agent.workflow_state import _pdb_is_small_molecule
+            except ImportError:
+                try:
+                    from agent.workflow_state import _pdb_is_small_molecule
+                except ImportError:
+                    return False
+            return _pdb_is_small_molecule(path)
+
+        return False
 
     def _classify_cif_content(self, path, basename):
         """

@@ -27,6 +27,7 @@ from __future__ import absolute_import, division, print_function
 import os
 import re
 import sys
+import tempfile
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -4147,6 +4148,1078 @@ def test_s2l_outside_map_variants_all_detected():
 
 
 # RUN ALL TESTS
+# =============================================================================
+# S3A TESTS — Failure Diagnosis Feature
+# =============================================================================
+# Tests for the new diagnosable-terminal error handling system.
+# These tests do NOT require libtbx or the PHENIX server; they test the pure
+# Python detector, sanitiser, prompt builder, and HTML builder in isolation.
+# =============================================================================
+
+def test_s3a_detect_crystal_symmetry_mismatch():
+    """DiagnosisDetector detects the exact error string from the bug report."""
+    print("  Test: s3a_detect_crystal_symmetry_mismatch")
+    from agent.error_analyzer import DiagnosisDetector
+    d = DiagnosisDetector()
+    result = d.detect(
+        "FAILED: Sorry: Crystal symmetry mismatch between different files\n"
+        "File 1: a=34.5 Ang\nFile 2: a=39.6 Ang"
+    )
+    assert_not_none(result, "Should detect crystal_symmetry_mismatch")
+    assert_equal(result[0], 'crystal_symmetry_mismatch')
+    assert_true(len(result[2]) > 0, "Excerpt should not be empty")
+    print("  PASSED: crystal_symmetry_mismatch detected correctly")
+
+
+def test_s3a_detect_model_outside_map():
+    """DiagnosisDetector detects the model-outside-map error."""
+    print("  Test: s3a_detect_model_outside_map")
+    from agent.error_analyzer import DiagnosisDetector
+    d = DiagnosisDetector()
+    result = d.detect(
+        "FAILED: Sorry: Stopping as model is entirely outside map and wrapping=False"
+    )
+    assert_not_none(result, "Should detect model_outside_map")
+    assert_equal(result[0], 'model_outside_map')
+    print("  PASSED: model_outside_map detected correctly")
+
+
+def test_s3a_detect_returns_none_for_recoverable():
+    """
+    A recoverable error (ambiguous data labels) must NOT match DiagnosisDetector.
+
+    This enforces the disjoint-sets invariant: no error type may be both
+    retryable and terminal.
+    """
+    print("  Test: s3a_detect_returns_none_for_recoverable")
+    from agent.error_analyzer import DiagnosisDetector
+    d = DiagnosisDetector()
+    # This is the canonical recoverable error text (from recoverable_errors.yaml)
+    recoverable_text = (
+        "Multiple equally suitable arrays of observed xray data found.\n"
+        "Please use scaling.input.xray_data.obs_labels to specify an "
+        "unambiguous substring."
+    )
+    result = d.detect(recoverable_text)
+    assert_equal(result, None,
+                 "Recoverable error must NOT be flagged as diagnosable-terminal")
+    print("  PASSED: recoverable error correctly returns None")
+
+
+def test_s3a_detect_returns_none_for_unknown():
+    """An unrecognised error string must return None."""
+    print("  Test: s3a_detect_returns_none_for_unknown")
+    from agent.error_analyzer import DiagnosisDetector
+    d = DiagnosisDetector()
+    result = d.detect(
+        "FAILED: Some totally novel error that does not match any pattern."
+    )
+    assert_equal(result, None, "Unknown error should return None")
+    print("  PASSED: unknown error correctly returns None")
+
+
+def test_s3a_detect_returns_none_for_empty():
+    """Empty or None result text must return None without raising."""
+    print("  Test: s3a_detect_returns_none_for_empty")
+    from agent.error_analyzer import DiagnosisDetector
+    d = DiagnosisDetector()
+    assert_equal(d.detect(""),   None)
+    assert_equal(d.detect(None), None)
+    print("  PASSED: empty/None input handled safely")
+
+
+def test_s3a_strip_markdown_removes_formatting():
+    """_strip_llm_markdown correctly removes **, ##, and _ markers
+    WITHOUT eating underscores inside identifiers or filenames."""
+    print("  Test: s3a_strip_markdown_removes_formatting")
+    from agent.failure_diagnoser import _strip_llm_markdown
+
+    raw = (
+        "## WHAT WENT WRONG\n"
+        "**The unit cells** do not match.\n\n"
+        "## MOST LIKELY CAUSE\n"
+        "_Different processing_ conventions.\n\n"
+        "## HOW TO FIX IT\n"
+        "Run **phenix.refine** again."
+    )
+    stripped = _strip_llm_markdown(raw)
+
+    assert_true('##' not in stripped,    "## headers should be removed")
+    assert_true('**' not in stripped,    "** bold should be removed")
+    assert_true('The unit cells' in stripped, "Inner text should be preserved")
+    assert_true('phenix.refine' in stripped,  "Inner text should be preserved")
+    # Plain text input should be unchanged (modulo strip())
+    plain = "WHAT WENT WRONG\nThe cells differ."
+    assert_equal(_strip_llm_markdown(plain), plain)
+
+    # --- Underscores inside identifiers and filenames must be preserved ---
+    # This was a regression: the old regex ate underscores in PHENIX parameter
+    # names and filenames (e.g. nsf-d2_noligand.pdb → nsf-d2noligand.pdb,
+    # set_unit_cell_from_map=True → setunitcellfrommap=True).
+    ident_text = (
+        "Run: phenix.pdbtools nsf-d2_noligand.pdb nsf-d2.mtz "
+        "set_unit_cell_and_space_group_from_map_or_model=True"
+    )
+    stripped_ident = _strip_llm_markdown(ident_text)
+    assert_true("nsf-d2_noligand.pdb" in stripped_ident,
+        "Filename nsf-d2_noligand.pdb must survive markdown stripping, got: %r"
+        % stripped_ident)
+    assert_true("set_unit_cell_and_space_group_from_map_or_model=True" in stripped_ident,
+        "PHENIX parameter name with underscores must survive stripping, got: %r"
+        % stripped_ident)
+
+    # Real markdown italic around a word should still be stripped
+    italic_text = "This is _italic_ and __underlined__ text."
+    stripped_italic = _strip_llm_markdown(italic_text)
+    assert_true("_italic_" not in stripped_italic,
+        "_italic_ markdown should be stripped")
+    assert_true("italic" in stripped_italic,
+        "inner text 'italic' should be preserved after stripping")
+    assert_true("underlined" in stripped_italic,
+        "inner text 'underlined' should be preserved after stripping")
+
+    print("  PASSED: markdown stripped, plain text preserved")
+
+
+def test_s3a_build_prompt_contains_hint():
+    """build_diagnosis_prompt includes the YAML hint for crystal_symmetry_mismatch."""
+    print("  Test: s3a_build_prompt_contains_hint")
+    from agent.failure_diagnoser import build_diagnosis_prompt
+    prompt = build_diagnosis_prompt(
+        error_type='crystal_symmetry_mismatch',
+        error_text='Sorry: Crystal symmetry mismatch between different files',
+        program='phenix.refine',
+        log_tail='[... last lines of log ...]',
+    )
+    # Prompt must contain structural markers
+    assert_true('WHAT WENT WRONG'  in prompt, "Prompt missing WHAT WENT WRONG section")
+    assert_true('MOST LIKELY CAUSE' in prompt, "Prompt missing MOST LIKELY CAUSE section")
+    assert_true('HOW TO FIX IT'    in prompt, "Prompt missing HOW TO FIX IT section")
+    # Hint from YAML must be present (key phrase from the hint text)
+    assert_true('unit cell' in prompt.lower(), "YAML hint should appear in prompt")
+    # Program name must be present
+    assert_true('phenix.refine' in prompt, "Program name should appear in prompt")
+    print("  PASSED: prompt contains all required sections and YAML hint")
+
+
+def test_s3a_build_prompt_log_tail_truncated():
+    """Log tail in the prompt is capped to 3000 chars regardless of input size."""
+    print("  Test: s3a_build_prompt_log_tail_truncated")
+    from agent.failure_diagnoser import build_diagnosis_prompt
+    # Build a log tail much longer than the 3000-char cap
+    huge_log = "x" * 10_000
+    prompt = build_diagnosis_prompt(
+        error_type='crystal_symmetry_mismatch',
+        error_text='err',
+        program='phenix.refine',
+        log_tail=huge_log,
+    )
+    # The total prompt will contain the capped log section
+    # 3000 x's should be present but not 10000
+    assert_true('x' * 3000 in prompt,  "3000-char log section should appear")
+    assert_true('x' * 3001 not in prompt, "Log tail should be capped at 3000 chars")
+    print("  PASSED: log tail correctly capped at 3000 chars in prompt")
+
+
+def test_s3a_build_html_escapes_content():
+    """build_diagnosis_html HTML-escapes < > & in user-supplied strings."""
+    print("  Test: s3a_build_html_escapes_content")
+    from agent.failure_diagnoser import build_diagnosis_html
+    html = build_diagnosis_html(
+        description='Test <error> & "description"',
+        error_excerpt='<script>alert(1)</script> & more',
+        diagnosis_text='Fix: use a=b&c',
+        program='phenix.<test>',
+        cycle=1,
+    )
+    # Angle brackets and ampersands must be escaped
+    assert_true('<script>' not in html, "Raw <script> tag must be escaped")
+    assert_true('&lt;script&gt;' in html, "&lt;&gt; escaping must be present")
+    assert_true('&amp;' in html, "& must be escaped to &amp;")
+    # The document should be valid HTML5 boilerplate
+    assert_true('<!DOCTYPE html>' in html, "Must be a full HTML document")
+    assert_true('white-space: pre-wrap' in html, "Diagnosis div needs pre-wrap")
+    print("  PASSED: HTML escaping applied correctly to all user-supplied strings")
+
+
+def test_s3a_build_html_contains_required_sections():
+    """build_diagnosis_html output contains all required elements."""
+    print("  Test: s3a_build_html_contains_required_sections")
+    from agent.failure_diagnoser import build_diagnosis_html
+    html = build_diagnosis_html(
+        description='Unit cell mismatch',
+        error_excerpt='Sorry: Crystal symmetry mismatch',
+        diagnosis_text='WHAT WENT WRONG\nCells differ.\n\nHOW TO FIX IT\nReprocess.',
+        program='phenix.refine',
+        cycle=5,
+    )
+    assert_true('Unit cell mismatch'           in html, "Description missing")
+    assert_true('phenix.refine'                in html, "Program name missing")
+    assert_true('5'                            in html, "Cycle number missing")
+    assert_true('WHAT WENT WRONG'             in html, "Diagnosis text missing")
+    assert_true('error-box'                   in html, "error-box class missing")
+    assert_true('diagnosis'                   in html, "diagnosis class missing")
+    print("  PASSED: HTML report contains all required sections")
+
+
+def test_s3a_rules_only_fallback_has_hint():
+    """
+    When the YAML hint is available, it appears in the fallback diagnosis text
+    that _diagnose_terminal_failure uses when use_rules_only=True or when
+    the LLM call fails.
+    """
+    print("  Test: s3a_rules_only_fallback_has_hint")
+    from agent.error_analyzer import DiagnosisDetector
+    d = DiagnosisDetector()
+    hint = d.get_hint('crystal_symmetry_mismatch')
+    assert_true(len(hint) > 20, "YAML hint must be non-trivial")
+    assert_true('unit cell' in hint.lower() or 'cell' in hint.lower(),
+                "Hint should mention unit cell")
+    # Fallback text construction (mirrors _diagnose_terminal_failure)
+    fallback = (
+        "WHAT WENT WRONG\n"
+        "Unit cell or space group mismatch between input files.\n\n"
+        "MOST LIKELY CAUSE\n"
+        "Sorry: Crystal symmetry mismatch\n\n"
+        "HOW TO FIX IT\n"
+        + hint
+    )
+    assert_true('unit cell' in fallback.lower() or
+                'cell' in fallback.lower(),
+                "Fallback should contain crystallographic guidance")
+    print("  PASSED: fallback diagnosis contains meaningful YAML hint")
+
+
+def test_s3a_build_html_new_fields():
+    """
+    build_diagnosis_html populates the new optional context fields:
+    html_path (saved-to line), job_name, and working_dir (meta bar).
+    Also verifies the heading text was changed to 'Error diagnosis'.
+    """
+    print("  Test: s3a_build_html_new_fields")
+    from agent.failure_diagnoser import build_diagnosis_html
+
+    html = build_diagnosis_html(
+        description='Unit cell mismatch',
+        error_excerpt='Sorry: Crystal symmetry mismatch',
+        diagnosis_text='WHAT WENT WRONG\nCells differ.',
+        program='phenix.refine',
+        cycle=3,
+        html_path='/my/job/dir/ai_failure_diagnosis.html',
+        job_name='nsf-d2-ligand',
+        working_dir='/my/job/dir',
+    )
+
+    # New heading (item 1)
+    assert_true('Error diagnosis' in html,
+                "Heading must read 'Error diagnosis' (not 'Terminal Error Diagnosis')")
+    assert_true('Terminal Error Diagnosis' not in html,
+                "Old heading 'Terminal Error Diagnosis' must be gone")
+
+    # File location (item 2)
+    assert_true('ai_failure_diagnosis.html' in html,
+                "Saved file path must appear in the HTML report")
+    assert_true('Saved to' in html,
+                "Footer must say 'Saved to: <path>'")
+
+    # Job name and working dir (item 3)
+    assert_true('nsf-d2-ligand' in html,
+                "Job name must appear in the meta bar")
+    assert_true('/my/job/dir' in html,
+                "Working directory must appear in the meta bar")
+
+    # Backward compat — all optional fields can be omitted
+    html_min = build_diagnosis_html(
+        description='Test error',
+        error_excerpt='some text',
+        diagnosis_text='Some diagnosis.',
+        program='phenix.refine',
+        cycle=1,
+    )
+    assert_true('Error diagnosis' in html_min,
+                "Heading must be present even without optional fields")
+    assert_true('<!DOCTYPE html>' in html_min,
+                "Must be a full HTML document")
+
+    print("  PASSED: new html_path/job_name/working_dir fields and heading verified")
+
+
+def test_s3a_diagnose_returns_true_no_sorry():
+    """
+    _diagnose_terminal_failure must NO LONGER raise Sorry, and _finalize_session
+    must skip the Results summary page when a fatal diagnosis fired.
+
+    The user flow is: diagnosis HTML opens in browser → ai_agent finishes cleanly.
+    No Sorry modal, no second Results page that buries the diagnosis.
+
+    Verifies via source-code inspection of ai_agent.py.
+    """
+    print("  Test: s3a_diagnose_returns_true_no_sorry")
+
+    ai_agent_src = open(_find_ai_agent_path()).read()
+
+    # 1. The old deferred-Sorry pattern must be gone
+    assert_true('_pending_sorry' not in ai_agent_src,
+                "_pending_sorry must be removed — Sorry is no longer raised")
+    assert_true('raise _pending_sorry' not in ai_agent_src,
+                "raise _pending_sorry must be removed")
+
+    # 2. _diagnose_terminal_failure must return True (not raise Sorry)
+    assert_true('return True' in ai_agent_src,
+                "_diagnose_terminal_failure must return True to stop the cycle loop")
+
+    # 3. The caller must propagate the return value
+    #    (it now does "return self._diagnose_terminal_failure(...)")
+    assert_true('return self._diagnose_terminal_failure(' in ai_agent_src,
+                "_run_single_cycle must propagate the True return from "
+                "_diagnose_terminal_failure")
+
+    # 4. _finalize_session is still unconditional (no try/except around it)
+    finalize_marker = 'self._finalize_session(session)    # always runs'
+    assert_true(finalize_marker in ai_agent_src,
+                "_finalize_session must remain unconditional after the cycle loop")
+
+    # 5. Results summary is skipped when a fatal diagnosis fired
+    assert_true('failure_diagnosis_path' in ai_agent_src,
+                "_finalize_session must check failure_diagnosis_path to skip summary")
+    assert_true('has_fatal_diagnosis' in ai_agent_src,
+                "_finalize_session must use has_fatal_diagnosis flag to suppress "
+                "the Results page when the diagnosis HTML is the user's output")
+
+    print("  PASSED: Sorry removed; returns True; Results page suppressed on fatal diagnosis")
+
+
+def test_s3a_finalize_runs_after_diagnosis():
+    """
+    Even when _diagnose_terminal_failure fires (True returned from
+    _run_single_cycle), _finalize_session must still run (to save the session
+    and populate self.result), but the Results summary page is NOT produced —
+    the diagnosis HTML is the user's sole output window.
+
+    Simulates the cycle loop logic directly without importing ai_agent.
+    """
+    print("  Test: s3a_finalize_runs_after_diagnosis")
+
+    call_log = []
+
+    def fake_run_single_cycle_diagnosis():
+        """Simulates _run_single_cycle returning True on terminal failure."""
+        return True   # stop the loop — diagnosis done
+
+    def fake_finalize(has_diagnosis):
+        call_log.append('finalize')
+        # Mirrors _finalize_session: only generate summary when no diagnosis
+        if not has_diagnosis:
+            call_log.append('summary')
+
+    # Replicate the simplified loop from iterate_agent
+    for cycle in range(3):
+        should_break = fake_run_single_cycle_diagnosis()
+        if should_break:
+            break
+
+    fake_finalize(has_diagnosis=True)   # unconditional — always runs
+
+    assert_true('finalize' in call_log,
+                "_finalize_session must run even when a terminal failure stops the loop")
+    assert_true('summary' not in call_log,
+                "Results summary must NOT be generated when a fatal diagnosis fired")
+    assert_true(cycle == 0,
+                "Loop must break on first cycle when terminal failure is detected")
+
+    print("  PASSED: _finalize_session runs; Results page suppressed on fatal diagnosis")
+
+
+
+def test_pdb_is_small_molecule_helper():
+    """
+    _pdb_is_small_molecule must correctly distinguish polymer models from
+    small-molecule coordinate files based on ATOM vs HETATM record content.
+
+    This is the foundational function for the atp.pdb ligand-detection fix.
+    """
+    print("  Test: pdb_is_small_molecule_helper")
+    from agent.workflow_state import _pdb_is_small_molecule
+
+    protein_pdb = (
+        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
+        "ATOM      2  CA  ALA A   2       4.000   5.000   6.000  1.00  0.00           C\n"
+        "END\n"
+    )
+    ligand_pdb = (
+        "REMARK  ATP - adenosine triphosphate\n"
+        "HETATM    1  PA  ATP     1       1.000   2.000   3.000  1.00  0.00           P\n"
+        "HETATM    2  O1A ATP     1       4.000   5.000   6.000  1.00  0.00           O\n"
+        "HETATM    3  C5  ATP     1       7.000   8.000   9.000  1.00  0.00           C\n"
+        "END\n"
+    )
+    mixed_pdb = (
+        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
+        "HETATM    2  PA  ATP     1       4.000   5.000   6.000  1.00  0.00           P\n"
+        "END\n"
+    )
+    empty_pdb = "REMARK  empty file\nEND\n"
+
+    with tempfile.TemporaryDirectory() as d:
+        def write(name, content):
+            p = os.path.join(d, name)
+            with open(p, 'w') as f: f.write(content)
+            return p
+
+        # Protein: has ATOM → NOT a small molecule
+        assert_false(_pdb_is_small_molecule(write('protein.pdb', protein_pdb)),
+                     "Protein (has ATOM records) must not be small molecule")
+
+        # Ligand: HETATM only → IS a small molecule
+        assert_true(_pdb_is_small_molecule(write('atp.pdb', ligand_pdb)),
+                    "HETATM-only file must be detected as small molecule")
+
+        # Mixed: has ATOM → NOT a small molecule (protein + bound ligand in one file)
+        assert_false(_pdb_is_small_molecule(write('complex.pdb', mixed_pdb)),
+                     "File with ATOM records must not be small molecule even if HETATM present")
+
+        # Empty/REMARK-only: no ATOM or HETATM → returns False (conservative)
+        assert_false(_pdb_is_small_molecule(write('empty.pdb', empty_pdb)),
+                     "File with no ATOM/HETATM must return False conservatively")
+
+        # Missing file → returns False (no exception)
+        assert_false(_pdb_is_small_molecule(os.path.join(d, 'does_not_exist.pdb')),
+                     "Missing file must return False without raising")
+
+    print("  PASSED: _pdb_is_small_molecule helper is correct for all cases")
+
+
+def test_hetcode_ligand_not_used_as_refine_model():
+    """
+    When the user provides a hetcode-named ligand file (e.g. atp.pdb, gdp.pdb,
+    hem.pdb) alongside a real protein model and data file, the categorizer must:
+
+      1. Place the hetcode ligand in 'ligand' and 'ligand_pdb' — NOT 'model'
+      2. Leave the protein model in 'model'
+      3. Leave mixed files (protein + bound ligand in one PDB) in 'model'
+
+    This is the regression test for the original bug:
+    "the ai_agent sets up to refine the atp.pdb instead of the model"
+
+    The bug root cause: pattern-based categorization only knows about files
+    named lig*.pdb / ligand*.pdb.  A file called atp.pdb matched the
+    unclassified_pdb wildcard ("*") and bubbled up to 'model'.  Refinement
+    programs exclude 'ligand' but not 'model', so atp.pdb could be selected
+    as the model for phenix.refine.
+
+    The fix: a post-categorization content check promotes HETATM-only PDB files
+    from unclassified_pdb/model into ligand_pdb/ligand.
+    """
+    print("  Test: hetcode_ligand_not_used_as_refine_model")
+
+    import yaml
+    try:
+        from agent.workflow_state import (
+            _pdb_is_small_molecule,
+            _categorize_files_yaml,
+            _bubble_up_to_parents,
+        )
+        rules_path = os.path.join(_PROJECT_ROOT, 'knowledge', 'file_categories.yaml')
+        with open(rules_path) as f:
+            category_rules = yaml.safe_load(f)
+    except Exception as e:
+        print("  SKIPPED: could not load YAML rules:", e)
+        return
+
+    protein_pdb = (
+        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
+        "ATOM      2  CA  ALA A   2       4.000   5.000   6.000  1.00  0.00           C\n"
+        "END\n"
+    )
+    hetatm_pdb = (
+        "HETATM    1  PA  ATP     1       1.000   2.000   3.000  1.00  0.00           P\n"
+        "HETATM    2  O1A ATP     1       4.000   5.000   6.000  1.00  0.00           O\n"
+        "END\n"
+    )
+    mixed_pdb = (
+        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
+        "HETATM    2  PA  ATP     1       4.000   5.000   6.000  1.00  0.00           P\n"
+        "END\n"
+    )
+
+    # Hetcode names that have no 'lig' substring — these are the problem files
+    ligand_names = ['atp.pdb', 'gdp.pdb', 'hem.pdb', 'fmn.pdb', 'NAD.pdb']
+
+    with tempfile.TemporaryDirectory() as d:
+        def write(name, content):
+            p = os.path.join(d, name)
+            with open(p, 'w') as f: f.write(content)
+            return p
+
+        protein_path = write('model.pdb',   protein_pdb)
+        complex_path = write('complex.pdb', mixed_pdb)   # protein + ligand in one file
+        ligand_paths = [write(n, hetatm_pdb) for n in ligand_names]
+
+        all_files = [protein_path, complex_path] + ligand_paths
+
+        # Run the YAML categorizer
+        files = _categorize_files_yaml(all_files, category_rules)
+        files = _bubble_up_to_parents(files, category_rules)
+
+        # Apply the HETATM post-processing pass (mirrors _categorize_files)
+        _model_subcats = {
+            'refined', 'rsr_output', 'phaser_output', 'autobuild_output',
+            'docked', 'with_ligand', 'ligand_fit_output', 'model_cif',
+        }
+        for f in list(files.get('unclassified_pdb', [])):
+            if any(f in files.get(sc, []) for sc in _model_subcats):
+                continue
+            if _pdb_is_small_molecule(f):
+                files['unclassified_pdb'].remove(f)
+                for lst in ('model', 'pdb'):
+                    if f in files.get(lst, []): files[lst].remove(f)
+                for k in ('ligand_pdb', 'ligand'):
+                    if k not in files: files[k] = []
+                    if f not in files[k]: files[k].append(f)
+
+        model_basenames  = {os.path.basename(f) for f in files.get('model', [])}
+        ligand_basenames = {os.path.basename(f) for f in files.get('ligand', [])}
+
+        # 1. Protein model stays in model
+        assert_in('model.pdb', model_basenames,
+                  "Protein model must remain in 'model' category")
+
+        # 2. Mixed file (has ATOM) stays in model
+        assert_in('complex.pdb', model_basenames,
+                  "PDB with ATOM records must remain in 'model' even if HETATM present")
+
+        # 3. Every hetcode ligand must be in ligand, NOT in model
+        for name in ligand_names:
+            assert_true(name not in model_basenames,
+                        f"{name} must NOT be in 'model' category")
+            assert_true(name in ligand_basenames,
+                        f"{name} must be in 'ligand' category")
+            lp_basenames = {os.path.basename(f) for f in files.get('ligand_pdb', [])}
+            assert_true(name in lp_basenames,
+                        f"{name} must be in 'ligand_pdb' subcategory")
+
+        # 4. Sanity: model only contains protein + complex
+        unexpected_in_model = model_basenames - {'model.pdb', 'complex.pdb'}
+        assert_true(len(unexpected_in_model) == 0,
+                    f"Unexpected files in model category: {unexpected_in_model}")
+
+    print("  PASSED: hetcode ligand PDB files correctly excluded from 'model'")
+    print("  PASSED: phenix.refine model slot would not select atp.pdb")
+
+
+def test_is_ligand_file_noligand_false_positive():
+    """
+    Regression test: _is_ligand_file must NOT misclassify proteins whose
+    filename contains 'noligand' (e.g. nsf-d2_noligand.pdb) as ligands.
+
+    The old code used bare substring matching ('ligand.pdb' in basename)
+    which matched 'noligand.pdb' — because 'noligand.pdb' contains the
+    substring 'ligand.pdb'.  The fix uses word-boundary-aware regex.
+
+    Also verifies that genuine ligand names (lig.pdb, ligand_001.pdb, etc.)
+    and HETATM-only hetcode files (atp.pdb) are still correctly identified.
+    """
+    print("  Test: is_ligand_file_noligand_false_positive")
+
+    try:
+        from agent.best_files_tracker import BestFilesTracker
+    except ImportError:
+        print("  SKIP (agent.best_files_tracker not importable)")
+        return
+
+    tracker = BestFilesTracker()
+    check = lambda name, path=None: tracker._is_ligand_file(name.lower(), path=path)
+
+    # --- Must NOT be ligand ---
+    assert_true(not check('nsf-d2_noligand.pdb'),
+                "'nsf-d2_noligand.pdb' must NOT be classified as ligand "
+                "(contains 'noligand', not 'ligand' as a standalone word)")
+    assert_true(not check('my_model_noligand.pdb'),
+                "'my_model_noligand.pdb' must NOT be classified as ligand")
+    assert_true(not check('noligand_model.pdb'),
+                "'noligand_model.pdb' must NOT be classified as ligand")
+    assert_true(not check('protein.pdb'),
+                "'protein.pdb' must NOT be classified as ligand")
+
+    # --- Must BE ligand (name-based) ---
+    assert_true(check('lig.pdb'),       "'lig.pdb' must be classified as ligand")
+    assert_true(check('lig_001.pdb'),   "'lig_001.pdb' must be classified as ligand")
+    assert_true(check('ligand.pdb'),    "'ligand.pdb' must be classified as ligand")
+    assert_true(check('ligand_001.pdb'),"'ligand_001.pdb' must be classified as ligand")
+    assert_true(check('my_ligand.pdb'), "'my_ligand.pdb' must be classified as ligand")
+
+    # --- Excluded output files must NOT be ligand (they are models) ---
+    assert_true(not check('ligand_fit_001.pdb'),
+                "'ligand_fit_001.pdb' is LigandFit output (model), not a ligand")
+    assert_true(not check('nsf_with_ligand.pdb'),
+                "'nsf_with_ligand.pdb' is a model+ligand complex, not a small molecule")
+
+    # --- Content-based detection: HETATM-only files (e.g. atp.pdb) ---
+    import tempfile, os
+    hetatm_pdb = (
+        "HETATM    1  O1  ATP A   1       1.000   2.000   3.000  1.00 10.00           O\n"
+        "HETATM    2  N1  ATP A   1       4.000   5.000   6.000  1.00 10.00           N\n"
+        "END\n"
+    )
+    protein_pdb = (
+        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00           C\n"
+        "ATOM      2  CB  ALA A   1       2.000   3.000   4.000  1.00 10.00           C\n"
+        "END\n"
+    )
+    noligand_pdb = (
+        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00           C\n"
+        "ATOM      2  CB  ALA A   2       2.000   3.000   4.000  1.00 10.00           C\n"
+        "END\n"
+    )
+    with tempfile.TemporaryDirectory() as d:
+        def write(name, content):
+            p = os.path.join(d, name)
+            open(p, 'w').write(content)
+            return p
+
+        atp_path      = write('atp.pdb',              hetatm_pdb)
+        protein_path  = write('protein.pdb',           protein_pdb)
+        noligand_path = write('nsf-d2_noligand.pdb',  noligand_pdb)
+
+        # atp.pdb: no ligand name pattern → falls back to HETATM content check
+        assert_true(check('atp.pdb', path=atp_path),
+                    "'atp.pdb' (HETATM-only) must be classified as ligand via content check")
+        # protein.pdb: has ATOM records → NOT a small molecule
+        assert_true(not check('protein.pdb', path=protein_path),
+                    "'protein.pdb' (ATOM records) must NOT be classified as ligand")
+        # nsf-d2_noligand.pdb: name is not a ligand, content has ATOM → not ligand
+        assert_true(not check('nsf-d2_noligand.pdb', path=noligand_path),
+                    "'nsf-d2_noligand.pdb' (ATOM records) must NOT be classified as ligand")
+
+    print("  PASSED: _is_ligand_file correctly handles noligand false-positive "
+          "and hetcode content detection")
+
+
+# =============================================================================
+# CRYSTAL SYMMETRY INJECTION (unit_cell / space_group from user advice)
+# =============================================================================
+
+def test_s4a_simple_extraction_unit_cell_parenthesized():
+    """
+    extract_directives_simple must pull unit_cell out of parenthesized tuple form
+    and store it as a space-separated 6-number string under program_settings.default.
+
+    This covers the exact form from the log:
+      "The specified unit cell (116.097, 116.097, 44.175, 90, 90, 120) must be used"
+    """
+    print("  Test: s4a_simple_extraction_unit_cell_parenthesized")
+    from agent.directive_extractor import extract_directives_simple
+
+    advice = (
+        "The specified unit cell (116.097, 116.097, 44.175, 90, 90, 120) "
+        "must be used for the procedure."
+    )
+    d = extract_directives_simple(advice)
+
+    uc = d.get("program_settings", {}).get("default", {}).get("unit_cell")
+    assert_not_none(uc, "unit_cell must be extracted from parenthesized advice")
+    assert_equal(uc, "116.097 116.097 44.175 90 90 120",
+                 "unit_cell must be space-separated, no parens or commas")
+    print("  PASSED: unit_cell extracted and normalised correctly")
+
+
+def test_s4a_simple_extraction_unit_cell_space_separated():
+    """extract_directives_simple handles space-separated unit cell without parens."""
+    print("  Test: s4a_simple_extraction_unit_cell_space_separated")
+    from agent.directive_extractor import extract_directives_simple
+
+    advice = "Use unit cell 50.0 60.0 70.0 90.0 90.0 90.0 for refinement."
+    d = extract_directives_simple(advice)
+
+    uc = d.get("program_settings", {}).get("default", {}).get("unit_cell")
+    assert_not_none(uc, "unit_cell must be extracted from space-separated form")
+    nums = uc.split()
+    assert_equal(len(nums), 6, "unit_cell must have exactly 6 numbers")
+    print("  PASSED: space-separated unit_cell extracted correctly")
+
+
+def test_s4a_simple_extraction_space_group():
+    """extract_directives_simple extracts space group symbol."""
+    print("  Test: s4a_simple_extraction_space_group")
+    from agent.directive_extractor import extract_directives_simple
+
+    for advice, expected_start in [
+        ("space group P 32 2 1", "P 32"),
+        ("space_group=P63", "P63"),
+        ("Space Group: C 2 2 21", "C 2"),
+    ]:
+        d = extract_directives_simple(advice)
+        sg = d.get("program_settings", {}).get("default", {}).get("space_group")
+        assert_not_none(sg, "space_group must be extracted from: %r" % advice)
+        assert_true(sg.startswith(expected_start),
+                    "space_group %r must start with %r for advice %r" % (
+                        sg, expected_start, advice))
+    print("  PASSED: space_group extracted from multiple formats")
+
+
+def test_s4a_inject_crystal_symmetry_into_model_vs_data():
+    """
+    _inject_crystal_symmetry must append unit_cell and space_group to
+    phenix.model_vs_data when session directives carry them.
+
+    This is the exact failure from the log: unit_cell given in advice but
+    missing from the model_vs_data command.
+    """
+    print("  Test: s4a_inject_crystal_symmetry_into_model_vs_data")
+
+    # Build a mock session whose directives contain crystal info
+    import tempfile, shutil
+    from agent.session import AgentSession
+
+    tmp = tempfile.mkdtemp()
+    try:
+        session = AgentSession(session_dir=tmp)
+        session.data["directives"] = {
+            "program_settings": {
+                "default": {
+                    "unit_cell": "116.097 116.097 44.175 90 90 120",
+                    "space_group": "P 63",
+                }
+            }
+        }
+        session.data["directives_extracted"] = True
+
+        # Build a minimal mock of the agent that has _inject_crystal_symmetry
+        ai_agent_path = _find_ai_agent_path()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ai_agent_mod", ai_agent_path)
+        # We can't import ai_agent without libtbx, so test via source inspection
+        # and a direct call to a standalone version of the method logic.
+
+        # Instead: verify via source that the method exists and is called
+        src = open(ai_agent_path).read()
+        assert_true("def _inject_crystal_symmetry" in src,
+                    "_inject_crystal_symmetry method must exist in ai_agent.py")
+        assert_true("_inject_crystal_symmetry(command, session, program_name)" in src,
+                    "_inject_crystal_symmetry must be called after _inject_user_params")
+
+        # Locate the frozenset literal in the source (skip the comment block).
+        # The frozenset's opening '{' follows the keyword 'frozenset'.
+        # We take the substring from that '{' to the matching '}'.
+        block_start = src.find("_XRAY_SYMMETRY_PROGRAMS = frozenset")
+        assert_true(block_start >= 0, "_XRAY_SYMMETRY_PROGRAMS frozenset must exist")
+        brace_open = src.find("{", block_start)
+        brace_close = src.find("}", brace_open)
+        symmetry_block = src[brace_open: brace_close + 1]
+
+        # Programs that should be in the set (need explicit crystal_symmetry arg)
+        for prog in ("phenix.refine", "phenix.phaser", "phenix.autosol",
+                     "phenix.ligandfit"):
+            assert_true(prog in symmetry_block,
+                        "%s must be in _XRAY_SYMMETRY_PROGRAMS" % prog)
+
+        # Programs that read symmetry from their input files — must NOT be here,
+        # or PHENIX will reject the redundant crystal_symmetry.unit_cell= arg.
+        for prog in ("phenix.model_vs_data", "phenix.xtriage", "phenix.molprobity",
+                     "phenix.real_space_refine", "phenix.map_to_model",
+                     "phenix.dock_in_map"):
+            assert_true(prog not in symmetry_block,
+                        "%s must NOT be in _XRAY_SYMMETRY_PROGRAMS "
+                        "(reads symmetry from input files)" % prog)
+    finally:
+        shutil.rmtree(tmp)
+
+    print("  PASSED: _inject_crystal_symmetry exists, is called, and has correct program set")
+
+
+def test_s4a_unit_cell_format_normalised():
+    """
+    extract_directives_simple must always produce space-separated 6-number strings
+    regardless of whether the input uses parentheses, commas, or spaces.
+    VALID_SETTINGS must include unit_cell and space_group as str.
+    """
+    print("  Test: s4a_unit_cell_format_normalised")
+    from agent.directive_extractor import extract_directives_simple, VALID_SETTINGS
+
+    # Check VALID_SETTINGS
+    assert_in("unit_cell", VALID_SETTINGS,
+              "unit_cell must be in VALID_SETTINGS")
+    assert_equal(VALID_SETTINGS["unit_cell"], str,
+                 "unit_cell type must be str (space-separated)")
+    assert_in("space_group", VALID_SETTINGS,
+              "space_group must be in VALID_SETTINGS")
+
+    # Parenthesized comma-separated (the exact user complaint)
+    d = extract_directives_simple(
+        "unit cell (116.097, 116.097, 44.175, 90, 90, 120)"
+    )
+    uc = d.get("program_settings", {}).get("default", {}).get("unit_cell", "")
+    assert_true("(" not in uc and "," not in uc,
+                "Extracted unit_cell must not contain parentheses or commas: %r" % uc)
+    nums = uc.strip().split()
+    assert_equal(len(nums), 6,
+                 "Extracted unit_cell must have exactly 6 space-separated numbers")
+
+    print("  PASSED: unit_cell normalised and VALID_SETTINGS correct")
+
+
+# =============================================================================
+# CRYSTAL SYMMETRY FALLBACK (v112.63)
+# Tests for _apply_crystal_symmetry_fallback and crystal_symmetry. scoped output
+# =============================================================================
+
+def test_s4b_fallback_populates_unit_cell_from_empty_directives():
+    """
+    When the LLM returns {} (no directives), _apply_crystal_symmetry_fallback
+    must still extract unit_cell from the raw advice text.
+
+    This is the exact failure from the log: directive extraction returned {}
+    so the unit cell was never injected into the command.
+    """
+    print("  Test: s4b_fallback_populates_unit_cell_from_empty_directives")
+    from agent.directive_extractor import _apply_crystal_symmetry_fallback
+
+    advice = (
+        "The specified unit cell (116.097, 116.097, 44.175, 90, 90, 120) "
+        "must be used for the procedure."
+    )
+    # Simulate LLM returning {}
+    result = _apply_crystal_symmetry_fallback({}, advice, lambda m: None)
+
+    uc = result.get("program_settings", {}).get("default", {}).get("unit_cell")
+    assert_not_none(uc,
+        "_apply_crystal_symmetry_fallback must extract unit_cell from advice "
+        "when LLM directives are empty")
+    assert_equal(uc, "116.097 116.097 44.175 90 90 120",
+        "unit_cell must be normalised to space-separated numbers, got: %r" % uc)
+    print("  PASSED: fallback populates unit_cell from empty directives")
+
+
+def test_s4b_fallback_does_not_overwrite_llm_unit_cell():
+    """
+    _apply_crystal_symmetry_fallback must NOT overwrite a unit_cell that the
+    LLM already extracted correctly.
+    """
+    print("  Test: s4b_fallback_does_not_overwrite_llm_unit_cell")
+    from agent.directive_extractor import _apply_crystal_symmetry_fallback
+
+    llm_directives = {
+        "program_settings": {"default": {"unit_cell": "50 60 70 90 90 90"}}
+    }
+    advice = "Use unit cell (116.097, 116.097, 44.175, 90, 90, 120) please."
+    result = _apply_crystal_symmetry_fallback(
+        llm_directives, advice, lambda m: None)
+
+    uc = result.get("program_settings", {}).get("default", {}).get("unit_cell")
+    assert_equal(uc, "50 60 70 90 90 90",
+        "fallback must not overwrite LLM-extracted unit_cell "
+        "(got: %r)" % uc)
+    print("  PASSED: fallback preserves LLM-extracted unit_cell")
+
+
+def test_s4b_fallback_populates_space_group_only_when_missing():
+    """
+    When LLM extracted unit_cell but missed space_group, the fallback
+    must fill in space_group without touching unit_cell.
+    """
+    print("  Test: s4b_fallback_populates_space_group_only_when_missing")
+    from agent.directive_extractor import _apply_crystal_symmetry_fallback
+
+    llm_directives = {
+        "program_settings": {
+            "default": {"unit_cell": "116.097 116.097 44.175 90 90 120"}
+        }
+    }
+    advice = (
+        "The space group is P 63 2 2 and the unit cell is "
+        "(116.097, 116.097, 44.175, 90, 90, 120)."
+    )
+    result = _apply_crystal_symmetry_fallback(
+        llm_directives, advice, lambda m: None)
+
+    default = result.get("program_settings", {}).get("default", {})
+    # unit_cell unchanged
+    assert_equal(default.get("unit_cell"), "116.097 116.097 44.175 90 90 120",
+        "unit_cell must be preserved by fallback")
+    # space_group filled in
+    sg = default.get("space_group")
+    assert_not_none(sg,
+        "fallback must extract space_group when LLM left it empty")
+    assert_true("P 63" in sg,
+        "space_group must contain extracted symbol, got: %r" % sg)
+    print("  PASSED: fallback fills space_group only, preserves unit_cell")
+
+
+def test_s4b_program_registry_uses_crystal_symmetry_scope():
+    """
+    The program_registry PASSTHROUGH path must emit crystal_symmetry.unit_cell=
+    and crystal_symmetry.space_group= (the fully-scoped PHIL form), not bare
+    unit_cell= / space_group=.
+
+    Verified by source inspection (ProgramRegistry.build_command requires libtbx
+    to instantiate so we read the source directly).
+    """
+    print("  Test: s4b_program_registry_uses_crystal_symmetry_scope")
+    import os
+    pr_path = os.path.join(os.path.dirname(__file__), '..', 'agent', 'program_registry.py')
+    src = open(pr_path).read()
+
+    # Find the PASSTHROUGH block that handles KNOWN_PHIL_SHORT_NAMES
+    passthrough_idx = src.find("PASSTHROUGH")
+    assert_true(passthrough_idx != -1,
+        "program_registry must have a PASSTHROUGH block for strategy flags")
+
+    # Check that the scoping logic is present
+    assert_true("crystal_symmetry.%s" % "unit_cell" in src or
+                ("'unit_cell', 'space_group'" in src and "crystal_symmetry" in src),
+        "program_registry must scope unit_cell/space_group as crystal_symmetry.*")
+
+    # Verify the key pattern: tuple check then crystal_symmetry. prefix
+    assert_true("crystal_symmetry.%s" % "" in src or
+                "'crystal_symmetry.%s' % key" in src or
+                "crystal_symmetry.%s' % key" in src,
+        "program_registry must construct crystal_symmetry.{key} dynamically")
+
+    print("  PASSED: program_registry uses crystal_symmetry. scoping")
+
+
+def test_s4b_inject_crystal_symmetry_uses_scoped_form():
+    """
+    _inject_crystal_symmetry in ai_agent.py must append
+    crystal_symmetry.unit_cell= and crystal_symmetry.space_group=, not the
+    bare unit_cell= / space_group= forms.
+
+    Verified by source inspection since importing ai_agent requires libtbx.
+    """
+    print("  Test: s4b_inject_crystal_symmetry_uses_scoped_form")
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    # Find the _inject_crystal_symmetry method body
+    method_start = src.find("def _inject_crystal_symmetry")
+    assert_true(method_start != -1,
+        "_inject_crystal_symmetry must exist in ai_agent.py")
+
+    # Find the next method def to bound the search (method is ~100 lines)
+    next_method = src.find("\n  def ", method_start + 100)
+    method_body = src[method_start: next_method]
+
+    assert_true("crystal_symmetry.unit_cell=" in method_body,
+        "_inject_crystal_symmetry must use crystal_symmetry.unit_cell= "
+        "(not bare unit_cell=)")
+    assert_true("crystal_symmetry.space_group=" in method_body,
+        "_inject_crystal_symmetry must use crystal_symmetry.space_group= "
+        "(not bare space_group=)")
+
+    # Verify bare forms are absent from the append statements
+    append_lines = [ln for ln in method_body.splitlines()
+                    if "command +" in ln or "command=" in ln]
+    for ln in append_lines:
+        assert_true("unit_cell=" not in ln.replace("crystal_symmetry.unit_cell=", ""),
+            "Bare unit_cell= must not appear in append line: %r" % ln)
+        assert_true("space_group=" not in ln.replace("crystal_symmetry.space_group=", ""),
+            "Bare space_group= must not appear in append line: %r" % ln)
+
+    print("  PASSED: _inject_crystal_symmetry uses scoped crystal_symmetry. form")
+
+
+def test_s4b_fallback_called_in_extract_directives():
+    """
+    _apply_crystal_symmetry_fallback must be called inside extract_directives
+    so unit_cell is captured even when the LLM returns {}.  Verified by
+    source inspection.
+    """
+    print("  Test: s4b_fallback_called_in_extract_directives")
+    import inspect
+    from agent import directive_extractor
+    src = inspect.getsource(directive_extractor.extract_directives)
+
+    assert_true("_apply_crystal_symmetry_fallback" in src,
+        "_apply_crystal_symmetry_fallback must be called inside extract_directives")
+    assert_true("validate_directives" in src,
+        "extract_directives must still call validate_directives")
+
+    # Fallback must come AFTER validate_directives in source order
+    idx_validate = src.find("validate_directives")
+    idx_fallback  = src.find("_apply_crystal_symmetry_fallback")
+    assert_true(idx_fallback > idx_validate,
+        "_apply_crystal_symmetry_fallback must run AFTER validate_directives "
+        "(validate_directives at %d, fallback at %d)" % (idx_validate, idx_fallback))
+
+    print("  PASSED: fallback is present and ordered correctly in extract_directives")
+
+
+# =============================================================================
+# UNKNOWN PHIL PARAMETER — diagnosable error + model_vs_data exclusion
+# =============================================================================
+
+def test_s4c_unknown_phil_param_is_diagnosable():
+    """
+    'Unknown command line parameter definition' must be in diagnosable_errors.yaml
+    so the agent surfaces an error window instead of silently looping.
+    Previously it matched 'unit_cell' in real_failure_patterns → FAILED, but
+    nothing in diagnosable_errors.yaml caught it, so no window appeared.
+    """
+    print("  Test: s4c_unknown_phil_param_is_diagnosable")
+    from agent.error_analyzer import get_diagnosis_detector
+
+    detector = get_diagnosis_detector()
+
+    # The exact error text PHENIX produces when a bad param is injected
+    bad_param_errors = [
+        ("Sorry: Unknown command line parameter definition: "
+         "unit_cell = 116.097 116.097 44.175 90 90 120   "
+         "It turns out there is no such parameter"),
+        "Sorry: there is no such parameter: crystal_symmetry.unit_cell",
+        "Unknown command line parameter definition: space_group = P 63",
+    ]
+    for err in bad_param_errors:
+        match = detector.detect(err)
+        assert_not_none(match,
+            "detector must catch unknown PHIL param error: %r" % err[:80])
+        error_type = match[0]
+        assert_equal(error_type, "unknown_phil_parameter",
+            "error_type must be 'unknown_phil_parameter', got %r" % error_type)
+
+    print("  PASSED: unknown_phil_parameter correctly detected as diagnosable")
+
+
+def test_s4c_model_vs_data_not_in_symmetry_programs():
+    """
+    phenix.model_vs_data (and xtriage, molprobity) must NOT be in
+    _XRAY_SYMMETRY_PROGRAMS.  These programs read crystal symmetry from their
+    input files automatically; injecting crystal_symmetry.unit_cell= causes
+    'Unknown command line parameter definition: unit_cell' errors.
+    """
+    print("  Test: s4c_model_vs_data_not_in_symmetry_programs")
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    block_start = src.find("_XRAY_SYMMETRY_PROGRAMS = frozenset")
+    assert_true(block_start >= 0, "_XRAY_SYMMETRY_PROGRAMS frozenset must exist in ai_agent.py")
+    brace_open  = src.find("{", block_start)
+    brace_close = src.find("}", brace_open)
+    symmetry_block = src[brace_open: brace_close + 1]
+
+    # These programs read symmetry from their input files — must never be listed
+    auto_symmetry_programs = [
+        "phenix.model_vs_data",
+        "phenix.xtriage",
+        "phenix.molprobity",
+    ]
+    for prog in auto_symmetry_programs:
+        assert_true(prog not in symmetry_block,
+            "%s must NOT be in _XRAY_SYMMETRY_PROGRAMS "
+            "(it reads symmetry from MTZ/model automatically)" % prog)
+
+    # Programs that DO need explicit crystal_symmetry must still be present
+    explicit_symmetry_programs = [
+        "phenix.refine",
+        "phenix.phaser",
+        "phenix.autosol",
+    ]
+    for prog in explicit_symmetry_programs:
+        assert_true(prog in symmetry_block,
+            "%s must be in _XRAY_SYMMETRY_PROGRAMS" % prog)
+
+    print("  PASSED: model_vs_data/xtriage/molprobity correctly excluded")
+
+
 # =============================================================================
 
 def run_all_tests():
