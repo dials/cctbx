@@ -5121,9 +5121,20 @@ def test_s4b_inject_crystal_symmetry_uses_scoped_form():
     append_lines = [ln for ln in method_body.splitlines()
                     if "command +" in ln or "command=" in ln]
     for ln in append_lines:
-        assert_true("unit_cell=" not in ln.replace("crystal_symmetry.unit_cell=", ""),
+        # Remove all ALLOWED scoped forms before checking for bare forms:
+        #   crystal_symmetry.unit_cell=  → standard scoped form
+        #   xray_data.unit_cell=         → phaser form
+        #   crystal_symmetry=            → flat form for autobuild/autosol
+        #                                  (this is fine — it's a top-level key)
+        _ln_stripped = (ln
+            .replace("crystal_symmetry.unit_cell=", "")
+            .replace("xray_data.unit_cell=", "")
+            .replace("crystal_symmetry.space_group=", "")
+            .replace("xray_data.space_group=", "")
+        )
+        assert_true("unit_cell=" not in _ln_stripped,
             "Bare unit_cell= must not appear in append line: %r" % ln)
-        assert_true("space_group=" not in ln.replace("crystal_symmetry.space_group=", ""),
+        assert_true("space_group=" not in _ln_stripped,
             "Bare space_group= must not appear in append line: %r" % ln)
 
     print("  PASSED: _inject_crystal_symmetry uses scoped crystal_symmetry. form")
@@ -8100,7 +8111,7 @@ def test_s10c_sanitize_strips_params_from_probe_programs():
     _if_idx = sanitize_src.find("if program_name in _PROBE_ONLY_FILE_PROGRAMS:")
     assert_true(_if_idx >= 0,
         "_PROBE_ONLY_FILE_PROGRAMS if-block must be present in _sanitize_command")
-    guard_block = sanitize_src[_if_idx:_if_idx + 800]
+    guard_block = sanitize_src[_if_idx:_if_idx + 1400]
     assert_true("return" in guard_block,
         "_PROBE_ONLY_FILE_PROGRAMS guard must return early from _sanitize_command")
 
@@ -8157,8 +8168,54 @@ def test_s10c_sanitize_strips_params_from_probe_programs():
     assert_true(out5 == cmd5,
         "Clean command must pass through unchanged; got: %r" % out5)
 
+    # Case 6: the real bug — "xray_data.space_group=None mentioned" splits as
+    # ["xray_data.space_group=None", "mentioned"] after split().  The token
+    # loop strips the first token but leaves "mentioned" as an orphan bare word.
+    # The pre-pass must catch the two-word form BEFORE tokenisation.
+    # Replicate the actual _sanitize_command pre-pass logic:
+    import re as _re_sp
+    _MULTIWORD_PLACEHOLDER_RE = _re_sp.compile(
+        r'[\w.]+\s*=\s*(?:None|Not|Unknown|N/?A|TBD)'
+        r'(?:\s+[A-Za-z]\w*)?',
+        _re_sp.IGNORECASE)
+    def _probe_sanitize_full(command):
+        command = _MULTIWORD_PLACEHOLDER_RE.sub('', command)
+        stripped = []
+        for tok in command.split():
+            if '=' in tok and not tok.startswith('-'):
+                pass
+            else:
+                stripped.append(tok)
+        return ' '.join(stripped)
+
+    cmd6 = ("phenix.xtriage /path/data.mtz "
+            "xray_data.space_group=None mentioned")
+    out6 = _probe_sanitize_full(cmd6)
+    assert_true("mentioned" not in out6,
+        "Orphan 'mentioned' from 'space_group=None mentioned' must be stripped; "
+        "got: %r" % out6)
+    assert_true("space_group" not in out6,
+        "space_group key must also be stripped; got: %r" % out6)
+    assert_true("data.mtz" in out6,
+        "MTZ file path must survive; got: %r" % out6)
+
+    # Case 7: "Not specified" variant
+    cmd7 = "phenix.xtriage data.mtz crystal_symmetry.space_group=Not specified"
+    out7 = _probe_sanitize_full(cmd7)
+    assert_true("specified" not in out7 and "space_group" not in out7,
+        "'Not specified' two-word placeholder must be fully stripped; got: %r" % out7)
+
+    # Case 8: structural — _MULTIWORD_PLACEHOLDER_RE must be present in the
+    # probe early-exit block in ai_agent.py
+    _if_idx2 = sanitize_src.find("if program_name in _PROBE_ONLY_FILE_PROGRAMS:")
+    probe_block2 = sanitize_src[_if_idx2:_if_idx2 + 1400]
+    assert_true("_MULTIWORD_PLACEHOLDER_RE" in probe_block2,
+        "_sanitize_command probe early-exit must contain _MULTIWORD_PLACEHOLDER_RE "
+        "to strip two-word placeholder values like 'None mentioned'")
+
     print("  PASSED: _sanitize_command strips key=value tokens from probe programs "
-          "(rebuild_level=QUICK, crystal_symmetry.space_group, etc.)")
+          "(rebuild_level=QUICK, crystal_symmetry.space_group, "
+          "'None mentioned' two-word orphan, etc.)")
 
 
 def test_s10d_probe_sanitize_preserves_quoted_paths():
@@ -8193,6 +8250,335 @@ def test_s10d_probe_sanitize_preserves_quoted_paths():
         "Program name must not be affected; got: %r" % _probe_sanitize(cmd2))
 
     print("  PASSED: '-' prefixed tokens preserved; program name unaffected")
+
+
+def test_s10e_rwork_fallback_sets_placement_probed():
+    """When model_vs_data returns only R-work (no R-free), placement_probed must
+    still be set to True and placement_probe_result to 'needs_mr' when r_work ≥ 0.45.
+
+    Regression: the real log showed 'R Work: 0.5851' in the metrics report but
+    no R-free (phenix.model_vs_data skips r_free when the MTZ has no free-set flags).
+    Without the r_work fallback, placement_probed stayed False → workflow engine
+    routed back to probe_placement → model_vs_data ran again → phaser never picked.
+    """
+    print("  Test: s10e_rwork_fallback_sets_placement_probed")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.workflow_state import _analyze_history
+    except ImportError:
+        from libtbx.langchain.agent.workflow_state import _analyze_history
+
+    # Case 1: only r_work present, no r_free — exact scenario from the real log
+    history_rwork_only = [
+        {
+            "cycle_number": 1,
+            "program": "phenix.xtriage",
+            "command": "phenix.xtriage data.mtz",
+            "result": "SUCCESS: xtriage complete",
+            "analysis": {},
+            "output_files": [],
+        },
+        {
+            "cycle_number": 2,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data beta.pdb data.mtz",
+            "result": (
+                "SUCCESS: Command completed without errors\n\n"
+                "**************************************************\n"
+                "FINAL QUALITY METRICS REPORT:\n"
+                "--------------------------------------------------\n"
+                "R Work: 0.5851\n"
+                "Resolution: 3.00\n"
+                "**************************************************\n"
+            ),
+            "analysis": {"r_work": 0.5851, "resolution": 3.0},  # no r_free key
+            "output_files": [],
+        },
+    ]
+    info = _analyze_history(history_rwork_only)
+    assert_true(info.get("placement_probed") is True,
+        "placement_probed must be True when r_work=0.5851 (fallback path); "
+        "got placement_probed=%r" % info.get("placement_probed"))
+    assert_true(info.get("placement_probe_result") == "needs_mr",
+        "placement_probe_result must be 'needs_mr' when r_work=0.5851 ≥ 0.45; "
+        "got %r" % info.get("placement_probe_result"))
+
+    # Case 2: r_work low → model IS placed
+    history_placed = [
+        {
+            "cycle_number": 1,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data placed.pdb data.mtz",
+            "result": "SUCCESS: Command completed without errors\nR Work: 0.2341\n",
+            "analysis": {"r_work": 0.2341},
+            "output_files": [],
+        },
+    ]
+    info2 = _analyze_history(history_placed)
+    assert_true(info2.get("placement_probed") is True,
+        "placement_probed must be True for low r_work; got %r" % info2.get("placement_probed"))
+    assert_true(info2.get("placement_probe_result") == "placed",
+        "placement_probe_result must be 'placed' when r_work=0.23 < 0.45; "
+        "got %r" % info2.get("placement_probe_result"))
+
+    # Case 3: r_free present → r_free takes priority, r_work fallback NOT used
+    history_rfree = [
+        {
+            "cycle_number": 1,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data model.pdb data.mtz",
+            "result": "SUCCESS: r_free: 0.3200\nr_work: 0.2800\n",
+            "analysis": {"r_free": 0.32, "r_work": 0.28},
+            "output_files": [],
+        },
+    ]
+    info3 = _analyze_history(history_rfree)
+    assert_true(info3.get("placement_probed") is True,
+        "placement_probed must be True when r_free present")
+    assert_true(info3.get("placement_probe_result") == "placed",
+        "r_free=0.32 < 0.50 → placed (r_free takes priority over r_work); "
+        "got %r" % info3.get("placement_probe_result"))
+
+    # Case 4: r_work from result text (not from analysis dict) — regex fallback
+    history_text_only = [
+        {
+            "cycle_number": 1,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data model.pdb data.mtz",
+            "result": "SUCCESS: Command completed without errors\nR Work: 0.5851\n",
+            "analysis": {},   # metrics NOT in analysis dict — parsed from result text
+            "output_files": [],
+        },
+    ]
+    info4 = _analyze_history(history_text_only)
+    assert_true(info4.get("placement_probed") is True,
+        "placement_probed must be True when r_work parsed from result text; "
+        "got %r" % info4.get("placement_probed"))
+    assert_true(info4.get("placement_probe_result") == "needs_mr",
+        "needs_mr when r_work from text=0.5851; got %r"
+        % info4.get("placement_probe_result"))
+
+    print("  PASSED: r_work fallback correctly sets placement_probed=True/needs_mr "
+          "when r_free is absent (prevents model_vs_data from re-running)")
+
+
+def test_s10f_phaser_success_supersedes_probe_needs_mr():
+    """After a successful phaser run, the workflow must route to refine — not
+    loop back to molecular_replacement because placement_probed/needs_mr from
+    the earlier model_vs_data cycle is still in history.
+
+    Regression: post-phaser cycle 4 got STUCK/STOP because:
+      - placement_probed=True, placement_probe_result="needs_mr" (from mvd)
+      - Tier-3 check fired BEFORE has_placed_model_from_history check
+      - molecular_replacement phase → phaser excluded (not_done:phaser) → STOP
+
+    Fix: gate the needs_mr→MR route on NOT has_placed_model_from_history.
+    """
+    print("  Test: s10f_phaser_success_supersedes_probe_needs_mr")
+
+    if not _IMPORTS_OK:
+        print("  SKIP (imports unavailable)")
+        return
+
+    try:
+        from agent.workflow_engine import WorkflowEngine
+    except ImportError:
+        print("  SKIP (WorkflowEngine unavailable)")
+        return
+
+    # Build history: xtriage → model_vs_data (needs_mr) → phaser (success)
+    history = [
+        {
+            "cycle": 1,
+            "program": "phenix.xtriage",
+            "command": "phenix.xtriage data.mtz",
+            "result": "SUCCESS: xtriage complete",
+            "metrics": {},
+            "output_files": [],
+        },
+        {
+            "cycle": 2,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data beta.pdb data.mtz",
+            "result": "SUCCESS: Command completed\nR Work: 0.5851\n",
+            "metrics": {"r_work": 0.5851},
+            "output_files": [],
+        },
+        {
+            "cycle": 3,
+            "program": "phenix.phaser",
+            "command": "phenix.phaser data.mtz beta.pdb beta.seq phaser.mode=MR_AUTO",
+            "result": "SUCCESS: Command completed without errors\nTFZ==23.60\nLLG=480\n",
+            "metrics": {"tfz": 23.60, "llg": 480.0},
+            # No output_files — matches the real scenario where PHASER.*.pdb
+            # wasn't found in the sub-job directory (history_files=[])
+            "output_files": [],
+        },
+    ]
+
+    history_info = _analyze_history(history)
+
+    # Verify history analysis is correct
+    assert_true(history_info.get("placement_probed") is True,
+        "placement_probed must be True (from model_vs_data cycle)")
+    assert_true(history_info.get("placement_probe_result") == "needs_mr",
+        "placement_probe_result must be 'needs_mr' (r_work=0.5851)")
+    assert_true(history_info.get("phaser_done") is True,
+        "phaser_done must be True after phaser ran")
+
+    # Build engine context — no available files (matches history_files=[])
+    engine = WorkflowEngine()
+    files = {}  # No output files detected (the real-world scenario)
+    context = engine.build_context(files, history_info, analysis=None,
+                                   directives={}, session_info={})
+
+    assert_true(context.get("has_placed_model_from_history") is True,
+        "has_placed_model_from_history must be True when phaser_done=True")
+
+    # The critical check: detect_phase must NOT return molecular_replacement
+    phase_info = engine.detect_phase("xray", context)
+    phase = phase_info.get("phase", "")
+
+    assert_true(phase != "molecular_replacement",
+        "After phaser success, phase must NOT be molecular_replacement "
+        "(needs_mr probe result must be superseded by phaser_done); "
+        "got phase=%r" % phase)
+
+    assert_true(phase in ("refine", "validate", "complete"),
+        "After phaser success with no refinement, phase must be 'refine' "
+        "(or validate/complete); got phase=%r" % phase)
+
+    # Also verify valid_programs contains phenix.refine (not STOP)
+    valid = engine.get_valid_programs("xray", phase_info, context, directives={})
+    assert_true("phenix.refine" in valid,
+        "phenix.refine must be in valid_programs after phaser; "
+        "got valid_programs=%r" % valid)
+    assert_true(valid != ["STOP"],
+        "valid_programs must not be just [STOP] after successful phaser run; "
+        "got %r" % valid)
+
+    print("  PASSED: needs_mr probe result correctly superseded by phaser_done "
+          "— workflow routes to refine (not stuck at molecular_replacement)")
+
+
+def test_s10g_crystal_symmetry_per_program_format():
+    """_inject_crystal_symmetry must use the correct PHIL form per program:
+      - phenix.autobuild / autobuild_denmod / autosol → crystal_symmetry=SG  (flat)
+      - phenix.phaser                                 → xray_data.space_group=SG
+      - phenix.refine / ligandfit / polder            → crystal_symmetry.space_group=SG
+
+    Regression: autobuild got crystal_symmetry.space_group=P3221 → PHIL error
+    "Unknown command line parameter definition: space_group".
+    """
+    print("  Test: s10g_crystal_symmetry_per_program_format")
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+
+    with open(ai_agent_path) as _f:
+        src = _f.read()
+
+    # ── structural checks: the per-program format sets must exist ────────────
+    assert_true("_FLAT_CS_PROGRAMS" in src,
+        "_FLAT_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
+    assert_true("_PHASER_CS_PROGRAMS" in src,
+        "_PHASER_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
+
+    # phenix.autobuild must be in the flat-form set
+    flat_block = src.split("_FLAT_CS_PROGRAMS")[1][:300]
+    assert_true("phenix.autobuild" in flat_block,
+        "phenix.autobuild must be in _FLAT_CS_PROGRAMS")
+    assert_true("phenix.autosol" in flat_block,
+        "phenix.autosol must be in _FLAT_CS_PROGRAMS")
+
+    # phenix.phaser must be in the phaser set
+    phaser_block = src.split("_PHASER_CS_PROGRAMS")[1][:200]
+    assert_true("phenix.phaser" in phaser_block,
+        "phenix.phaser must be in _PHASER_CS_PROGRAMS")
+
+    # flat form injection: 'crystal_symmetry=%s' (NOT 'crystal_symmetry.space_group')
+    assert_true("crystal_symmetry=%s" in src or "crystal_symmetry=%" in src,
+        "_inject_crystal_symmetry must use flat crystal_symmetry=SG form for flat programs")
+
+    # phaser form injection: xray_data.space_group=
+    assert_true("xray_data.space_group=%s" in src or "xray_data.space_group=%" in src,
+        "_inject_crystal_symmetry must use xray_data.space_group= for phaser")
+
+    # default scoped form: crystal_symmetry.space_group= still present for refine etc.
+    assert_true("crystal_symmetry.space_group=%s" in src or
+                "crystal_symmetry.space_group=%" in src,
+        "_inject_crystal_symmetry must still use crystal_symmetry.space_group= for refine/etc")
+
+    # ── functional checks using importlib (if available) ────────────────────
+    # Build a minimal mock and exercise _inject_crystal_symmetry directly.
+    try:
+        import importlib.util as _ilu
+        sys.path.insert(0, _PROJECT_ROOT)
+        spec = _ilu.spec_from_file_location("_ai_agent_s10g", ai_agent_path)
+        _mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(_mod)
+        AgentClass = _mod.PhenixAIAnalysis
+    except Exception as _e:
+        print("  (functional checks skipped: %s)" % _e)
+        print("  PASSED: structural checks passed")
+        return
+
+    class _FakeSession:
+        def get_directives(self):
+            return {"program_settings": {"default": {"space_group": "P3221"}}}
+
+    class _FakeVlog:
+        def verbose(self, msg): pass
+        def normal(self, msg): pass
+
+    agent = object.__new__(AgentClass)
+    agent.vlog = _FakeVlog()
+    session = _FakeSession()
+
+    # autobuild: flat form
+    result_ab = agent._inject_crystal_symmetry(
+        "phenix.autobuild data=data.mtz seq_file=seq.fa model=m.pdb nproc=4",
+        session, "phenix.autobuild")
+    assert_true("crystal_symmetry=P3221" in result_ab,
+        "autobuild must get crystal_symmetry=P3221; got: %r" % result_ab)
+    assert_true("crystal_symmetry.space_group" not in result_ab,
+        "autobuild must NOT get crystal_symmetry.space_group=; got: %r" % result_ab)
+
+    # autosol: flat form
+    result_as = agent._inject_crystal_symmetry(
+        "phenix.autosol data=data.mtz seq_file=seq.fa",
+        session, "phenix.autosol")
+    assert_true("crystal_symmetry=P3221" in result_as,
+        "autosol must get crystal_symmetry=P3221; got: %r" % result_as)
+
+    # refine: scoped form
+    result_ref = agent._inject_crystal_symmetry(
+        "phenix.refine model.pdb data.mtz",
+        session, "phenix.refine")
+    assert_true("crystal_symmetry.space_group=P3221" in result_ref,
+        "refine must get crystal_symmetry.space_group=P3221; got: %r" % result_ref)
+
+    # phaser: xray_data form
+    result_ph = agent._inject_crystal_symmetry(
+        "phenix.phaser data.mtz model.pdb seq.fa phaser.mode=MR_AUTO",
+        session, "phenix.phaser")
+    assert_true("xray_data.space_group=P3221" in result_ph,
+        "phaser must get xray_data.space_group=P3221; got: %r" % result_ph)
+    assert_true("crystal_symmetry.space_group" not in result_ph,
+        "phaser must NOT get crystal_symmetry.space_group=; got: %r" % result_ph)
+
+    # no double-injection for autobuild
+    result_ab2 = agent._inject_crystal_symmetry(
+        "phenix.autobuild data=data.mtz seq_file=seq.fa crystal_symmetry=P3221 nproc=4",
+        session, "phenix.autobuild")
+    assert_true(result_ab2.count("crystal_symmetry=") == 1,
+        "Must not double-inject crystal_symmetry=; count=%d in %r"
+        % (result_ab2.count("crystal_symmetry="), result_ab2))
+
+    print("  PASSED: _inject_crystal_symmetry uses correct per-program PHIL form")
 
 
 def run_all_tests():

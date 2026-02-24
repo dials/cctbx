@@ -864,7 +864,14 @@ class WorkflowEngine:
 
         # ── Tier 3: probe result known → route based on R-free ───────────────
         if context.get("placement_probed"):
-            if context.get("placement_probe_result") == "needs_mr":
+            if (context.get("placement_probe_result") == "needs_mr" and
+                    not context.get("has_placed_model_from_history")):
+                # Only route to MR when probe says model isn't placed AND no
+                # subsequent event (phaser_done, refine_done, …) has confirmed
+                # placement.  Without this guard a successful phaser run loops
+                # back here because placement_probed/needs_mr are still in history
+                # → molecular_replacement phase → phaser excluded by not_done:phaser
+                # → valid_programs=[] → STUCK/STOP.
                 return self._make_phase_result(phases, "molecular_replacement",
                     "Placement probe (model_vs_data) confirmed model is not placed "
                     "(R-free ≥ 0.50) — running MR")

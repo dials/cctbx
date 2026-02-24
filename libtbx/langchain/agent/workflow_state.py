@@ -1085,6 +1085,8 @@ def _analyze_history(history):
             # model_vs_data before any refine → X-ray placement probe
             if "model_vs_data" in _ecomb and not _seen_refine_or_dock:
                 _analysis = _entry.get("analysis", _entry.get("metrics", {}))
+
+                # ── Try R-free first (primary metric) ────────────────────────
                 _rfree = None
                 if isinstance(_analysis, dict):
                     _rfree = _analysis.get("r_free")
@@ -1105,6 +1107,36 @@ def _analyze_history(history):
                         )
                     except (ValueError, TypeError):
                         pass
+
+                # ── R-work fallback when R-free is absent or "None" ──────────
+                # model_vs_data sometimes outputs "r_free: None" when the
+                # reflection file has no free-set flags.  R-work > 0.45 is
+                # equally unambiguous evidence that the model is not placed
+                # (a correctly placed model has R-work ≈ 0.20–0.35).
+                if not info.get("placement_probed"):
+                    _rwork = None
+                    if isinstance(_analysis, dict):
+                        _rwork = _analysis.get("r_work")
+                    if _rwork is None:
+                        # Match both 'r_work: 0.58' and 'R Work: 0.58' (display form)
+                        _mw = re.search(r'r.?work\s*[=:]\s*([0-9.]+)', _result,
+                                        re.IGNORECASE)
+                        if _mw:
+                            try:
+                                _rwork = float(_mw.group(1))
+                            except ValueError:
+                                pass
+                    if _rwork is not None:
+                        try:
+                            _rwork = float(_rwork)
+                            info["placement_probed"] = True
+                            # R-work < 0.45 → model is placed (conservative threshold)
+                            # R-work ≥ 0.45 → model is not placed → needs MR
+                            info["placement_probe_result"] = (
+                                "placed" if _rwork < 0.45 else "needs_mr"
+                            )
+                        except (ValueError, TypeError):
+                            pass
 
             # map_correlations before any refine/dock → cryo-EM placement probe
             if "map_correlations" in _ecomb and not _seen_refine_or_dock:
