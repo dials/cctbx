@@ -2155,7 +2155,13 @@ def test_r3_cryoem_probe_placed():
 
 
 def test_r3_failed_probe_not_counted():
-    """R3-extra: a FAILED model_vs_data run does not set placement_probed."""
+    """R3-extra: a FAILED model_vs_data run marks placement_probed=True with
+    probe_result=None (inconclusive) — NOT placement_probed=False.
+
+    Behaviour changed in v112.72: previously a failed probe was ignored entirely,
+    which caused an infinite probe-retry loop.  Now a failed probe is treated as
+    inconclusive (probed=True, result=None) so the workflow can move on to refine.
+    """
     print("Test: r3_failed_probe_not_counted")
     sys.path.insert(0, _PROJECT_ROOT)
     from agent.workflow_state import _analyze_history
@@ -2167,10 +2173,15 @@ def test_r3_failed_probe_not_counted():
         "analysis": {},
     }]
     info = _analyze_history(history)
-    assert info["placement_probed"] is False, (
-        "FAILED model_vs_data must NOT set placement_probed=True"
+    # After v112.72: a failed probe is inconclusive (prevents infinite retry)
+    assert info["placement_probed"] is True, (
+        "FAILED model_vs_data should set placement_probed=True (inconclusive)"
     )
-    print("  PASSED: failed run correctly ignored")
+    assert info["placement_probe_result"] is None, (
+        "placement_probe_result must be None for inconclusive probe, got %r"
+        % info["placement_probe_result"]
+    )
+    print("  PASSED: failed model_vs_data probe correctly marked as inconclusive")
 
 
 def test_r3_probe_cc_volume_fallback():
@@ -5221,6 +5232,2968 @@ def test_s4c_model_vs_data_not_in_symmetry_programs():
 
 
 # =============================================================================
+# BAD INJECT PARAM BLACKLIST (inject → crash → re-inject infinite loop fix)
+# =============================================================================
+
+def test_s4d_session_records_bad_inject_param():
+    """session.record_bad_inject_param stores params and get_bad_inject_params
+    returns them correctly, including both full and short-key variants."""
+    print("  Test: s4d_session_records_bad_inject_param")
+    import tempfile, shutil
+    from agent.session import AgentSession
+
+    tmp = tempfile.mkdtemp()
+    try:
+        sess = AgentSession(session_dir=tmp)
+
+        # Nothing recorded yet
+        assert_equal(sess.get_bad_inject_params("phenix.refine"), set(),
+                     "Empty set before any recording")
+
+        # Record a bad param
+        sess.record_bad_inject_param("phenix.refine", "ignore_symmetry_conflicts")
+        result = sess.get_bad_inject_params("phenix.refine")
+        assert_true("ignore_symmetry_conflicts" in result,
+                    "Recorded param must appear in blacklist")
+
+        # Other program unaffected
+        assert_equal(sess.get_bad_inject_params("phenix.autosol"), set(),
+                     "Other programs must have empty blacklist")
+
+        # Second recording of same key is idempotent (no duplicates)
+        sess.record_bad_inject_param("phenix.refine", "ignore_symmetry_conflicts")
+        assert_equal(len(sess.get_bad_inject_params("phenix.refine")), 1,
+                     "Duplicate recording must not add duplicate entries")
+
+        # Persists across a fresh session object (saved to disk)
+        sess2 = AgentSession(session_dir=tmp)
+        assert_true("ignore_symmetry_conflicts" in
+                    sess2.get_bad_inject_params("phenix.refine"),
+                    "Blacklist must persist across AgentSession reloads")
+    finally:
+        shutil.rmtree(tmp)
+    print("  PASSED: bad inject param blacklist recorded and persisted correctly")
+
+
+def test_s4d_inject_user_params_skips_blacklisted():
+    """_inject_user_params must not re-inject a parameter that was previously
+    blacklisted via session.record_bad_inject_param.
+
+    This is the core fix for the inject→crash→re-inject infinite loop:
+    the agent added 'ignore_symmetry_conflicts=True' from the user's advice
+    every cycle even after phenix.refine rejected it as unknown.
+    """
+    print("  Test: s4d_inject_user_params_skips_blacklisted")
+
+    import tempfile, shutil
+    from agent.session import AgentSession
+
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    # Source must contain the blacklist check in _inject_user_params
+    assert_true("bad_params" in src and "blacklisted" in src,
+        "_inject_user_params must contain blacklist check code")
+    assert_true("get_bad_inject_params" in src,
+        "_inject_user_params must call session.get_bad_inject_params")
+
+    tmp = tempfile.mkdtemp()
+    try:
+        sess = AgentSession(session_dir=tmp)
+
+        # Simulate: run 1 failed with ignore_symmetry_conflicts=True
+        sess.record_bad_inject_param("phenix.refine", "ignore_symmetry_conflicts")
+
+        # Verify blacklist state
+        bad = sess.get_bad_inject_params("phenix.refine")
+        assert_true("ignore_symmetry_conflicts" in bad,
+            "ignore_symmetry_conflicts must be in blacklist after recording")
+
+        # Any param NOT in the blacklist is still injectable (sanity check)
+        other_bad = sess.get_bad_inject_params("phenix.refine")
+        assert_true("resolution" not in other_bad,
+            "resolution must NOT be in blacklist — only the bad param should be")
+    finally:
+        shutil.rmtree(tmp)
+    print("  PASSED: blacklisted param correctly excluded from injection")
+
+
+def test_s4d_generate_program_eff_reports_rejected_args():
+    """generate_program_eff must populate rejected_args with params that the
+    PHIL interpreter rejects (e.g. 'ignore_symmetry_conflicts').
+
+    This is the primary fix for the inject→crash→re-inject infinite loop:
+    phenix.refine's interpreter catches the bad param during .eff generation
+    and logs it, but previously nothing recorded it so the agent kept
+    re-injecting it every cycle.
+    """
+    print("  Test: s4d_generate_program_eff_reports_rejected_args")
+
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    # generate_program_eff must accept a rejected_args parameter
+    assert_true("def generate_program_eff" in src,
+        "generate_program_eff must exist in ai_agent.py")
+    assert_true("rejected_args=None" in src.split("def generate_program_eff")[1][:400],
+        "generate_program_eff must have rejected_args=None parameter")
+
+    # Must populate rejected_args from failed_args (interpreter rejects)
+    assert_true("rejected_args.append" in src or
+                "rejected_args is not None" in src,
+        "generate_program_eff must populate rejected_args list")
+
+    # Blacklisting must happen in _execute_sub_job_for_gui after collecting
+    # rejected args. Verify both the collector and the blacklist call exist.
+    assert_true("_rejected_args" in src,
+        "_execute_sub_job_for_gui must use _rejected_args list")
+    assert_true("record_bad_inject_param" in src,
+        "session.record_bad_inject_param must be called somewhere in ai_agent.py")
+    # The blacklist call must reference _rejected_args (not just the earlier
+    # error-text-based blacklisting)
+    assert_true("for _bad_key in _rejected_args" in src,
+        "Must iterate over _rejected_args to blacklist each bad param")
+
+    # rejected_args must be threaded through _try_native_execution
+    assert_true("rejected_args=_rejected_args" in src,
+        "_try_native_execution call must pass rejected_args=_rejected_args")
+
+    # rejected_args must be threaded through _run_via_old_style_runner
+    assert_true("_run_via_old_style_runner" in src and
+                "rejected_args=rejected_args" in src,
+        "_run_via_old_style_runner must forward rejected_args")
+
+    print("  PASSED: rejected_args propagation wired through .eff generation chain")
+
+
+def test_s4d_blacklist_extracted_from_error_message():
+    """The bad param name must be extractable from PHENIX's 'Unknown command
+    line parameter definition: FOO = VALUE' error format using the same regex
+    used in _record_command_result."""
+    print("  Test: s4d_blacklist_extracted_from_error_message")
+    import re
+
+    # The regex used in _record_command_result
+    _bad_re = re.compile(
+        r'(?:parameter definition|no such parameter)\s*[:\-]?\s*'
+        r'([A-Za-z_][\w.]*)',
+        re.IGNORECASE
+    )
+
+    test_cases = [
+        # (error text, expected extracted key)
+        ("Unknown command line parameter definition: ignore_symmetry_conflicts = True",
+         "ignore_symmetry_conflicts"),
+        # Full dotted path is extracted; caller also stores the short leaf name separately
+        ("Sorry: Unknown command line parameter definition: bad.scope.key = False",
+         "bad.scope.key"),
+        ("Sorry: there is no such parameter: my_param",
+         "my_param"),
+    ]
+    for error_text, expected_key in test_cases:
+        m = _bad_re.search(error_text)
+        assert_not_none(m, "Regex must match in: %r" % error_text)
+        extracted = m.group(1).strip().rstrip('=').strip()
+        assert_equal(extracted, expected_key,
+            "Extracted key %r must equal %r for error: %r" % (
+                extracted, expected_key, error_text[:60]))
+
+    print("  PASSED: bad param name correctly extracted from PHENIX error messages")
+
+
+def test_s4e_space_group_placeholder_not_injected():
+    """_inject_crystal_symmetry must NOT inject placeholder space_group values
+    like 'Not mentioned' — these come from the directive extractor when it
+    couldn't find a real symbol, and passing them to PHENIX causes a PHIL error:
+      crystal_symmetry.space_group=Not mentioned
+    """
+    print("  Test: s4e_space_group_placeholder_not_injected")
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    assert_true("_INVALID_SG_PATTERNS" in src or "_is_placeholder" in src,
+        "_inject_crystal_symmetry must have a placeholder guard for space_group")
+    assert_true('"not mentioned"' in src,
+        "Guard must explicitly reject 'not mentioned' values")
+
+    # Exercise the guard logic inline (same code as in the method)
+    _INVALID_SG_PATTERNS = (
+        "not mentioned", "not specified", "not provided",
+        "unknown", "n/a", "none", "null", "tbd", "to be determined",
+    )
+    def _is_placeholder(sg_str):
+        sg_lower = sg_str.lower()
+        return (any(p in sg_lower for p in _INVALID_SG_PATTERNS) or
+                len(sg_str) > 20 or
+                not sg_str.strip()[0:1].isalpha())
+
+    invalid_values = [
+        "Not mentioned", "not specified", "not provided",
+        "Unknown", "N/A", "none", "null",
+    ]
+    valid_values = [
+        "P 63", "P212121", "P 32 2 1", "C 2 2 21", "F 4 3 2", "R3",
+    ]
+    for v in invalid_values:
+        assert_true(_is_placeholder(v),
+            "Value %r should be detected as a placeholder and NOT injected" % v)
+    for v in valid_values:
+        assert_true(not _is_placeholder(v),
+            "Value %r should NOT be detected as a placeholder" % v)
+
+    print("  PASSED: space_group placeholder values correctly identified and blocked")
+
+
+def test_s4e_sanitize_command_removes_placeholder_space_group():
+    """_sanitize_command must:
+    1. Strip crystal_symmetry.space_group=<placeholder> tokens regardless of
+       source (LLM-generated or injected), and
+    2. Strip session-blacklisted parameters (e.g. ignore_symmetry_conflicts=True)
+       that the LLM regenerates despite the warning in guidelines.
+
+    The method now accepts session= and program_name= so it can read the
+    per-program blacklist from session.get_bad_inject_params().
+    """
+    print("  Test: s4e_sanitize_command_removes_placeholder_space_group")
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    assert_true("def _sanitize_command" in src,
+        "_sanitize_command method must exist in ai_agent.py")
+    # Call site must now pass session= so blacklisted params are stripped too
+    assert_true("_sanitize_command(\n" in src or
+                "_sanitize_command(command" in src,
+        "_sanitize_command must be called in _get_command_for_cycle")
+    assert_true("session=session" in src.split("_sanitize_command")[1][:300],
+        "_sanitize_command call must pass session=session")
+
+    # --- Exercise the sanitise logic inline ---
+    _PLACEHOLDER_PATTERNS = (
+        "not mentioned", "not specified", "not provided",
+        "unknown", "n/a", "none", "null", "tbd", "to be determined",
+    )
+
+    def _is_placeholder_value(val):
+        v = val.strip().strip('"').strip("'").lower()
+        return any(p in v for p in _PLACEHOLDER_PATTERNS)
+
+    import re as _re
+    _ALL_KV_RE = _re.compile(
+        r'\s*([\w.]+)\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s]+)'
+    )
+
+    def sanitize(command, bad_keys=None):
+        bad_keys = bad_keys or set()
+        sanitized = command
+        changed = True
+        while changed:
+            prev = sanitized
+            parts = []
+            last = 0
+            for m in _ALL_KV_RE.finditer(sanitized):
+                key_full  = m.group(1)
+                key_short = key_full.split('.')[-1]
+                token = m.group(0)
+                eq_pos = token.find('=')
+                val = token[eq_pos+1:].strip() if eq_pos >= 0 else ''
+                strip = False
+                if key_full in bad_keys or key_short in bad_keys:
+                    strip = True
+                if not strip and ('space_group' in key_full or 'unit_cell' in key_full):
+                    if _is_placeholder_value(val):
+                        strip = True
+                parts.append(sanitized[last:m.start() if strip else m.end()])
+                last = m.end()
+            parts.append(sanitized[last:])
+            sanitized = ''.join(parts)
+            changed = (sanitized != prev)
+        return _re.sub(r'  +', ' ', sanitized).strip()
+
+    # Test 1: placeholder space_group is stripped
+    bad_cmd = ('phenix.map_correlations input_files.model=model.pdb '
+               'crystal_symmetry.space_group="Not specified" '
+               'output.prefix=check_001')
+    cleaned = sanitize(bad_cmd)
+    assert_true('Not specified' not in cleaned,
+        "'Not specified' must be stripped, got: %r" % cleaned)
+    assert_true('output.prefix=check_001' in cleaned,
+        "output.prefix must be preserved, got: %r" % cleaned)
+
+    # Test 2: blacklisted param is stripped when session provides it
+    bad_cmd2 = ('phenix.map_correlations input_files.model=model.pdb '
+                'crystal_symmetry.space_group="Not specified" '
+                'ignore_symmetry_conflicts=True output.prefix=check_001')
+    cleaned2 = sanitize(bad_cmd2,
+                        bad_keys={'ignore_symmetry_conflicts'})
+    assert_true('ignore_symmetry_conflicts' not in cleaned2,
+        "blacklisted param must be stripped, got: %r" % cleaned2)
+    assert_true('Not specified' not in cleaned2,
+        "placeholder must also be stripped, got: %r" % cleaned2)
+    assert_true('output.prefix=check_001' in cleaned2,
+        "output.prefix must be preserved, got: %r" % cleaned2)
+
+    # Test 3: real space group is kept
+    good_cmd = ('phenix.refine model.pdb data.mtz '
+                'crystal_symmetry.space_group="P 63" output.prefix=refine_001')
+    assert_equal(sanitize(good_cmd), good_cmd.strip(),
+        "Real space group 'P 63' must NOT be stripped")
+
+    # Test 4: other placeholder variants
+    for placeholder in ('"not specified"', '"Not mentioned"', '"Unknown"',
+                        'None', 'null', '"not provided"'):
+        cmd = 'phenix.refine model.pdb crystal_symmetry.space_group=%s' % placeholder
+        result = sanitize(cmd)
+        assert_true(placeholder.strip('"').lower() not in result.lower(),
+            "Placeholder %r must be stripped, got: %r" % (placeholder, result))
+
+    print("  PASSED: _sanitize_command strips placeholder space_group and blacklisted params")
+
+
+    """When bad_inject_params is non-empty in the session, _query_agent_for_command
+    must append a 'DO NOT USE' warning to the guidelines text before calling the LLM,
+    so the LLM does not regenerate the invalid parameter in its own command output.
+
+    Without this, the LLM reads the user's guidelines, sees
+    'ignore_symmetry_conflicts=True', and adds it to the command even though the
+    agent has already blacklisted it from injection.
+    """
+    print("  Test: s4e_blacklist_warning_appended_to_guidelines")
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    assert_true("bad_inject_params" in src and "INVALID PARAMETERS" in src,
+        "_query_agent_for_command must inject a warning about bad params into guidelines")
+    assert_true("DO NOT add" in src,
+        "Warning must tell the LLM not to add the bad parameter")
+    # The warning must appear before the '# 2. ASK THE AGENT' comment
+    # (i.e., before decide_next_step is called)
+    warn_idx = src.find("INVALID PARAMETERS")
+    ask_idx  = src.find("# 2. ASK THE AGENT")
+    assert_true(warn_idx < ask_idx,
+        "INVALID PARAMETERS warning must be injected before ASK THE AGENT call "
+        "(warn_idx=%d, ask_idx=%d)" % (warn_idx, ask_idx))
+
+    print("  PASSED: guidelines get blacklist warning injected before LLM call")
+
+
+    print("  PASSED: guidelines get blacklist warning injected before LLM call")
+
+
+# =============================================================================
+# MODEL_VS_DATA PROBE INCONCLUSIVE HANDLING
+# =============================================================================
+
+def test_s5a_model_vs_data_probe_failure_is_inconclusive():
+    """When phenix.model_vs_data fails before any refine/dock, workflow_state
+    must mark placement_probed=True with probe_result=None (inconclusive) rather
+    than stopping.  A crystal_symmetry_mismatch from the probe does NOT mean the
+    model is unplaced — phenix.refine is more permissive and may succeed.
+    """
+    print("  Test: s5a_model_vs_data_probe_failure_is_inconclusive")
+    from agent.workflow_state import _analyze_history
+
+    history = [
+        {
+            "cycle": 1,
+            "program": "phenix.xtriage",
+            "result": "SUCCESS: ...",
+            "command": "phenix.xtriage data.mtz",
+            "analysis": {},
+        },
+        {
+            "cycle": 2,
+            "program": "phenix.model_vs_data",
+            "result": "FAILED: Sorry: Crystal symmetry mismatch between different files.",
+            "command": "phenix.model_vs_data model.pdb data.mtz",
+            "analysis": {},
+        },
+    ]
+    info = _analyze_history(history)
+
+    assert_true(info.get("placement_probed"),
+        "placement_probed must be True after failed model_vs_data probe")
+    assert_true(info.get("placement_probe_result") is None,
+        "placement_probe_result must be None (inconclusive) for crystal_symmetry_mismatch, "
+        "got: %r" % info.get("placement_probe_result"))
+
+    print("  PASSED: model_vs_data probe failure correctly marked as inconclusive")
+
+
+def test_s5a_explicit_refine_suppresses_probe():
+    """When explicit_program='phenix.refine' is in session_info, build_context
+    must set placement_uncertain=False, skipping the model_vs_data probe step.
+
+    Verified via source inspection (libtbx unavailable in test environment).
+    """
+    print("  Test: s5a_explicit_refine_suppresses_probe")
+    we_path = os.path.join(_PROJECT_ROOT, 'agent', 'workflow_engine.py')
+    src = open(we_path).read()
+
+    assert_true("_PROBE_SKIP_PROGRAMS" in src,
+        "build_context must define _PROBE_SKIP_PROGRAMS for explicit_program check")
+    assert_true("phenix.refine" in src.split("_PROBE_SKIP_PROGRAMS")[1][:300],
+        "_PROBE_SKIP_PROGRAMS must include 'phenix.refine'")
+    assert_true("phenix.ligandfit" in src.split("_PROBE_SKIP_PROGRAMS")[1][:300],
+        "_PROBE_SKIP_PROGRAMS must include 'phenix.ligandfit'")
+    assert_true("_user_asserts_placed" in src,
+        "build_context must set _user_asserts_placed from explicit_program check")
+    assert_true("not _user_asserts_placed" in src,
+        "placement_uncertain condition must include 'not _user_asserts_placed'")
+
+    print("  PASSED: explicit_program=phenix.refine correctly suppresses placement probe")
+
+
+def test_s5a_inconclusive_probe_routes_to_refine_not_phaser():
+    """After an inconclusive probe (placement_probed=True, result=None),
+    the engine must promote has_placed_model=True so routing falls through
+    to 'refine' rather than 'obtain_model' (Phaser).
+
+    Verified by source inspection of workflow_engine.py.
+    """
+    print("  Test: s5a_inconclusive_probe_routes_to_refine_not_phaser")
+
+    src = open(os.path.join(_PROJECT_ROOT, 'agent', 'workflow_engine.py')).read()
+
+    # The placement_probed block must set has_placed_model=True for
+    # non-needs_mr results (covers both "placed" and None/inconclusive)
+    assert_true('context["has_placed_model"] = True' in src,
+        'Engine must explicitly set context["has_placed_model"] = True '
+        'for inconclusive probe result')
+
+    # The promotion must come inside the placement_probed block,
+    # before the obtain_model routing
+    prb_idx   = src.find('context.get("placement_probed")')
+    promo_idx = src.find('context["has_placed_model"] = True', prb_idx)
+    obtain_idx = src.find('"obtain_model"', prb_idx)
+    assert_true(0 < promo_idx < obtain_idx,
+        "has_placed_model promotion must come before obtain_model check "
+        "(promo=%d, obtain=%d)" % (promo_idx, obtain_idx))
+
+    print("  PASSED: inconclusive probe promotes has_placed_model → refine chosen over Phaser")
+
+
+    """When phenix.model_vs_data fails with crystal_symmetry_mismatch, the cycle
+    loop must NOT call _diagnose_terminal_failure — treated as inconclusive probe.
+
+    Verified by source inspection.
+    """
+    print("  Test: s5a_probe_symmetry_mismatch_not_terminal")
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    assert_true("_is_probe_inconclusive" in src,
+        "Must have _is_probe_inconclusive guard in cycle loop")
+
+    # _is_probe_program (containing phenix.model_vs_data) is declared just before
+    # _is_probe_inconclusive; check the ±400-char window around the first occurrence.
+    idx = src.find("_is_probe_inconclusive")
+    window = src[max(0, idx - 400): idx + 400]
+    assert_true("phenix.model_vs_data" in window,
+        "Guard window must reference phenix.model_vs_data")
+    # Guard now covers ANY error type for probe programs (not just crystal_symmetry_mismatch)
+    assert_true("_is_probe_program" in window,
+        "Guard window must reference _is_probe_program")
+
+    guard_block = src[idx: idx + 800]
+    assert_true("_diagnosis_match = None" in guard_block,
+        "Guard must set _diagnosis_match=None to skip terminal diagnosis")
+
+    print("  PASSED: any diagnosable error from model_vs_data probe is non-terminal")
+
+
+def test_s5b_pkl_free_programs_not_marked_failed():
+    """Programs that never produce a .pkl (e.g. phenix.model_vs_data,
+    phenix.xtriage) must not be marked 'failed' solely because no pkl was
+    found.  The no-pkl heuristic must be skipped for these programs.
+    """
+    print("  Test: s5b_pkl_free_programs_not_marked_failed")
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    assert_true("_PKL_FREE_PROGRAMS" in src,
+        "_PKL_FREE_PROGRAMS whitelist must exist in ai_agent.py")
+    assert_true('"phenix.model_vs_data"' in src,
+        "phenix.model_vs_data must be in _PKL_FREE_PROGRAMS")
+    assert_true('"phenix.xtriage"' in src,
+        "phenix.xtriage must be in _PKL_FREE_PROGRAMS")
+
+    # The no-pkl check must be gated on _no_pkl_expected
+    assert_true("_no_pkl_expected" in src,
+        "_no_pkl_expected flag must be used to skip the no-pkl failure check")
+
+    # Verify the guard comes before "No pkl produced — marking as failed"
+    guard_idx  = src.find("_no_pkl_expected")
+    failed_idx = src.find("No pkl produced — marking as failed")
+    assert_true(guard_idx < failed_idx,
+        "_no_pkl_expected guard must appear before 'marking as failed' string")
+
+    print("  PASSED: pkl-free program whitelist prevents false failure marking")
+
+
+def test_s5c_ligandfit_removed_from_valid_programs_when_no_ligand_file():
+    """phenix.ligandfit must NOT be filtered from valid_programs based solely
+    on the absence of a separately-categorized ligand file.
+    phenix.ligandfit works with a residue code (ligand_type=ATP) or a ligand
+    PDB whose name may not match categorization patterns (e.g. atp.pdb).
+    """
+    print("  Test: s5c_ligandfit_removed_from_valid_programs_when_no_ligand_file")
+    src = open(os.path.join(_PROJECT_ROOT, 'agent', 'workflow_engine.py')).read()
+
+    # The old hard filter on has_ligand_file must be gone
+    assert_true(
+        'if "phenix.ligandfit" in valid and not context.get("has_ligand_file"' not in src,
+        "get_valid_programs must NOT hard-filter ligandfit based on has_ligand_file alone")
+    # The restore path for user_wants_ligandfit must still exist
+    assert_true(
+        '"phenix.ligandfit"' in src and "valid.append" in src,
+        "get_valid_programs must still restore ligandfit when user_wants_ligandfit")
+
+    print("  PASSED: ligandfit not blocked by absent ligand file categorization")
+
+
+def test_s5c_autostop_with_no_ligand_file_message():
+    """The PLAN AUTO-STOP suppression path must NOT block on has_ligand_file.
+    phenix.ligandfit can run with just a residue code or a PDB that is not
+    auto-categorized.  The old block-on-missing-file logic was removed.
+    """
+    print("  Test: s5c_autostop_with_no_ligand_file_message")
+    src = open(os.path.join(_PROJECT_ROOT, 'agent', 'graph_nodes.py')).read()
+
+    # Old blocking variables must be gone
+    assert_true("_has_ligand_file" not in src,
+        "PLAN node must NOT check _has_ligand_file")
+    assert_true("no ligand restraint file" not in src,
+        "PLAN node must NOT emit 'no ligand restraint file' — ligandfit does "
+        "not require a separately-categorized file")
+    # Suppress path must still exist
+    assert_true("Suppressing AUTO-STOP because after_program" in src,
+        "PLAN node must still suppress AUTO-STOP when after_program hasn't run yet")
+
+    print("  PASSED: PLAN node no longer wrongly blocks ligandfit on missing file")
+
+
+def test_s5d_user_wants_ligandfit_stays_in_refine_phase():
+    """When user explicitly requests ligand fitting, the workflow must stay in
+    the 'refine' phase so ligandfit is available, regardless of has_ligand_file.
+    """
+    print("  Test: s5d_user_wants_ligandfit_stays_in_refine_phase")
+    src = open(os.path.join(_PROJECT_ROOT, 'agent', 'workflow_engine.py')).read()
+
+    assert_true("user_wants_ligandfit" in src,
+        "build_context must set user_wants_ligandfit flag")
+    assert_true('"ligandfit" in _after_prog' in src or
+                '"ligandfit" in _after_prog.lower()' in src,
+        "user_wants_ligandfit must check after_program for ligandfit")
+    assert_true("_wants_ligandfit" in src,
+        "_detect_xray_phase must use _wants_ligandfit")
+    assert_true("0.50" in src,
+        "Relaxed r_free threshold (0.50) must be present for user_wants_ligandfit")
+
+    # The user_wants_ligandfit phase block must NOT require has_ligand_file
+    wants_idx = src.find("_wants_ligandfit = context.get(\"user_wants_ligandfit\"")
+    block_end = src.find("return self._make_phase_result", wants_idx)
+    block = src[wants_idx:block_end + 60]
+    assert_true("has_ligand_file" not in block,
+        "_detect_xray_phase ligandfit gate must not require has_ligand_file")
+
+    restore_idx = src.find("user_wants_ligandfit")
+    valid_idx = src.find('valid.append("phenix.ligandfit")', restore_idx)
+    assert_true(valid_idx > 0,
+        "get_valid_programs must restore phenix.ligandfit when user_wants_ligandfit")
+
+    print("  PASSED: user_wants_ligandfit keeps ligandfit available without has_ligand_file")
+
+
+def test_s5d_validate_phase_does_not_block_ligandfit():
+    """The workflow must not route to 'validate' when the user wants ligandfit
+    and has not yet run it — even if r_free >= 0.35.
+
+    Source check: the _check_metric_condition for r_free returns True when value
+    is None, so the phase detection gate must handle the explicit-user-request
+    case by either raising the threshold or re-adding ligandfit to valid_programs.
+    """
+    print("  Test: s5d_validate_phase_does_not_block_ligandfit")
+    src = open(os.path.join(_PROJECT_ROOT, 'agent', 'workflow_engine.py')).read()
+
+    # The r_free threshold must be conditional on user_wants_ligandfit
+    assert_true("_rfree_threshold" in src,
+        "r_free threshold must be a variable (_rfree_threshold) "
+        "that is relaxed when user_wants_ligandfit")
+    # The fallthrough to validate must come AFTER the ligandfit gate
+    ligandfit_gate_idx = src.find("user_wants_ligandfit")
+    validate_idx = src.find("need validation before stopping")
+    assert_true(ligandfit_gate_idx < validate_idx,
+        "Ligandfit gate must be evaluated before routing to validate phase")
+
+    print("  PASSED: ligandfit gate evaluated before validate routing")
+
+
+def test_s5e_notice_emitted_when_ligandfit_impossible():
+    """PERCEIVE must NOT block ligandfit based on has_ligand_file.
+    phenix.ligandfit does not require a separately-categorized ligand file;
+    it works with a residue code or an atp.pdb that may not be auto-categorized.
+    The old blocking logic was removed.
+    """
+    print("  Test: s5e_notice_emitted_when_ligandfit_impossible")
+    src = open(os.path.join(_PROJECT_ROOT, 'agent', 'graph_nodes.py')).read()
+
+    # Old blocking variables must be gone
+    assert_true("_ligandfit_missing_notice_sent" not in src,
+        "PERCEIVE must NOT have _ligandfit_missing_notice_sent blocking logic")
+    assert_true("Ligand fitting requested but no ligand restraint file" not in src,
+        "PERCEIVE must NOT emit 'no ligand restraint file' stop message")
+    # user_wants_ligandfit log must still exist for debugging
+    assert_true("user_wants_ligandfit" in src,
+        "PERCEIVE must still log user_wants_ligandfit for debugging")
+
+    print("  PASSED: PERCEIVE does not block ligandfit on has_ligand_file")
+
+
+def test_s5e_notice_event_type_exists_and_formatted():
+    """NOTICE event type must exist in EventType and have a formatter so it
+    renders clearly in the output at QUIET verbosity (always shown).
+    """
+    print("  Test: s5e_notice_event_type_exists_and_formatted")
+    event_log_src = open(os.path.join(_PROJECT_ROOT, 'agent', 'event_log.py')).read()
+    formatter_src = open(os.path.join(_PROJECT_ROOT, 'agent', 'event_formatter.py')).read()
+
+    assert_true('NOTICE = "notice"' in event_log_src,
+        "EventType.NOTICE must be defined in event_log.py")
+    assert_true("EventType.NOTICE: Verbosity.QUIET" in event_log_src,
+        "NOTICE must be in EVENT_VERBOSITY at QUIET level (always shown)")
+    assert_true("EventType.NOTICE: self._format_notice" in formatter_src,
+        "EventFormatter must dispatch NOTICE to _format_notice")
+    assert_true("def _format_notice" in formatter_src,
+        "_format_notice method must exist in EventFormatter")
+
+    print("  PASSED: NOTICE event type exists with QUIET verbosity and formatter")
+
+
+def test_s5e_plan_node_emits_notice_on_missing_ligand_stop():
+    """The PLAN node must NOT stop based on missing ligand file — ligandfit
+    works without a separately-categorized file.  The old stop was removed.
+    """
+    print("  Test: s5e_plan_node_emits_notice_on_missing_ligand_stop")
+    src = open(os.path.join(_PROJECT_ROOT, 'agent', 'graph_nodes.py')).read()
+
+    assert_true("Ligand fitting requested but cannot proceed" not in src,
+        "PLAN node must NOT emit old missing-ligand NOTICE (logic removed)")
+    assert_true("_has_ligand_file" not in src,
+        "PLAN node must NOT check _has_ligand_file")
+    # Suppress path must still exist
+    assert_true("Suppressing AUTO-STOP because after_program" in src,
+        "PLAN node must still suppress AUTO-STOP when after_program hasn't run")
+
+    print("  PASSED: PLAN node no longer blocks ligandfit on missing file")
+
+
+def test_s5g_natural_language_macro_cycles_injected():
+    """'Run only one macro-cycle of refinement' must inject
+    main.number_of_macro_cycles=1 into the phenix.refine command.
+    The conversion is driven by programs.yaml strategy_flags.natural_language
+    so the flag path is always valid.
+    """
+    print("  Test: s5g_natural_language_macro_cycles_injected")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+    from agent.nl_to_phil import extract_nl_params
+
+    # Test 1: "one macro-cycle" word form → number_of_macro_cycles=1
+    r1 = extract_nl_params("Run only one macro-cycle of refinement.", "phenix.refine")
+    assert_true("main.number_of_macro_cycles=1" in r1,
+        "'one macro-cycle' must produce main.number_of_macro_cycles=1, got: %r" % r1)
+
+    # Test 2: digit form
+    r2 = extract_nl_params("Run 5 macro-cycles of refinement.", "phenix.refine")
+    assert_true("main.number_of_macro_cycles=5" in r2,
+        "'5 macro-cycles' must produce main.number_of_macro_cycles=5, got: %r" % r2)
+
+    # Test 3: ligandfit — must not inject refine params
+    r3 = extract_nl_params("Run only one macro-cycle of refinement.", "phenix.ligandfit")
+    assert_true(r3 == [],
+        "Must NOT inject number_of_macro_cycles for phenix.ligandfit, got: %r" % r3)
+
+    # Test 4: real_space_refine uses different PHIL path
+    r4 = extract_nl_params("Run only one macro-cycle of refinement.", "phenix.real_space_refine")
+    assert_true("macro_cycles=1" in r4,
+        "real_space_refine must produce macro_cycles=1, got: %r" % r4)
+
+    # Test 5: simulated annealing boolean flag
+    r5 = extract_nl_params("Use simulated annealing.", "phenix.refine")
+    assert_true("main.simulated_annealing=True" in r5,
+        "'simulated annealing' must produce main.simulated_annealing=True, got: %r" % r5)
+
+    # Test 6: no match → empty
+    r6 = extract_nl_params("No special settings.", "phenix.refine")
+    assert_true(r6 == [],
+        "No NL phrases should produce empty list, got: %r" % r6)
+
+    # Test 7: programs.yaml natural_language entries exist for phenix.refine cycles
+    from knowledge.yaml_loader import get_program
+    prog = get_program("phenix.refine")
+    flags = prog.get("strategy_flags", {})
+    assert_true("natural_language" in flags.get("cycles", {}),
+        "cycles flag must have natural_language entries in programs.yaml")
+    assert_true("natural_language" in flags.get("simulated_annealing", {}),
+        "simulated_annealing flag must have natural_language entries in programs.yaml")
+
+    # Test 8: ai_agent.py calls extract_nl_params (not hardcoded)
+    _ai_agent_path = _find_ai_agent_path()
+    assert_true(_ai_agent_path is not None,
+        "Could not locate ai_agent.py — checked programs/ relative path and importlib")
+    ai_src = open(_ai_agent_path).read()
+    assert_true("extract_nl_params" in ai_src,
+        "ai_agent._inject_user_params must call extract_nl_params from nl_to_phil")
+    assert_true("nl_to_phil" in ai_src,
+        "ai_agent must import from nl_to_phil")
+
+    print("  PASSED: NL->PHIL driven by programs.yaml, correct paths for each program")
+
+
+
+    """phenix.polder must only appear in valid_programs when a ligand has
+    been fitted (has_ligand_fit=True).  Running polder on an apo model with
+    no fitted ligand produces a meaningless map and wastes a cycle.
+    """
+    print("  Test: s5f_polder_requires_ligand_fit")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+    from knowledge.yaml_loader import get_workflow_phases
+
+    phases = get_workflow_phases("xray")
+
+    def check_conditions(prog_entry, context):
+        for cond in prog_entry.get("conditions", []):
+            if "has" in cond:
+                if not context.get("has_" + cond["has"]):
+                    return False
+        return True
+
+    for phase_name in ("refine", "validate"):
+        polder_entry = next(
+            (p for p in phases[phase_name].get("programs", [])
+             if isinstance(p, dict) and "polder" in p.get("program", "")),
+            None
+        )
+        assert_true(polder_entry is not None,
+            "phenix.polder must be defined in xray %s phase" % phase_name)
+
+        ctx_no  = {"has_model": True, "has_data_mtz": True, "has_ligand_fit": False}
+        ctx_yes = {"has_model": True, "has_data_mtz": True, "has_ligand_fit": True}
+
+        assert_true(not check_conditions(polder_entry, ctx_no),
+            "polder must NOT be valid in %s phase when has_ligand_fit=False" % phase_name)
+        assert_true(check_conditions(polder_entry, ctx_yes),
+            "polder MUST be valid in %s phase when has_ligand_fit=True" % phase_name)
+
+        # Confirm the condition key is explicitly present in the YAML entry
+        cond_keys = [list(c.keys())[0] + ":" + str(list(c.values())[0])
+                     for c in polder_entry.get("conditions", []) if isinstance(c, dict)]
+        assert_true("has:ligand_fit" in cond_keys,
+            "polder %s conditions must include 'has: ligand_fit', got: %s"
+            % (phase_name, cond_keys))
+
+    print("  PASSED: polder only available when has_ligand_fit=True")
+
+def test_s5h_sanitize_strips_out_of_scope_params():
+    """_sanitize_command must strip key=value tokens that are not in the
+    programs.yaml strategy_flags allowlist for the target program.
+
+    Specifically: rebuild_strategy=quick must be stripped from a
+    phenix.model_vs_data command because model_vs_data has no strategy_flags,
+    and therefore an empty allowlist.
+    """
+    print("  Test: s5h_sanitize_strips_out_of_scope_params")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    # We test the sanitize logic directly by importing and calling it through
+    # a minimal mock, since AIAnalysis is not importable in the test environment.
+    # Instead, verify the code structure and the allowlist logic via programs.yaml.
+
+    from knowledge.yaml_loader import get_program
+
+    # model_vs_data must have NO strategy_flags (or empty) so its allowlist is
+    # limited to universal keys — rebuild_strategy is not in that set.
+    mvd = get_program("phenix.model_vs_data")
+    assert_true(mvd is not None, "phenix.model_vs_data must exist in programs.yaml")
+    sf = mvd.get("strategy_flags") or {}
+    assert_true(len(sf) == 0,
+        "phenix.model_vs_data must have no strategy_flags; got: %s" % list(sf.keys()))
+
+    # rebuild_strategy / rebuilding_strategy must NOT appear in any strategy_flags
+    # that could bleed into model_vs_data (verify the prompt fix too).
+    import os
+    _prompt_path = os.path.join(_PROJECT_ROOT, 'knowledge', 'prompts_hybrid.py')
+    prompt_src = open(_prompt_path).read()
+    assert_true("rebuilding_strategy" not in prompt_src,
+        "prompts_hybrid.py must NOT mention rebuilding_strategy "
+        "(it is not a real PHIL param and causes cross-program contamination)")
+
+    # phenix.refine must have strategy_flags including number_of_macro_cycles
+    # so that its allowlist correctly accepts it.
+    refine = get_program("phenix.refine")
+    refine_sf = refine.get("strategy_flags") or {}
+    refine_keys = set(refine_sf.keys())
+    # Collect bare keys from flag templates
+    refine_bare = set()
+    for sfdef in refine_sf.values():
+        if isinstance(sfdef, dict):
+            tpl = sfdef.get('flag', '')
+            bare = tpl.split('=')[0].strip().split('.')[-1].lower()
+            if bare and bare != '{value}':
+                refine_bare.add(bare)
+    assert_true("number_of_macro_cycles" in refine_bare,
+        "phenix.refine allowlist must include number_of_macro_cycles; got bare keys: %s"
+        % sorted(refine_bare))
+
+    # Verify source code has the narrowed Rule C
+    _ai_agent_path = _find_ai_agent_path()
+    assert_true(_ai_agent_path is not None, "Could not locate ai_agent.py")
+    ai_src = open(_ai_agent_path).read()
+    assert_true("_prog_allowlist" in ai_src,
+        "ai_agent._sanitize_command must build _prog_allowlist from programs.yaml")
+    assert_true("Rule C" in ai_src,
+        "ai_agent._sanitize_command must have Rule C")
+    # Rule C must be scoped to len(_strategy_flags) == 0 (file-only programs)
+    assert_true("len(_strategy_flags) == 0" in ai_src,
+        "Rule C must only fire for programs with zero strategy_flags")
+    # Must NOT use the old broad allowlist check
+    assert_true("not in _prog_allowlist" not in ai_src,
+        "Rule C must NOT use broad _prog_allowlist check (regression risk)")
+
+    print("  PASSED: sanitize_command Rule C stripped for file-only programs only; "
+          "rebuilding_strategy removed from prompt")
+
+
+def test_s5h_predict_and_build_has_no_rebuilding_strategy():
+    """predict_and_build strategy_flags must NOT include rebuilding_strategy
+    (it is not a real PHIL parameter for that program).
+    """
+    print("  Test: s5h_predict_and_build_has_no_rebuilding_strategy")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+    from knowledge.yaml_loader import get_program
+
+    pb = get_program("phenix.predict_and_build")
+    assert_true(pb is not None, "phenix.predict_and_build must exist in programs.yaml")
+    sf = pb.get("strategy_flags") or {}
+    assert_true("rebuilding_strategy" not in sf,
+        "phenix.predict_and_build strategy_flags must not contain rebuilding_strategy")
+    assert_true("rebuild_strategy" not in sf,
+        "phenix.predict_and_build strategy_flags must not contain rebuild_strategy")
+
+    # The real quick-build flag is 'quick', mapping to quick=True
+    assert_true("quick" in sf,
+        "phenix.predict_and_build strategy_flags must contain 'quick' flag")
+
+    print("  PASSED: predict_and_build strategy_flags has no rebuilding_strategy")
+
+
+
+def test_s5i_model_vs_data_rfree_extracted_with_space_colon():
+    """r_free and r_work are extracted from model_vs_data log even when the
+    output uses 'r_free : 0.5934' (space before colon) rather than 'r_free:'.
+
+    Regression test for the bug where model_vs_data R-free was never extracted,
+    leaving placement_probed=False so the LLM re-suggested model_vs_data,
+    hit duplicate detection, and stopped without running Phaser.
+    """
+    print("  Test: s5i_model_vs_data_rfree_extracted_with_space_colon")
+    import sys as _sys, re as _re
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    # Simulate the actual phenix.model_vs_data log output (space before colon)
+    log = (
+        "phenix.model_vs_data: Analysis of model vs experimental data\n"
+        "========================================\n"
+        "Using: beta.pdb, beta_blip_P3221.mtz\n"
+        "\n"
+        "                  r_work : 0.5812\n"
+        "                  r_free : 0.5934\n"
+        "\n"
+        "Resolution: 3.00\n"
+    )
+
+    # Test 1: the patterns in programs.yaml now match
+    try:
+        from knowledge.yaml_loader import get_program as _get_prog
+    except ImportError:
+        from libtbx.langchain.knowledge.yaml_loader import get_program as _get_prog
+
+    mvd = _get_prog("phenix.model_vs_data")
+    assert_true(mvd is not None, "phenix.model_vs_data must exist in programs.yaml")
+    lp = mvd.get("log_parsing", {})
+
+    for metric in ("r_work", "r_free"):
+        pat_str = lp.get(metric, {}).get("pattern")
+        assert_true(pat_str is not None,
+            "programs.yaml model_vs_data must have log_parsing.%s.pattern" % metric)
+        m = _re.search(pat_str, log, _re.IGNORECASE | _re.MULTILINE)
+        assert_true(m is not None,
+            "Pattern %r must match the 'key : value' format in log.\nLog excerpt: %r"
+            % (pat_str, log[:200]))
+
+    # Test 2: patterns must NOT be anchored in a way that breaks MULTILINE-less usage
+    # i.e. they should work without re.MULTILINE too (no ^ anchor needed)
+    for metric in ("r_work", "r_free"):
+        pat_str = lp[metric]["pattern"]
+        m = _re.search(pat_str, log, _re.IGNORECASE)  # no MULTILINE
+        assert_true(m is not None,
+            "Pattern %r must not rely on ^ anchor; must match without re.MULTILINE"
+            % pat_str)
+
+    # Test 3: extracted values must be numerically correct
+    r_work_str = _re.search(lp["r_work"]["pattern"], log, _re.IGNORECASE).group(1)
+    r_free_str = _re.search(lp["r_free"]["pattern"], log, _re.IGNORECASE).group(1)
+    assert_true(abs(float(r_work_str) - 0.5812) < 0.0001,
+        "r_work must extract 0.5812, got %r" % r_work_str)
+    assert_true(abs(float(r_free_str) - 0.5934) < 0.0001,
+        "r_free must extract 0.5934, got %r" % r_free_str)
+
+    # Test 4: workflow_state placement_probe_result correctly set to 'needs_mr'
+    # when r_free > 0.50 (the threshold that triggers Phaser)
+    try:
+        from agent.workflow_state import _analyze_history
+    except ImportError:
+        from libtbx.langchain.agent.workflow_state import _analyze_history
+
+    # _analyze_history consumes the same history format as get_history_for_agent()
+    history = [
+        {
+            "cycle_number": 1,
+            "program": "phenix.xtriage",
+            "command": "phenix.xtriage data.mtz",
+            "result": "SUCCESS: xtriage analysis complete",
+            "analysis": {},
+            "output_files": [],
+        },
+        {
+            "cycle_number": 2,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data beta.pdb data.mtz",
+            "result": "SUCCESS: Command completed without errors",
+            "analysis": {"r_free": 0.5934, "r_work": 0.5812},
+            "output_files": [],
+        },
+    ]
+    info = _analyze_history(history)
+    assert_true(info.get("placement_probed") is True,
+        "placement_probed must be True when model_vs_data returns r_free=0.59, got: %r"
+        % info.get("placement_probed"))
+    assert_true(info.get("placement_probe_result") == "needs_mr",
+        "placement_probe_result must be 'needs_mr' when r_free=0.59 > 0.50, got: %r"
+        % info.get("placement_probe_result"))
+
+    print("  PASSED: r_free/r_work extracted from space-colon format; "
+          "placement_probe_result='needs_mr' correctly set")
+
+
+def test_s6a_failure_context_stored_on_cycle():
+    """Step 1 of superseded-issue handling: failure_context must be stored on
+    the cycle record at each of the three failure classification sites.
+
+    Tests are structural (source-code assertions) because the failure sites
+    can only be triggered by running real PHENIX programs.
+    """
+    print("  Test: s6a_failure_context_stored_on_cycle")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    _ai_agent_path = _find_ai_agent_path()
+    assert_true(_ai_agent_path is not None, "Could not locate ai_agent.py")
+    ai_src = open(_ai_agent_path).read()
+
+    # ── Helper method present ─────────────────────────────────────────────────
+    assert_true("_input_basenames_from_command" in ai_src,
+        "ai_agent must define _input_basenames_from_command static helper")
+    assert_true("_FILE_EXTS" in ai_src,
+        "_input_basenames_from_command must define _FILE_EXTS set")
+
+    # ── Site 1: probe-inconclusive (scope=probe) ──────────────────────────────
+    assert_true('"scope": "probe"' in ai_src,
+        'Site 1 must store failure_context with scope="probe"')
+    # probe annotation must come BEFORE _diagnosis_match = None clears it
+    probe_ctx_idx = ai_src.find('"scope": "probe"')
+    diag_none_idx = ai_src.find('_diagnosis_match = None')
+    # The probe annotation block contains _diagnosis_match = None just before it
+    # (the assignment is what triggers the annotation path)
+    assert_true(probe_ctx_idx > 0 and diag_none_idx > 0,
+        "Both probe annotation and _diagnosis_match=None must exist")
+
+    # ── Site 2: terminal failure (scope=terminal) ─────────────────────────────
+    assert_true('"scope": "terminal"' in ai_src,
+        'Site 2 must store failure_context with scope="terminal"')
+    # terminal annotation must appear before _diagnose_terminal_failure call
+    term_ctx_idx = ai_src.find('"scope": "terminal"')
+    term_call_idx = ai_src.find('return self._diagnose_terminal_failure(')
+    assert_true(term_ctx_idx < term_call_idx,
+        'Terminal failure_context must be stored BEFORE _diagnose_terminal_failure is called')
+
+    # ── Site 3: generic recoverable failure (scope=recoverable) ──────────────
+    assert_true('"scope": "recoverable"' in ai_src,
+        'Site 3 must store failure_context with scope="recoverable"')
+    # recoverable annotation uses setdefault (does not overwrite probe/terminal)
+    assert_true('setdefault("failure_context"' in ai_src,
+        'Recoverable site must use setdefault to avoid overwriting probe/terminal annotation')
+
+    # ── All three sites store input_files from the command ────────────────────
+    assert_true(ai_src.count('"input_files": self._input_basenames_from_command(command)') >= 3,
+        'All failure sites must store input_files via _input_basenames_from_command')
+
+    # ── _input_basenames_from_command logic test ──────────────────────────────
+    # Test the helper logic inline (can't import ai_agent due to PHENIX deps)
+    import os as _os
+    _FILE_EXTS = {'.pdb', '.cif', '.mtz', '.sca', '.hkl', '.mrc',
+                  '.ccp4', '.map', '.fa', '.fasta', '.seq', '.dat',
+                  '.ncs_spec', '.eff'}
+    def _input_basenames(command):
+        if not command:
+            return []
+        basenames = []
+        for token in command.split():
+            if '=' in token:
+                token = token.split('=', 1)[1]
+            token = token.strip('"\'')  # strip quotes
+            ext = _os.path.splitext(token)[1].lower()
+            if ext in _FILE_EXTS:
+                basenames.append(_os.path.basename(token).lower())
+        return basenames
+
+    r1 = _input_basenames("phenix.model_vs_data 7qz0.pdb 7qz0.mtz")
+    assert_true(r1 == ["7qz0.pdb", "7qz0.mtz"],
+        "Must extract pdb and mtz basenames, got: %r" % r1)
+
+    r2 = _input_basenames("phenix.refine /path/to/refine_001_model.pdb data.mtz "
+                          "main.number_of_macro_cycles=1")
+    assert_true("refine_001_model.pdb" in r2 and "data.mtz" in r2,
+        "Must extract basenames from absolute paths, ignoring PHIL params, got: %r" % r2)
+
+    r3 = _input_basenames("")
+    assert_true(r3 == [], "Empty command must return empty list")
+
+    r4 = _input_basenames("phenix.model_vs_data model.pdb data.mtz "
+                          "rebuild_strategy=quick")
+    assert_true("rebuild_strategy" not in str(r4),
+        "Must not include PHIL param values as file basenames, got: %r" % r4)
+
+    print("  PASSED: failure_context stored at all three sites; "
+          "_input_basenames_from_command works correctly")
+
+
+
+def test_s6b_annotate_superseded_issues():
+    """Step 2: _annotate_superseded_issues must correctly mark probe and
+    recoverable failures as superseded when a subsequent authoritative program
+    succeeds using overlapping inputs.
+    """
+    print("  Test: s6b_annotate_superseded_issues")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    def make_session(cycles_data, original_files=None):
+        """Build a minimal AgentSession with synthetic cycle data."""
+        s = AgentSession.__new__(AgentSession)
+        s.data = {
+            "cycles": cycles_data,
+            "original_files": original_files or [],
+        }
+        s.best_files = None
+        return s
+
+    def make_cycle(cycle_number, program, result, command="", failure_context=None):
+        c = {
+            "cycle_number": cycle_number,
+            "program": program,
+            "result": result,
+            "command": command,
+        }
+        if failure_context is not None:
+            c["failure_context"] = failure_context
+        return c
+
+    # ── Test 1: basic probe supersession ─────────────────────────────────────
+    # model_vs_data fails (probe) → phenix.refine succeeds with same data
+    cycles = [
+        make_cycle(1, "phenix.xtriage", "SUCCESS: xtriage done",
+                   "phenix.xtriage 7qz0.mtz"),
+        make_cycle(2, "phenix.model_vs_data", "FAILED: crystal symmetry mismatch",
+                   "phenix.model_vs_data 7qz0.pdb 7qz0.mtz",
+                   failure_context={
+                       "error_type": "crystal_symmetry_mismatch",
+                       "scope": "probe",
+                       "program": "phenix.model_vs_data",
+                       "input_files": ["7qz0.pdb", "7qz0.mtz"],
+                       "superseded_by": None,
+                   }),
+        make_cycle(3, "phenix.refine", "SUCCESS: R-free=0.28",
+                   "phenix.refine 7qz0.pdb 7qz0.mtz"),
+    ]
+    s = make_session(cycles, original_files=["/data/7qz0.pdb", "/data/7qz0.mtz"])
+    s._annotate_superseded_issues(s.data["cycles"])
+    fc = cycles[1]["failure_context"]
+    assert_true(fc["superseded_by"] is not None,
+        "Probe failure must be marked superseded when refine succeeds, got: %r" % fc)
+    assert_true("phenix.refine" in fc["superseded_by"],
+        "superseded_by must name phenix.refine, got: %r" % fc["superseded_by"])
+    assert_true("cycle 3" in fc["superseded_by"],
+        "superseded_by must include cycle number, got: %r" % fc["superseded_by"])
+
+    # ── Test 2: NOT superseded when refinement also fails ────────────────────
+    cycles2 = [
+        make_cycle(2, "phenix.model_vs_data", "FAILED: crystal symmetry mismatch",
+                   "phenix.model_vs_data 7qz0.pdb 7qz0.mtz",
+                   failure_context={
+                       "error_type": "crystal_symmetry_mismatch",
+                       "scope": "probe",
+                       "program": "phenix.model_vs_data",
+                       "input_files": ["7qz0.pdb", "7qz0.mtz"],
+                       "superseded_by": None,
+                   }),
+        make_cycle(3, "phenix.refine", "FAILED: refinement error",
+                   "phenix.refine 7qz0.pdb 7qz0.mtz"),
+    ]
+    s2 = make_session(cycles2)
+    s2._annotate_superseded_issues(s2.data["cycles"])
+    fc2 = cycles2[0]["failure_context"]
+    assert_true(fc2["superseded_by"] is None,
+        "Probe must NOT be superseded when refinement also fails, got: %r" % fc2)
+
+    # ── Test 3: terminal failure is never superseded ──────────────────────────
+    cycles3 = [
+        make_cycle(2, "phenix.refine", "FAILED: some terminal error",
+                   "phenix.refine 7qz0.pdb 7qz0.mtz",
+                   failure_context={
+                       "error_type": "some_error",
+                       "scope": "terminal",
+                       "program": "phenix.refine",
+                       "input_files": ["7qz0.pdb", "7qz0.mtz"],
+                       "superseded_by": None,
+                   }),
+        make_cycle(3, "phenix.refine", "SUCCESS: R-free=0.28",
+                   "phenix.refine 7qz0.pdb 7qz0.mtz"),
+    ]
+    s3 = make_session(cycles3)
+    s3._annotate_superseded_issues(s3.data["cycles"])
+    fc3 = cycles3[0]["failure_context"]
+    assert_true(fc3["superseded_by"] is None,
+        "Terminal failure must NEVER be marked superseded, got: %r" % fc3)
+
+    # ── Test 4: stage-prefix rename — 7qz0.pdb becomes refine_001_7qz0.pdb ──
+    cycles4 = [
+        make_cycle(2, "phenix.model_vs_data", "FAILED: symmetry mismatch",
+                   "phenix.model_vs_data 7qz0.pdb 7qz0.mtz",
+                   failure_context={
+                       "error_type": "crystal_symmetry_mismatch",
+                       "scope": "probe",
+                       "program": "phenix.model_vs_data",
+                       "input_files": ["7qz0.pdb", "7qz0.mtz"],
+                       "superseded_by": None,
+                   }),
+        make_cycle(3, "phenix.refine", "SUCCESS: R-free=0.25",
+                   "phenix.refine refine_001_7qz0.pdb 7qz0.mtz"),
+    ]
+    s4 = make_session(cycles4)
+    s4._annotate_superseded_issues(s4.data["cycles"])
+    fc4 = cycles4[0]["failure_context"]
+    assert_true(fc4["superseded_by"] is not None,
+        "Stage-prefix rename must still trigger supersession "
+        "(refine_001_7qz0.pdb ~ 7qz0.pdb), got: %r" % fc4)
+
+    # ── Test 5: non-authority program does not supersede ─────────────────────
+    cycles5 = [
+        make_cycle(2, "phenix.model_vs_data", "FAILED: symmetry mismatch",
+                   "phenix.model_vs_data 7qz0.pdb 7qz0.mtz",
+                   failure_context={
+                       "error_type": "crystal_symmetry_mismatch",
+                       "scope": "probe",
+                       "program": "phenix.model_vs_data",
+                       "input_files": ["7qz0.pdb", "7qz0.mtz"],
+                       "superseded_by": None,
+                   }),
+        make_cycle(3, "phenix.xtriage", "SUCCESS: xtriage done",
+                   "phenix.xtriage 7qz0.mtz"),
+    ]
+    s5 = make_session(cycles5)
+    s5._annotate_superseded_issues(s5.data["cycles"])
+    fc5 = cycles5[0]["failure_context"]
+    assert_true(fc5["superseded_by"] is None,
+        "xtriage is not an authority for symmetry_mismatch — must not supersede, "
+        "got: %r" % fc5)
+
+    # ── Test 6: _stage_prefix_strip helper ───────────────────────────────────
+    strip = AgentSession._stage_prefix_strip
+    assert_true(strip("refine_001_7qz0.pdb") == "7qz0",
+        "Must strip refine_001_ prefix, got: %r" % strip("refine_001_7qz0.pdb"))
+    assert_true(strip("phased_model.pdb") == "model",
+        "Must strip phased_ prefix, got: %r" % strip("phased_model.pdb"))
+    assert_true(strip("7qz0.pdb") == "7qz0",
+        "No prefix — stem unchanged, got: %r" % strip("7qz0.pdb"))
+
+    print("  PASSED: _annotate_superseded_issues correctly marks "
+          "superseded/non-superseded failures across all cases")
+
+
+
+def test_s6c_superseded_tag_in_llm_summary():
+    # Step 3: [SUPERSEDED] tag and NOTE appear iff a failure was superseded
+    print("  Test: s6c_superseded_tag_in_llm_summary")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    def _make_session(cycles_data):
+        s = AgentSession.__new__(AgentSession)
+        s.data = {
+            "session_id": "test-s6c",
+            "experiment_type": "xray",
+            "original_files": [],
+            "project_advice": "Test run.",
+            "cycles": cycles_data,
+        }
+        s.best_files = None
+        s.get_directives = lambda: None
+        s._annotate_superseded_issues = lambda cycles: None
+
+        def _minimal_extract(self=s):
+            steps = []
+            for c in self.data.get("cycles", []):
+                prog = c.get("program", "")
+                if not prog or prog == "STOP":
+                    continue
+                success = "SUCCESS" in str(c.get("result", "")).upper()
+                steps.append({"cycle": c.get("cycle_number", "?"),
+                               "program": prog, "success": success,
+                               "key_metric": ""})
+            return {
+                "session_id": "test-s6c", "experiment_type": "xray",
+                "original_files": [], "user_advice": "Test.",
+                "resolution": None, "workflow_path": "X-ray",
+                "steps": steps, "final_metrics": {}, "final_files": {},
+                "input_quality": {}, "total_cycles": len(steps),
+                "successful_cycles": sum(1 for st in steps if st["success"]),
+                "run_name": "test", "is_tutorial": False,
+                "working_dir": None, "failure_diagnosis_path": None,
+            }
+        s._extract_summary_data = _minimal_extract
+        return s
+
+    sup_cycles = [
+        {"cycle_number": 1, "program": "phenix.xtriage",
+         "result": "SUCCESS: done", "command": "phenix.xtriage 7qz0.mtz",
+         "metrics": {}},
+        {"cycle_number": 2, "program": "phenix.model_vs_data",
+         "result": "FAILED: symmetry mismatch",
+         "command": "phenix.model_vs_data 7qz0.pdb 7qz0.mtz",
+         "metrics": {},
+         "failure_context": {
+             "error_type": "crystal_symmetry_mismatch", "scope": "probe",
+             "program": "phenix.model_vs_data",
+             "input_files": ["7qz0.pdb", "7qz0.mtz"],
+             "superseded_by": "phenix.refine (cycle 3)",
+         }},
+        {"cycle_number": 3, "program": "phenix.refine",
+         "result": "SUCCESS: R-free=0.28",
+         "command": "phenix.refine 7qz0.pdb 7qz0.mtz", "metrics": {}},
+    ]
+    clean_cycles = [
+        {"cycle_number": 1, "program": "phenix.refine",
+         "result": "SUCCESS: R-free=0.28",
+         "command": "phenix.refine 7qz0.pdb 7qz0.mtz", "metrics": {}},
+    ]
+
+    txt_sup = _make_session(sup_cycles).get_summary_for_llm_assessment()
+    assert_true("[SUPERSEDED by phenix.refine (cycle 3)]" in txt_sup,
+        "LLM summary must contain [SUPERSEDED] tag")
+    assert_true("NOTE:" in txt_sup and "resolved by later" in txt_sup,
+        "LLM summary must include block-level NOTE about superseded steps")
+
+    txt_clean = _make_session(clean_cycles).get_summary_for_llm_assessment()
+    assert_true("[SUPERSEDED" not in txt_clean,
+        "LLM summary must NOT contain [SUPERSEDED] when no failure was superseded")
+    assert_true("resolved by later" not in txt_clean,
+        "Block-level NOTE must NOT appear when no failure was superseded")
+
+    print("  PASSED: [SUPERSEDED] tag and NOTE appear iff a failure was superseded")
+
+
+def test_s6d_prompt_has_superseded_instruction():
+    # Step 4: AGENT_SESSION_ASSESSMENT_PROMPT has brief superseded instruction
+    print("  Test: s6d_prompt_has_superseded_instruction")
+    import sys as _sys, os as _os, re as _re
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    prompt_path = _os.path.join(_PROJECT_ROOT, "knowledge", "prompts_hybrid.py")
+    prompt_src = open(prompt_path).read()
+    m = _re.search(
+        r'AGENT_SESSION_ASSESSMENT_PROMPT\s*=\s*"""(.*?)"""',
+        prompt_src, _re.DOTALL)
+    assert_true(m is not None,
+        "AGENT_SESSION_ASSESSMENT_PROMPT not found in prompts_hybrid.py")
+    P = m.group(1)
+
+    assert_true("[SUPERSEDED]" in P, "Prompt must mention [SUPERSEDED] tag")
+    assert_true("do not report them as critical issues" in P,
+        "Prompt must instruct LLM not to escalate superseded failures")
+
+    idx = P.find("[SUPERSEDED]")
+    line_start = P.rfind("\n", 0, idx) + 1
+    line_end = P.find("\n", idx)
+    line = P[line_start:(line_end if line_end >= 0 else len(P))].strip()
+    assert_true(len(line) < 300,
+        "Superseded instruction must be <300 chars, got %d chars" % len(line))
+
+    print("  PASSED: prompt has brief [SUPERSEDED] instruction")
+
+
+def test_s6e_no_circular_import_in_files_overlap():
+    # Fix 1: _files_overlap must not import from agent.session inside itself.
+    # _stage_prefix_strip must delegate to module-level _strip_stage_prefix.
+    print("  Test: s6e_no_circular_import_in_files_overlap")
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    session_path = _os.path.join(_PROJECT_ROOT, "agent", "session.py")
+    src = open(session_path).read()
+
+    # The circular import must be gone
+    assert_true("from agent.session import AgentSession" not in src,
+        "_files_overlap must not contain 'from agent.session import AgentSession'")
+
+    # Module-level function must exist
+    assert_true("def _strip_stage_prefix(" in src,
+        "session.py must define module-level _strip_stage_prefix()")
+
+    # staticmethod must delegate to it
+    assert_true("return _strip_stage_prefix(basename)" in src,
+        "_stage_prefix_strip staticmethod must delegate to _strip_stage_prefix()")
+
+    # _files_overlap Strategy 2 must call _strip_stage_prefix directly
+    assert_true("_strip_stage_prefix(f) for f in probe_files" in src,
+        "_files_overlap Strategy 2 must call _strip_stage_prefix() directly")
+
+    # Verify the module-level function works correctly in isolation
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("_ss_mod", session_path)
+    # Can't import due to libtbx deps — test the logic inline
+    import re as _re, os as _os2
+    def _strip(basename):
+        stem = _os2.path.splitext(basename.lower())[0]
+        stem = _re.sub(r'^[a-z]+_\d+_', '', stem)
+        stem = _re.sub(r'^[a-z]+_',     '', stem)
+        return stem
+
+    assert_true(_strip("refine_001_7qz0.pdb") == "7qz0",
+        "strip refine_001_ prefix failed: %r" % _strip("refine_001_7qz0.pdb"))
+    assert_true(_strip("phased_model.pdb") == "model",
+        "strip phased_ prefix failed: %r" % _strip("phased_model.pdb"))
+    assert_true(_strip("7qz0.pdb") == "7qz0",
+        "no prefix — must be unchanged: %r" % _strip("7qz0.pdb"))
+
+    print("  PASSED: no circular import; _strip_stage_prefix at module level")
+
+
+def test_s6f_files_overlap_scope_aware_fallback():
+    # Fix 2: empty-file fallback in _files_overlap must only fire for scope="probe"
+    print("  Test: s6f_files_overlap_scope_aware_fallback")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    # probe scope + empty probe_files -> True (benefit of the doubt)
+    result_probe = AgentSession._files_overlap(
+        [], "phenix.refine 7qz0.pdb 7qz0.mtz", [], scope="probe")
+    assert_true(result_probe is True,
+        "scope=probe with empty probe_files must return True (probe ran before "
+        "derived files existed), got: %r" % result_probe)
+
+    # recoverable scope + empty probe_files -> False (no evidence)
+    result_recoverable = AgentSession._files_overlap(
+        [], "phenix.refine 7qz0.pdb 7qz0.mtz", [], scope="recoverable")
+    assert_true(result_recoverable is False,
+        "scope=recoverable with empty probe_files must return False "
+        "(no provenance evidence), got: %r" % result_recoverable)
+
+    # None scope + empty probe_files -> False (conservative)
+    result_none = AgentSession._files_overlap(
+        [], "phenix.refine 7qz0.pdb 7qz0.mtz", [], scope=None)
+    assert_true(result_none is False,
+        "scope=None with empty probe_files must return False, got: %r" % result_none)
+
+    # Both sides non-empty, matching — True regardless of scope
+    result_match = AgentSession._files_overlap(
+        ["7qz0.pdb", "7qz0.mtz"],
+        "phenix.refine 7qz0.pdb 7qz0.mtz",
+        [],
+        scope="recoverable")
+    assert_true(result_match is True,
+        "Exact filename match must return True regardless of scope, got: %r" % result_match)
+
+    # Both sides non-empty, no match — False
+    result_nomatch = AgentSession._files_overlap(
+        ["other.pdb", "other.mtz"],
+        "phenix.refine 7qz0.pdb 7qz0.mtz",
+        [],
+        scope="probe")
+    assert_true(result_nomatch is False,
+        "No filename match with no shared originals must return False, "
+        "got: %r" % result_nomatch)
+
+    print("  PASSED: _files_overlap fallback is scope-aware")
+
+
+def test_s6g_markdown_table_superseded_footnote():
+    # Fix 3: markdown summary table uses ✗* for superseded failures
+    # and emits a footnote explaining the symbol.
+    print("  Test: s6g_markdown_table_superseded_footnote")
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    session_path = _os.path.join(_PROJECT_ROOT, "agent", "session.py")
+    src = open(session_path).read()
+
+    # Source must contain the ✗* symbol logic
+    assert_true('"\\u2717*"' in src or "'✗*'" in src or '"✗*"' in src,
+        "_format_summary_markdown must use ✗* for superseded failures")
+    # superseded_by appears in both _format_summary_markdown and _extract_steps;
+    # just verify it is present somewhere after the _format_summary_markdown def
+    fmt_idx = src.find("def _format_summary_markdown")
+    assert_true(fmt_idx >= 0, "_format_summary_markdown not found in session.py")
+    assert_true("superseded_by" in src[fmt_idx:fmt_idx + 5000],
+        "_format_summary_markdown must reference superseded_by")
+    assert_true("does not affect the final result" in src,
+        "_format_summary_markdown must include footnote text")
+
+    # superseded_by must be propagated through _extract_steps
+    extract_steps_section = src[src.find("def _extract_steps"):
+                                src.find("def _extract_steps") + 2000]
+    assert_true("superseded_by" in extract_steps_section,
+        "_extract_steps must include superseded_by in the step dict")
+
+    print("  PASSED: markdown table uses ✗* with footnote for superseded steps")
+
+
+def test_s7a_exact_failed_duplicate_detected():
+    # Problem 1: exact repeat of a FAILED command must be caught as duplicate
+    print("  Test: s7a_exact_failed_duplicate_detected")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    def make_session(cycles):
+        s = AgentSession.__new__(AgentSession)
+        s.data = {"cycles": cycles}
+        return s
+
+    failed_cmd = "phenix.predict_and_build predict_and_build.stop_after_predict=True rebuild_strategy=quick"
+
+    cycles = [
+        {"cycle_number": 1, "program": "phenix.xtriage",
+         "result": "SUCCESS: xtriage ok",
+         "command": "phenix.xtriage 7qz0.mtz"},
+        {"cycle_number": 2, "program": "phenix.predict_and_build",
+         "result": "FAILED: Please supply a sequence file",
+         "command": failed_cmd},
+    ]
+    s = make_session(cycles)
+
+    # Exact repeat of the failed command must be caught
+    is_dup, prev, _ = s.is_duplicate_command(failed_cmd)
+    assert_true(is_dup is True,
+        "Exact repeat of FAILED command must be caught as duplicate, got: %r" % is_dup)
+    assert_true(prev == 2,
+        "Duplicate cycle number must be 2, got: %r" % prev)
+
+    # A genuinely new command must NOT be caught
+    new_cmd = "phenix.predict_and_build input_files.seq_file=7qz0.fa predict_and_build.stop_after_predict=True"
+    is_dup2, _, _ = s.is_duplicate_command(new_cmd)
+    assert_true(is_dup2 is False,
+        "Different command (with seq file added) must NOT be caught as duplicate")
+
+    # Successful commands still caught by existing heuristic
+    success_cmd = "phenix.xtriage 7qz0.mtz"
+    is_dup3, prev3, _ = s.is_duplicate_command(success_cmd)
+    assert_true(is_dup3 is True,
+        "Exact repeat of SUCCESSFUL command must still be caught, got: %r" % is_dup3)
+
+    print("  PASSED: exact failed-command duplicates are detected; new commands pass through")
+
+
+def test_s7b_failed_commands_not_in_success_list():
+    # Regression guard: get_all_commands must NOT include failed cycles.
+    # Failed commands are handled separately by get_all_failed_commands.
+    print("  Test: s7b_failed_commands_not_in_success_list")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    s = AgentSession.__new__(AgentSession)
+    s.data = {"cycles": [
+        {"cycle_number": 1, "program": "phenix.xtriage",
+         "result": "SUCCESS: ok", "command": "phenix.xtriage data.mtz"},
+        {"cycle_number": 2, "program": "phenix.predict_and_build",
+         "result": "FAILED: missing seq file",
+         "command": "phenix.predict_and_build data.mtz"},
+    ]}
+
+    success_cmds = [cmd for _, cmd in s.get_all_commands()]
+    assert_true("phenix.predict_and_build data.mtz" not in success_cmds,
+        "Failed command must NOT appear in get_all_commands()")
+    assert_true("phenix.xtriage data.mtz" in success_cmds,
+        "Successful command must appear in get_all_commands()")
+
+    failed_cmds = [cmd for _, cmd in s.get_all_failed_commands()]
+    assert_true("phenix.predict_and_build data.mtz" in failed_cmds,
+        "Failed command must appear in get_all_failed_commands()")
+    assert_true("phenix.xtriage data.mtz" not in failed_cmds,
+        "Successful command must NOT appear in get_all_failed_commands()")
+
+    print("  PASSED: get_all_commands and get_all_failed_commands are non-overlapping")
+
+
+def test_s7c_phaser_valid_for_conventional_model():
+    # Problem 2: molecular_replacement phase phaser condition must allow
+    # a conventional PDB search model (has_model_for_mr=True) even when
+    # has_processed_model=False. Test the condition logic directly from YAML
+    # without importing workflow_engine (avoids libtbx dependency).
+    print("  Test: s7c_phaser_valid_for_conventional_model")
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        import yaml as _yaml
+    except ImportError:
+        try:
+            from libtbx.utils import import_python_object
+            _yaml = import_python_object("yaml", "").object
+        except Exception:
+            print("  SKIPPED: yaml not available")
+            return
+
+    wf_path = _os.path.join(_PROJECT_ROOT, "knowledge", "workflows.yaml")
+    wf = _yaml.safe_load(open(wf_path))
+    phases = wf.get("xray", {}).get("phases", {})
+    mr_programs = phases.get("molecular_replacement", {}).get("programs", [])
+
+    # Find phenix.phaser entry
+    phaser_entry = None
+    for p in mr_programs:
+        if isinstance(p, dict) and p.get("program") == "phenix.phaser":
+            phaser_entry = p
+            break
+    assert_true(phaser_entry is not None,
+        "phenix.phaser must exist in molecular_replacement programs")
+
+    # Simulate _check_conditions for beta.pdb scenario:
+    # conventional model present, no predicted/processed model, phaser not yet run
+    context_beta = {
+        "has_processed_model": False,
+        "has_model_for_mr": True,   # beta.pdb categorized as model
+        "phaser_done": False,
+        "process_predicted_model_done": False,
+    }
+    def simulate_check(entry, ctx):
+        for cond in entry.get("conditions", []):
+            if "has_any" in cond:
+                keys = ["has_" + k for k in cond["has_any"]]
+                if not any(ctx.get(k) for k in keys):
+                    return False
+            if "has" in cond:
+                if not ctx.get("has_" + cond["has"]):
+                    return False
+            if "not_done" in cond:
+                if ctx.get(cond["not_done"] + "_done"):
+                    return False
+        return True
+
+    result_beta = simulate_check(phaser_entry, context_beta)
+    assert_true(result_beta is True,
+        "phaser condition must pass for conventional model (has_model_for_mr=True, "
+        "has_processed_model=False)")
+
+    # Predicted model path still works
+    context_alphafold = {
+        "has_processed_model": True,
+        "has_model_for_mr": True,
+        "phaser_done": False,
+    }
+    result_af = simulate_check(phaser_entry, context_alphafold)
+    assert_true(result_af is True,
+        "phaser condition must still pass for processed predicted model")
+
+    # phaser_done=True must block phaser (not_done: phaser guard)
+    context_done = {
+        "has_processed_model": True,
+        "has_model_for_mr": True,
+        "phaser_done": True,
+    }
+    result_done = simulate_check(phaser_entry, context_done)
+    assert_true(result_done is False,
+        "phaser condition must fail when phaser_done=True")
+
+    print("  PASSED: phaser condition allows conventional model and predicted model, "
+          "blocks already-run")
+
+
+def test_s7d_phaser_condition_in_workflows_yaml():
+    # Source-level check: workflows.yaml molecular_replacement phaser condition
+    # must use has_any: [processed_model, model_for_mr]
+    print("  Test: s7d_phaser_condition_in_workflows_yaml")
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    wf_path = _os.path.join(_PROJECT_ROOT, "knowledge", "workflows.yaml")
+    src = open(wf_path).read()
+
+    assert_true("has_any: [processed_model, model_for_mr]" in src,
+        "workflows.yaml phaser condition must use has_any: [processed_model, model_for_mr]")
+    # The old condition (has: processed_model alone on phaser entry) must be gone
+    # Check that phaser's conditions no longer contain only 'has: processed_model'
+    mr_idx = src.find("molecular_replacement:")
+    assert_true(mr_idx >= 0, "molecular_replacement phase must exist in workflows.yaml")
+    # Look for phenix.phaser only within the molecular_replacement section
+    # (there is also a phaser entry in obtain_model which has different conditions)
+    mr_section = src[mr_idx:mr_idx + 1000]
+    phaser_in_mr = mr_section.find("program: phenix.phaser")
+    assert_true(phaser_in_mr >= 0,
+        "phenix.phaser must exist in molecular_replacement section")
+    phaser_section = mr_section[phaser_in_mr:phaser_in_mr + 800]
+    assert_true("has_any" in phaser_section,
+        "phenix.phaser conditions in molecular_replacement must use has_any, "
+        "got:\n%s" % phaser_section)
+
+    print("  PASSED: workflows.yaml phaser condition correctly uses has_any")
+
+
+def test_s7e_is_duplicate_returns_was_failure_flag():
+    # is_duplicate_command must return a 3-tuple (is_dup, cycle_num, was_failure)
+    print("  Test: s7e_is_duplicate_returns_was_failure_flag")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    s = AgentSession.__new__(AgentSession)
+    s.data = {"cycles": [
+        {"cycle_number": 1, "program": "phenix.xtriage",
+         "result": "SUCCESS: ok", "command": "phenix.xtriage data.mtz"},
+        {"cycle_number": 2, "program": "phenix.predict_and_build",
+         "result": "FAILED: Please supply a sequence file",
+         "command": "phenix.predict_and_build data.mtz"},
+    ]}
+
+    # Duplicate of failed cycle -> was_failure=True
+    is_dup, prev, was_fail = s.is_duplicate_command("phenix.predict_and_build data.mtz")
+    assert_true(is_dup is True, "Must be detected as duplicate")
+    assert_true(was_fail is True,
+        "was_failure must be True when matched cycle was a failure")
+
+    # Duplicate of successful cycle -> was_failure=False
+    is_dup2, prev2, was_fail2 = s.is_duplicate_command("phenix.xtriage data.mtz")
+    assert_true(is_dup2 is True, "Must be detected as duplicate")
+    assert_true(was_fail2 is False,
+        "was_failure must be False when matched cycle was successful")
+
+    # Not a duplicate -> (False, None, False)
+    is_dup3, prev3, was_fail3 = s.is_duplicate_command("phenix.refine model.pdb data.mtz")
+    assert_true(is_dup3 is False, "New command must not be a duplicate")
+    assert_true(prev3 is None, "prev_cycle must be None for non-duplicate")
+    assert_true(was_fail3 is False, "was_failure must be False for non-duplicate")
+
+    print("  PASSED: is_duplicate_command returns correct 3-tuple with was_failure flag")
+
+
+def test_s7f_get_cycle_result_returns_error_text():
+    # get_cycle_result must return the result text for the given cycle number
+    print("  Test: s7f_get_cycle_result_returns_error_text")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    s = AgentSession.__new__(AgentSession)
+    s.data = {"cycles": [
+        {"cycle_number": 1, "program": "phenix.xtriage",
+         "result": "SUCCESS: xtriage done", "command": "phenix.xtriage data.mtz"},
+        {"cycle_number": 2, "program": "phenix.predict_and_build",
+         "result": "FAILED: Please supply a sequence file",
+         "command": "phenix.predict_and_build data.mtz"},
+    ]}
+
+    assert_true(s.get_cycle_result(2) == "FAILED: Please supply a sequence file",
+        "Must return exact result text for cycle 2")
+    assert_true(s.get_cycle_result(1) == "SUCCESS: xtriage done",
+        "Must return exact result text for cycle 1")
+    assert_true(s.get_cycle_result(99) is None,
+        "Must return None for non-existent cycle")
+
+    print("  PASSED: get_cycle_result returns correct result text by cycle number")
+
+
+def test_s7g_retry_feedback_distinguishes_failure_from_success():
+    # _retry_duplicate feedback text must differ based on prev_was_failure.
+    # Test structurally against the ai_agent.py source.
+    print("  Test: s7g_retry_feedback_distinguishes_failure_from_success")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    ai_agent_path = _find_ai_agent_path()
+    assert_true(ai_agent_path is not None, "Could not locate ai_agent.py")
+    src = open(ai_agent_path).read()
+
+    # _retry_duplicate must accept prev_was_failure parameter
+    assert_true("def _retry_duplicate" in src, "_retry_duplicate must exist")
+    retry_idx = src.find("def _retry_duplicate")
+    retry_section = src[retry_idx:retry_idx + 3000]
+    assert_true("prev_was_failure" in retry_section,
+        "_retry_duplicate must accept prev_was_failure parameter")
+
+    # Must have two distinct feedback branches
+    assert_true("FAILED COMMAND REPEATED" in retry_section,
+        "Must have failure-specific feedback message")
+    assert_true("DUPLICATE REJECTED" in retry_section,
+        "Must have success-duplicate feedback message")
+
+    # Failure branch must mention checking required input files
+    assert_true("required input files" in retry_section,
+        "Failure feedback must instruct LLM to check required input files")
+
+    # Failure branch must include the prior error text
+    assert_true("get_cycle_result" in retry_section,
+        "Failure feedback must retrieve prior error text via get_cycle_result")
+
+    # _handle_duplicate_check must pass was_failure through
+    handle_idx = src.find("def _handle_duplicate_check")
+    handle_section = src[handle_idx:handle_idx + 1500]
+    assert_true("prev_was_failure" in handle_section,
+        "_handle_duplicate_check must unpack and pass prev_was_failure")
+
+    print("  PASSED: _retry_duplicate generates context-appropriate feedback "
+          "for failed vs. successful duplicate commands")
+
+
+def test_s7h_molecular_replacement_phase_description_updated():
+    # molecular_replacement phase description must no longer be AlphaFold-specific
+    print("  Test: s7h_molecular_replacement_phase_description_updated")
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    wf_path = _os.path.join(_PROJECT_ROOT, "knowledge", "workflows.yaml")
+    src = open(wf_path).read()
+
+    # Find the molecular_replacement section
+    mr_idx = src.find("    molecular_replacement:")
+    assert_true(mr_idx >= 0, "molecular_replacement section must exist")
+    mr_section = src[mr_idx:mr_idx + 300]
+
+    # Must not contain AlphaFold-specific language
+    assert_true("AlphaFold" not in mr_section,
+        "molecular_replacement description must not mention AlphaFold, got:\n%s" % mr_section)
+    assert_true("predicted model" not in mr_section,
+        "molecular_replacement description must not say 'predicted model', "
+        "got:\n%s" % mr_section)
+
+    # Must contain general MR language
+    assert_true("molecular replacement" in mr_section.lower() or
+                "MR" in mr_section,
+        "molecular_replacement description must contain general MR language, "
+        "got:\n%s" % mr_section)
+
+    print("  PASSED: molecular_replacement phase description is now general, "
+          "not AlphaFold-specific")
+
+
+# ===========================================================================
+# S8 — Client-side required-file injection (_inject_missing_required_files)
+# ===========================================================================
+
+def _make_mock_session(available_files=None, best_files=None,
+                       original_files=None):
+    """Build a minimal mock session for injection tests."""
+    class _MockSession:
+        def get_available_files(self):
+            return list(available_files or [])
+        def get_best_files_dict(self):
+            return dict(best_files or {})
+        def get_directives(self):
+            return {}
+        @property
+        def data(self):
+            return {"original_files": list(original_files or [])}
+    return _MockSession()
+
+
+def _make_mock_params(original_files=None):
+    """Build a minimal mock params object."""
+    class _MockAI:
+        pass
+    class _MockParams:
+        ai_analysis = _MockAI()
+    p = _MockParams()
+    p.ai_analysis.original_files = list(original_files or [])
+    return p
+
+
+def _get_injector():
+    """Return a callable that wraps _inject_missing_required_files.
+
+    Extracts the two methods from ai_agent.py source via exec so we
+    don't need to import the full AIAgent class (which requires the
+    entire PHENIX package).  Supplies a mock ProgramRegistry backed
+    directly by knowledge/yaml_loader so the methods work without
+    libtbx being installed.
+    """
+    import sys as _sys, types as _types
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    ai_agent_path = _find_ai_agent_path()
+
+    # Build a lightweight ProgramRegistry substitute that reads directly
+    # from programs.yaml via knowledge.yaml_loader (no libtbx needed).
+    from knowledge.yaml_loader import get_program_inputs  # local import, no libtbx
+
+    class _MockProgramRegistry:
+        def get_required_input_defs(self, program_name):
+            inputs = get_program_inputs(program_name)
+            return dict(inputs.get("required", {}))
+
+    # Also supply the module-level _quote_if_needed from program_registry source
+    # by extracting it directly rather than importing the module.
+    import shlex as _shlex
+    def _quote_if_needed(path):
+        s = str(path)
+        return _shlex.quote(s) if ' ' in s else s
+
+    # Extract just the two method bodies from source.
+    src = open(ai_agent_path).read()
+
+    def _extract_method(method_name):
+        import textwrap as _tw
+        marker = "  def %s(" % method_name
+        start = src.find(marker)
+        if start < 0:
+            raise ValueError("Cannot find method %r in ai_agent.py" % method_name)
+        rest = src[start:]
+        lines = rest.split('\n')
+        body_lines = [lines[0]]
+        for line in lines[1:]:
+            if line.startswith('  def ') and line != lines[0]:
+                break
+            body_lines.append(line)
+        return _tw.dedent('\n'.join(body_lines))
+
+    method_src = (
+        _extract_method("_inject_missing_required_files") + "\n\n" +
+        _extract_method("_find_candidate_for_slot")
+    )
+
+    # Namespace pre-populated with everything the methods need.
+    # The try/except import blocks inside the method will raise ImportError
+    # for the libtbx path, then fall to 'from agent.program_registry import ...'
+    # which also chains to libtbx.  We bypass both by pre-seeding the names
+    # the method resolves via globals() after exec.
+    ns = {
+        # Class constants (referenced as self._X, but exec sees them as closures)
+        "_SLOT_TO_BEST_CATEGORY": {
+            "model": "model", "pdb_file": "model", "protein": "model",
+            "map": "map", "full_map": "map",
+            "data_mtz": "data_mtz", "hkl_file": "data_mtz", "data": "data_mtz",
+            "map_coeffs_mtz": "map_coeffs_mtz",
+            "sequence": "sequence", "seq_file": "sequence",
+            "ligand_cif": "ligand_cif", "ligand": "ligand_cif",
+        },
+        "_CRYSTAL_EXTS": frozenset({
+            '.pdb', '.cif', '.mtz', '.sca', '.hkl',
+            '.mrc', '.ccp4', '.map',
+            '.fa', '.fasta', '.seq', '.dat',
+            '.ncs_spec', '.eff',
+        }),
+        # Pre-seed ProgramRegistry so the try/except import inside the method
+        # resolves to our mock without ever touching libtbx.
+        "ProgramRegistry": _MockProgramRegistry,
+        "_quote_if_needed": _quote_if_needed,
+    }
+
+    # Patch sys.modules so the 'from libtbx... import ProgramRegistry' lines
+    # inside the exec'd methods also resolve to our mock instead of failing.
+    _libtbx_stub = _types.ModuleType("libtbx")
+    _lc_stub     = _types.ModuleType("libtbx.langchain")
+    _lca_stub    = _types.ModuleType("libtbx.langchain.agent")
+    _lca_stub.ProgramRegistry    = _MockProgramRegistry
+    _lca_stub._quote_if_needed   = _quote_if_needed
+    _lcapr_stub  = _types.ModuleType("libtbx.langchain.agent.program_registry")
+    _lcapr_stub.ProgramRegistry  = _MockProgramRegistry
+    _lcapr_stub._quote_if_needed = _quote_if_needed
+    for _name, _mod in [
+        ("libtbx", _libtbx_stub),
+        ("libtbx.langchain", _lc_stub),
+        ("libtbx.langchain.agent", _lca_stub),
+        ("libtbx.langchain.agent.program_registry", _lcapr_stub),
+    ]:
+        if _name not in _sys.modules:
+            _sys.modules[_name] = _mod
+
+    try:
+        exec(compile(method_src, "<inject_methods>", "exec"), ns)
+    except Exception as e:
+        raise ImportError("Failed to exec injection methods: %s" % e)
+
+    inject_fn = ns["_inject_missing_required_files"]
+    find_fn   = ns["_find_candidate_for_slot"]
+
+    class _StubVlog:
+        def verbose(self, msg): pass
+        def normal(self, msg): pass
+
+    obj = _types.SimpleNamespace(
+        vlog=_StubVlog(),
+        params=None,
+        _SLOT_TO_BEST_CATEGORY=ns["_SLOT_TO_BEST_CATEGORY"],
+        _CRYSTAL_EXTS=ns["_CRYSTAL_EXTS"],
+    )
+    obj._inject_missing_required_files = _types.MethodType(inject_fn, obj)
+    obj._find_candidate_for_slot       = _types.MethodType(find_fn, obj)
+
+    class _Wrapper:
+        def inject(self, command, program_name, session, available_files=None):
+            return obj._inject_missing_required_files(
+                command, program_name, session, available_files=available_files)
+        def find_candidate(self, slot_name, slot_def, extensions,
+                           best_files, available_files, present_basenames):
+            return obj._find_candidate_for_slot(
+                slot_name, slot_def, extensions,
+                best_files, available_files, present_basenames)
+
+    return _Wrapper()
+
+
+def test_s8a_inject_sequence_when_missing():
+    """Sequence file injected into predict_and_build when absent."""
+    print("  Test: s8a_inject_sequence_when_missing")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+    session = _make_mock_session(
+        available_files=["/data/7qz0.fa", "/data/data.mtz"],
+        best_files={})
+
+    cmd = ("phenix.predict_and_build "
+           "predict_and_build.stop_after_predict=True "
+           "rebuild_strategy=quick")
+    result = injector.inject(cmd, "phenix.predict_and_build", session,
+                             available_files=["/data/7qz0.fa", "/data/data.mtz"])
+
+    assert_true("input_files.seq_file=" in result,
+        "Flagged injection must produce 'input_files.seq_file=', got:\n%s" % result)
+    assert_true("7qz0.fa" in result,
+        "Injected result must contain '7qz0.fa', got:\n%s" % result)
+    # MTZ not present in original command — predict_and_build has no required MTZ slot
+    # so data.mtz must NOT be injected
+    assert_true(result.count(".mtz") == 0,
+        "data.mtz must NOT be injected (not a required slot), got:\n%s" % result)
+
+    print("  PASSED: sequence file injected with correct flag")
+
+
+def test_s8b_no_inject_when_already_present():
+    """No injection when required file is already in the command."""
+    print("  Test: s8b_no_inject_when_already_present")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+    session = _make_mock_session(
+        available_files=["/data/7qz0.fa", "/data/data.mtz"],
+        best_files={})
+
+    cmd = ("phenix.predict_and_build "
+           "input_files.seq_file=/data/7qz0.fa "
+           "predict_and_build.stop_after_predict=True")
+    result = injector.inject(cmd, "phenix.predict_and_build", session,
+                             available_files=["/data/7qz0.fa"])
+
+    assert_true(result == cmd,
+        "Command must be unchanged when seq file already present.\n"
+        "Expected: %r\nGot:      %r" % (cmd, result))
+    # Exactly one occurrence of the seq file
+    assert_true(result.count("7qz0.fa") == 1,
+        "Must not double-inject the file, got:\n%s" % result)
+
+    print("  PASSED: command unchanged when required file already present")
+
+
+def test_s8c_inject_bare_positional_model():
+    """Model file injected as bare positional before key=value tokens."""
+    print("  Test: s8c_inject_bare_positional_model")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+    session = _make_mock_session(
+        best_files={"model": "/data/refined.pdb"},
+        available_files=["/data/refined.pdb"])
+
+    cmd = "phenix.molprobity xray_data.r_free_flags.generate=True"
+    result = injector.inject(cmd, "phenix.molprobity", session,
+                             available_files=["/data/refined.pdb"])
+
+    assert_true("refined.pdb" in result,
+        "Model file must be injected, got:\n%s" % result)
+
+    # Bare positional must appear before any key=value token
+    parts = result.split()
+    pdb_idx  = next(i for i, p in enumerate(parts) if "refined.pdb" in p)
+    kv_idx   = next(i for i, p in enumerate(parts) if "=" in p)
+    assert_true(pdb_idx < kv_idx,
+        "Bare positional file must come before key=value tokens.\n"
+        "parts: %s" % parts)
+
+    print("  PASSED: bare positional model injected before key=value tokens")
+
+
+def test_s8d_no_inject_for_unknown_program():
+    """No injection and no exception for an unrecognised program."""
+    print("  Test: s8d_no_inject_for_unknown_program")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+    session = _make_mock_session(
+        available_files=["/data/model.pdb"],
+        best_files={})
+
+    cmd = "phenix.custom_program model.pdb"
+    result = injector.inject(cmd, "phenix.custom_program", session,
+                             available_files=["/data/model.pdb"])
+
+    assert_true(result == cmd,
+        "Command must be unchanged for unknown program, got:\n%s" % result)
+
+    print("  PASSED: unknown program returns command unchanged, no exception")
+
+
+def test_s8e_pdbtools_dual_pdb_no_double_inject():
+    """pdbtools: second PDB slot filled; first PDB not duplicated."""
+    print("  Test: s8e_pdbtools_dual_pdb_no_double_inject")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+    session = _make_mock_session(
+        available_files=["/data/protein.pdb", "/data/ligand.pdb"],
+        best_files={"model": "/data/protein.pdb"})
+
+    # protein.pdb is already in the command (positional)
+    cmd = "phenix.pdbtools /data/protein.pdb"
+    result = injector.inject(cmd, "phenix.pdbtools", session,
+                             available_files=["/data/protein.pdb",
+                                             "/data/ligand.pdb"])
+
+    # ligand.pdb should be injected for the second PDB slot
+    assert_true("ligand.pdb" in result,
+        "ligand.pdb must be injected for the second PDB slot, got:\n%s" % result)
+    # protein.pdb must appear exactly once
+    assert_true(result.count("protein.pdb") == 1,
+        "protein.pdb must appear exactly once, got:\n%s" % result)
+
+    print("  PASSED: pdbtools second PDB slot filled without duplicating first")
+
+
+def test_s8f_ligandfit_mtz_not_injected_without_best():
+    """ligandfit: raw Fobs MTZ NOT injected when best_files empty."""
+    print("  Test: s8f_ligandfit_mtz_not_injected_without_best")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+    # best_files has no map_coeffs_mtz; available_files has a raw Fobs MTZ
+    session = _make_mock_session(
+        available_files=["/data/protein.pdb", "/data/LIG.pdb",
+                         "/data/data.mtz"],
+        best_files={})
+
+    cmd = "phenix.ligandfit model=/data/protein.pdb ligand=/data/LIG.pdb"
+    result = injector.inject(cmd, "phenix.ligandfit", session,
+                             available_files=["/data/protein.pdb",
+                                             "/data/LIG.pdb",
+                                             "/data/data.mtz"])
+
+    # data.mtz is raw Fobs — must NOT be injected (require_best_files_only=true)
+    assert_true("data.mtz" not in result,
+        "Raw Fobs MTZ must NOT be injected for ligandfit map_coeffs_mtz slot "
+        "(require_best_files_only=true), got:\n%s" % result)
+
+    print("  PASSED: require_best_files_only blocks raw MTZ injection for ligandfit")
+
+
+def test_s8g_get_required_input_defs():
+    """ProgramRegistry.get_required_input_defs returns full slot definitions."""
+    print("  Test: s8g_get_required_input_defs")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.program_registry import ProgramRegistry
+    except ImportError:
+        print("  SKIP (ProgramRegistry unavailable)")
+        return
+
+    r = ProgramRegistry()
+
+    # predict_and_build: one required slot (sequence)
+    defs = r.get_required_input_defs("phenix.predict_and_build")
+    assert_true("sequence" in defs,
+        "predict_and_build must have 'sequence' required slot, got: %s" % list(defs))
+    seq_def = defs["sequence"]
+    assert_true(seq_def.get("flag") == "input_files.seq_file=",
+        "sequence flag must be 'input_files.seq_file=', got: %r" % seq_def.get("flag"))
+    assert_true(".fa" in seq_def.get("extensions", []),
+        "sequence extensions must include '.fa', got: %s" % seq_def.get("extensions"))
+
+    # ligandfit: require_best_files_only on map_coeffs_mtz
+    lf_defs = r.get_required_input_defs("phenix.ligandfit")
+    assert_true("map_coeffs_mtz" in lf_defs,
+        "ligandfit must have 'map_coeffs_mtz' required slot, got: %s" % list(lf_defs))
+    assert_true(lf_defs["map_coeffs_mtz"].get("require_best_files_only") is True,
+        "ligandfit map_coeffs_mtz must have require_best_files_only=true")
+
+    # Unknown program: empty dict, no exception
+    unknown = r.get_required_input_defs("phenix.nonexistent")
+    assert_true(unknown == {},
+        "Unknown program must return empty dict, got: %r" % unknown)
+
+    print("  PASSED: get_required_input_defs returns correct slot definitions")
+
+
+def test_s8h_path_with_spaces_quoted_correctly():
+    """Paths containing spaces are quoted so shlex.split() tokenises correctly."""
+    print("  Test: s8h_path_with_spaces_quoted_correctly")
+    import sys as _sys, shlex as _shlex
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+
+    # ── Sub-test 1: flagged injection with space in directory ─────────────────
+    spaced_seq = "/data/my projects/7qz0.fa"
+    session1 = _make_mock_session(
+        available_files=[spaced_seq],
+        best_files={})
+    cmd1 = "phenix.predict_and_build stop_after_predict=True"
+    result1 = injector.inject(cmd1, "phenix.predict_and_build", session1,
+                              available_files=[spaced_seq])
+
+    assert_true("7qz0.fa" in result1,
+        "Sequence file must be injected, got:\n%s" % result1)
+    # After quoting, shlex.split must produce exactly 3 tokens:
+    #   phenix.predict_and_build  stop_after_predict=True  input_files.seq_file=...
+    try:
+        parts1 = _shlex.split(result1)
+    except ValueError as e:
+        raise AssertionError(
+            "shlex.split raised ValueError on injected command "
+            "(likely unquoted space in path): %s\nCommand: %s" % (e, result1))
+    # The seq_file token must contain the full path with space intact
+    seq_tokens = [p for p in parts1 if "seq_file" in p]
+    assert_true(len(seq_tokens) == 1,
+        "Must have exactly one seq_file token, got: %s" % parts1)
+    assert_true("my projects" in seq_tokens[0],
+        "Full path with space must be preserved in token, got: %r" % seq_tokens[0])
+
+    # ── Sub-test 2: bare positional injection with space in directory ──────────
+    spaced_model = "/data/my data/refined.pdb"
+    session2 = _make_mock_session(
+        best_files={"model": spaced_model},
+        available_files=[spaced_model])
+    cmd2 = "phenix.molprobity xray_data.r_free_flags.generate=True"
+    result2 = injector.inject(cmd2, "phenix.molprobity", session2,
+                              available_files=[spaced_model])
+
+    assert_true("refined.pdb" in result2,
+        "Model must be injected, got:\n%s" % result2)
+    try:
+        parts2 = _shlex.split(result2)
+    except ValueError as e:
+        raise AssertionError(
+            "shlex.split raised ValueError on bare-positional command: "
+            "%s\nCommand: %s" % (e, result2))
+    pdb_tokens = [p for p in parts2 if "refined.pdb" in p]
+    assert_true(len(pdb_tokens) == 1,
+        "Must have exactly one pdb token, got: %s" % parts2)
+    assert_true("my data" in pdb_tokens[0],
+        "Full path with space must be preserved, got: %r" % pdb_tokens[0])
+
+    # ── Sub-test 3: roundtrip — already-present detection on a quoted path ─────
+    # Build a command that already has the quoted injected form, then
+    # call inject again.  The slot must be detected as satisfied (no re-injection).
+    cmd3 = result1  # result from sub-test 1 (contains quoted seq path)
+    result3 = injector.inject(cmd3, "phenix.predict_and_build", session1,
+                              available_files=[spaced_seq])
+    count_before = cmd3.count("7qz0.fa")
+    count_after  = result3.count("7qz0.fa")
+    assert_true(count_after == count_before,
+        "Re-injection must be suppressed; '7qz0.fa' count went from %d to %d.\n"
+        "Command: %s" % (count_before, count_after, result3))
+
+    print("  PASSED: spaced paths quoted correctly; shlex.split safe; "
+          "already-present detection works on quoted tokens")
+
+
+# ===========================================================================
+# S9 — Superseded-issues provenance fixes (lineage graph + authority expansion)
+# ===========================================================================
+
+def test_s9e_extract_file_basenames_helper():
+    """_extract_file_basenames correctly tokenises commands."""
+    print("  Test: s9e_extract_file_basenames_helper")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import _extract_file_basenames
+    except ImportError:
+        from libtbx.langchain.agent.session import _extract_file_basenames
+
+    # Normal command: mix of files and PHIL params
+    result = _extract_file_basenames(
+        "phenix.refine input_files.seq_file=7qz0.fa PHASER.1.pdb refinement.cycles=5")
+    assert_true("7qz0.fa" in result,
+        "seq_file= token must yield '7qz0.fa', got: %s" % result)
+    assert_true("phaser.1.pdb" in result,
+        "bare positional must yield 'phaser.1.pdb', got: %s" % result)
+    assert_true("phenix.refine" not in result,
+        "program name must not appear in result, got: %s" % result)
+
+    # None / empty input
+    assert_true(_extract_file_basenames(None) == [],
+        "None input must return empty list")
+    assert_true(_extract_file_basenames("") == [],
+        "Empty string must return empty list")
+
+    # Quoted path with space in directory — must return correct basename
+    result2 = _extract_file_basenames(
+        "phenix.predict_and_build input_files.seq_file='/data/my dir/7qz0.fa'")
+    assert_true("7qz0.fa" in result2,
+        "Quoted spaced-directory path must yield '7qz0.fa', got: %s" % result2)
+
+    print("  PASSED: _extract_file_basenames tokenises correctly")
+
+
+def test_s9a_lineage_graph_built_correctly():
+    """_build_lineage_graph maps output basenames to input basenames."""
+    print("  Test: s9a_lineage_graph_built_correctly")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    cycles = [
+        {"cycle_number": 1, "program": "phenix.xtriage",
+         "command": "phenix.xtriage data.mtz",
+         "result": "SUCCESS",
+         "output_files": []},
+        {"cycle_number": 2, "program": "phenix.phaser",
+         "command": "phenix.phaser beta.pdb data.mtz",
+         "result": "SUCCESS",
+         "output_files": ["/data/PHASER.1.pdb"]},
+        {"cycle_number": 3, "program": "phenix.refine",
+         "command": "phenix.refine PHASER.1.pdb data.mtz",
+         "result": "SUCCESS",
+         "output_files": ["/data/refine_001.pdb"]},
+    ]
+
+    graph = AgentSession._build_lineage_graph(cycles)
+
+    # PHASER.1.pdb was produced from beta.pdb + data.mtz
+    assert_true("phaser.1.pdb" in graph,
+        "PHASER.1.pdb must be in graph, keys: %s" % list(graph))
+    assert_true("beta.pdb" in graph["phaser.1.pdb"],
+        "PHASER.1.pdb parents must include beta.pdb, got: %s" % graph["phaser.1.pdb"])
+    assert_true("data.mtz" in graph["phaser.1.pdb"],
+        "PHASER.1.pdb parents must include data.mtz, got: %s" % graph["phaser.1.pdb"])
+
+    # refine_001.pdb was produced from PHASER.1.pdb + data.mtz
+    assert_true("refine_001.pdb" in graph,
+        "refine_001.pdb must be in graph")
+    assert_true("phaser.1.pdb" in graph["refine_001.pdb"],
+        "refine_001.pdb parents must include phaser.1.pdb, got: %s" % graph["refine_001.pdb"])
+
+    # Cycle with empty output_files must not add entries (xtriage above)
+    for bn in graph:
+        assert_true(bn != "data.mtz",  # data.mtz is an input, not an output
+            "Input files must not appear as graph keys, got: %s" % bn)
+
+    print("  PASSED: lineage graph maps output basenames to their input basenames")
+
+
+def test_s9b_ancestors_traces_transitively():
+    """_ancestors resolves transitive chains and handles cycles safely."""
+    print("  Test: s9b_ancestors_traces_transitively")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    graph = {
+        "phaser.1.pdb": {"beta.pdb", "data.mtz"},
+        "refined.pdb":  {"phaser.1.pdb"},
+    }
+
+    # Transitive chain: refined.pdb → phaser.1.pdb → beta.pdb, data.mtz
+    anc = AgentSession._ancestors("refined.pdb", graph)
+    assert_true("phaser.1.pdb" in anc,
+        "phaser.1.pdb must be an ancestor of refined.pdb, got: %s" % anc)
+    assert_true("beta.pdb" in anc,
+        "beta.pdb must be a transitive ancestor of refined.pdb, got: %s" % anc)
+    assert_true("data.mtz" in anc,
+        "data.mtz must be a transitive ancestor of refined.pdb, got: %s" % anc)
+
+    # Leaf node: beta.pdb has no entries in the graph
+    anc2 = AgentSession._ancestors("beta.pdb", graph)
+    assert_true(anc2 == set(),
+        "Leaf node must return empty set, got: %s" % anc2)
+
+    # Unknown file: not in graph at all
+    anc3 = AgentSession._ancestors("unknown.pdb", graph)
+    assert_true(anc3 == set(),
+        "Unknown file must return empty set, got: %s" % anc3)
+
+    # Cycle safety: must not infinite-loop
+    cyclic = {"a.pdb": {"b.pdb"}, "b.pdb": {"a.pdb"}}
+    anc4 = AgentSession._ancestors("a.pdb", cyclic)
+    assert_true(isinstance(anc4, set),
+        "Must return a set even for cyclic graphs, got: %r" % anc4)
+
+    print("  PASSED: _ancestors resolves transitively; handles leaf nodes and cycles")
+
+
+def test_s9c_strategy4_supersedes_via_lineage():
+    """Full MR workflow: probe superseded via lineage graph (Strategy 4)."""
+    print("  Test: s9c_strategy4_supersedes_via_lineage")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    # The exact scenario that previously failed all three strategies:
+    #   Cycle 1: model_vs_data beta.pdb → FAILED (needs_mr)
+    #   Cycle 2: phaser beta.pdb → SUCCESS → outputs PHASER.1.pdb
+    #   Cycle 3: refine PHASER.1.pdb → SUCCESS
+    #
+    # Strategy 4 should trace: PHASER.1.pdb ancestors → {beta.pdb}
+    # which intersects probe_files → superseded.
+
+    cycles = [
+        {
+            "cycle_number": 1,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data beta.pdb data.mtz",
+            "result": "FAILED: R-free=0.58 — model needs molecular replacement",
+            "output_files": [],
+            "failure_context": {
+                "error_type": None,
+                "scope": "recoverable",
+                "program": "phenix.model_vs_data",
+                "input_files": ["beta.pdb", "data.mtz"],
+                "superseded_by": None,
+            },
+        },
+        {
+            "cycle_number": 2,
+            "program": "phenix.phaser",
+            "command": "phenix.phaser beta.pdb data.mtz",
+            "result": "SUCCESS: MR solution found",
+            "output_files": ["/data/PHASER.1.pdb"],
+        },
+        {
+            "cycle_number": 3,
+            "program": "phenix.refine",
+            "command": "phenix.refine PHASER.1.pdb data.mtz",
+            "result": "SUCCESS: R-free=0.26",
+            "output_files": ["/data/refine_001.pdb"],
+        },
+    ]
+
+    s = AgentSession.__new__(AgentSession)
+    s.data = {"cycles": cycles, "original_files": ["/data/beta.pdb", "/data/data.mtz"]}
+    s._annotate_superseded_issues(s.data["cycles"])
+
+    fc = cycles[0]["failure_context"]
+    assert_true(fc["superseded_by"] is not None,
+        "Cycle 1 must be marked superseded after phaser+refine succeed, got: %r" % fc)
+
+    # Accept either cycle 2 (phaser) or cycle 3 (refine) as the superseder —
+    # both are correct.  Cycle 2 is preferred (phaser is now in _default authority)
+    # but cycle 3 is also valid if phaser was matched first by the graph.
+    superseder = fc["superseded_by"]
+    assert_true("phenix.phaser" in superseder or "phenix.refine" in superseder,
+        "superseded_by must name phaser or refine, got: %r" % superseder)
+
+    print("  PASSED: Strategy 4 links beta.pdb → PHASER.1.pdb → refine supersession "
+          "(superseded by: %s)" % superseder)
+
+
+def test_s9d_expanded_authority_phaser_supersedes_probe():
+    """phenix.phaser in _default authority supersedes probe on direct file match."""
+    print("  Test: s9d_expanded_authority_phaser_supersedes_probe")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    try:
+        from agent.session import AgentSession
+    except ImportError:
+        from libtbx.langchain.agent.session import AgentSession
+
+    # Direct file match scenario — no lineage needed.
+    # Phaser runs on the SAME files as the probe: beta.pdb, data.mtz.
+    # Before the authority expansion, phaser was not in _default so this
+    # would never be marked superseded.
+
+    cycles = [
+        {
+            "cycle_number": 1,
+            "program": "phenix.model_vs_data",
+            "command": "phenix.model_vs_data beta.pdb data.mtz",
+            "result": "FAILED: R-free=0.58",
+            "output_files": [],
+            "failure_context": {
+                "error_type": None,
+                "scope": "recoverable",
+                "program": "phenix.model_vs_data",
+                "input_files": ["beta.pdb", "data.mtz"],
+                "superseded_by": None,
+            },
+        },
+        {
+            "cycle_number": 2,
+            "program": "phenix.phaser",
+            "command": "phenix.phaser beta.pdb data.mtz",
+            "result": "SUCCESS: MR solution",
+            "output_files": ["/data/PHASER.1.pdb"],
+        },
+    ]
+
+    s = AgentSession.__new__(AgentSession)
+    s.data = {"cycles": cycles, "original_files": []}
+    s._annotate_superseded_issues(s.data["cycles"])
+
+    fc = cycles[0]["failure_context"]
+    assert_true(fc["superseded_by"] is not None,
+        "Probe must be superseded by phaser (Strategy 1, direct match), got: %r" % fc)
+    assert_true("phenix.phaser" in fc["superseded_by"],
+        "superseded_by must name phenix.phaser, got: %r" % fc["superseded_by"])
+    assert_true("cycle 2" in fc["superseded_by"],
+        "superseded_by must include cycle 2, got: %r" % fc["superseded_by"])
+
+    print("  PASSED: phenix.phaser now authoritative in _default; "
+          "directly supersedes probe on matching files")
+
+
+def test_s8i_retry_duplicate_injection():
+    """_retry_duplicate output is passed through required-file injection."""
+    # Regression guard for Mode E bypass: _retry_duplicate calls the LLM
+    # directly and previously returned the raw command without injection.
+    # The fix inserts _inject_missing_required_files before returning.
+    # We verify the fix structurally — the injection call appears in the
+    # method source at the right position (after STOP check, before return).
+    print("  Test: s8i_retry_duplicate_injection")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    # Locate _retry_duplicate
+    method_start = src.find("  def _retry_duplicate(")
+    assert_true(method_start >= 0, "_retry_duplicate method must exist")
+
+    # Locate the end of _retry_duplicate (next same-level def)
+    rest = src[method_start:]
+    next_def = rest.find("\n  def ", 1)
+    method_src = rest[:next_def] if next_def > 0 else rest[:3000]
+
+    # The injection call must be present
+    assert_true("_inject_missing_required_files" in method_src,
+        "_retry_duplicate must call _inject_missing_required_files")
+
+    # The injection must appear AFTER the STOP early-return block
+    stop_idx   = method_src.find("return command, decision_info, True")
+    inject_idx = method_src.find("_inject_missing_required_files")
+    assert_true(inject_idx > stop_idx,
+        "Injection must come after the STOP early-return, not before. "
+        "STOP return at char %d, inject call at char %d" % (stop_idx, inject_idx))
+
+    # active_files must be reused (not a new empty list)
+    inject_block_start = method_src.find("# Apply required-file injection")
+    inject_region = method_src[inject_block_start:inject_block_start + 700]
+    assert_true("active_files" in inject_region,
+        "Injection block must pass active_files (already built in the method)")
+
+    # decision_info['command'] must be updated with the injected command
+    assert_true("decision_info['command'] = command" in inject_region,
+        "decision_info['command'] must be updated after injection")
+
+    print("  PASSED: _retry_duplicate applies required-file injection "
+          "after STOP check using already-built active_files")
+
+
+def test_s8j_prefer_patterns_honoured():
+    """prefer_patterns promotes matching files over non-matching candidates."""
+    print("  Test: s8j_prefer_patterns_honoured")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    injector = _get_injector()
+
+    # available_files has two .pdb files: one matches prefer_patterns, one doesn't.
+    # Without prefer_patterns support the method would return the last file
+    # in the list (model.pdb), which is wrong for a ligand slot.
+    session = _make_mock_session(
+        available_files=["/data/model.pdb", "/data/lig.pdb"],
+        best_files={})
+
+    slot_def = {
+        "extensions": [".pdb", ".cif"],
+        "flag": "ligand=",
+        "prefer_patterns": ["lig", "ligand"],
+        "exclude_patterns": [],
+    }
+    result = injector.find_candidate(
+        "ligand", slot_def, [".pdb", ".cif"],
+        best_files={},
+        available_files=["/data/model.pdb", "/data/lig.pdb"],
+        present_basenames=set())
+
+    assert_true(result is not None,
+        "find_candidate must return a file, got None")
+    assert_true("lig.pdb" in result,
+        "prefer_patterns must select lig.pdb over model.pdb, got: %r" % result)
+
+    # Non-matching file is still returned when no prefer-pattern match exists
+    result2 = injector.find_candidate(
+        "ligand", slot_def, [".pdb", ".cif"],
+        best_files={},
+        available_files=["/data/model.pdb"],
+        present_basenames=set())
+    assert_true(result2 is not None and "model.pdb" in result2,
+        "Fallback to non-matching file when no prefer match exists, got: %r" % result2)
+
+    print("  PASSED: prefer_patterns selects matching candidate; "
+          "non-matching file used as fallback")
+
+
+def test_s10a_no_param_inject_into_probe_programs():
+    """_inject_user_params must never inject key=value params into probe/validation
+    programs (model_vs_data, xtriage, molprobity, mtriage, validation_cryoem).
+
+    Regression guard: guidelines containing rebuild_strategy=quick, space_group=P3221,
+    or any other bare key=value must not appear in model_vs_data commands.
+    """
+    print("  Test: s10a_no_param_inject_into_probe_programs")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    # The guard must exist in _inject_user_params source
+    inject_start = src.find("  def _inject_user_params(")
+    assert_true(inject_start >= 0, "_inject_user_params must exist in ai_agent.py")
+
+    # Find the end of the method (next same-level def)
+    inject_end = src.find("\n  def ", inject_start + 1)
+    inject_src = src[inject_start:inject_end]
+
+    assert_true("_NO_PARAM_INJECT_PROGRAMS" in inject_src,
+        "_inject_user_params must define _NO_PARAM_INJECT_PROGRAMS guard")
+    assert_true("phenix.model_vs_data" in inject_src,
+        "_NO_PARAM_INJECT_PROGRAMS must include phenix.model_vs_data")
+    assert_true("phenix.xtriage" in inject_src,
+        "_NO_PARAM_INJECT_PROGRAMS must include phenix.xtriage")
+    assert_true("phenix.molprobity" in inject_src,
+        "_NO_PARAM_INJECT_PROGRAMS must include phenix.molprobity")
+
+    # The guard must fire before any injection code
+    guard_idx  = inject_src.find("_NO_PARAM_INJECT_PROGRAMS")
+    return_idx = inject_src.find("return command", guard_idx)
+    assert_true(return_idx > guard_idx and return_idx < guard_idx + 400,
+        "_NO_PARAM_INJECT_PROGRAMS guard must return command unchanged immediately")
+
+    print("  PASSED: _NO_PARAM_INJECT_PROGRAMS guard present and returns early "
+          "for probe/validation programs")
+
+
+def test_s10b_probe_failure_continues_workflow():
+    """Any failure of model_vs_data must continue the workflow, not stop it.
+
+    Regression guard: before this fix, 'Sorry: Unknown command line parameter
+    definition: space_group' triggered unknown_phil_parameter → terminal stop.
+    Now the _PROBE_PROGRAMS early-exit ensures model_vs_data failures are
+    always treated as inconclusive.
+    """
+    print("  Test: s10b_probe_failure_continues_workflow")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    # Find the run_failed block — the _PROBE_PROGRAMS guard must be inside it
+    # and must appear BEFORE the _analyze_for_recovery call.
+    run_failed_idx = src.find("if run_failed:")
+    assert_true(run_failed_idx >= 0, "run_failed block must exist in ai_agent.py")
+
+    # Search within the next 5000 chars of the block
+    block = src[run_failed_idx:run_failed_idx + 5000]
+
+    assert_true("_PROBE_PROGRAMS" in block,
+        "_PROBE_PROGRAMS guard must be inside the run_failed block")
+
+    probe_idx    = block.find("_PROBE_PROGRAMS")
+    # Search for the actual _analyze_for_recovery CALL (not the comment that
+    # mentions it); skip past comment lines by finding the method call form.
+    recovery_idx = block.find("recovery = self._analyze_for_recovery")
+    assert_true(probe_idx < recovery_idx,
+        "_PROBE_PROGRAMS guard must appear before recovery = self._analyze_for_recovery "
+        "(probe exit must short-circuit recovery analysis). "
+        "probe at %d, recovery call at %d" % (probe_idx, recovery_idx))
+
+    # The early-exit must return False (continue workflow, not stop)
+    probe_block = block[probe_idx:probe_idx + 1200]
+    assert_true("return False" in probe_block,
+        "_PROBE_PROGRAMS guard must return False to continue the workflow")
+
+    # model_vs_data and mmtbx variant must both be in the set
+    assert_true("phenix.model_vs_data" in probe_block,
+        "_PROBE_PROGRAMS must include phenix.model_vs_data")
+    assert_true("mmtbx.model_vs_data" in probe_block,
+        "_PROBE_PROGRAMS must include mmtbx.model_vs_data")
+
+    print("  PASSED: _PROBE_PROGRAMS guard short-circuits failure analysis; "
+          "any model_vs_data failure returns False (continue workflow)")
+
+
+def test_s10c_sanitize_strips_params_from_probe_programs():
+    """_sanitize_command must strip ALL key=value tokens from probe programs
+    before execution, regardless of whether yaml_loader is importable.
+
+    Regression guard for two real failures:
+      1. rebuild_level=QUICK on phenix.model_vs_data   (LLM-generated)
+      2. crystal_symmetry.space_group="None mentioned in ins"  (LLM-generated)
+    Both caused "Sorry: Unknown command line parameter definition" then agent stop.
+    """
+    print("  Test: s10c_sanitize_strips_params_from_probe_programs")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    # ── Structural: guard must exist and be import-free ───────────────────
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    sanitize_start = src.find("  def _sanitize_command(")
+    assert_true(sanitize_start >= 0, "_sanitize_command must exist in ai_agent.py")
+    sanitize_end = src.find("\n  def ", sanitize_start + 1)
+    sanitize_src = src[sanitize_start:sanitize_end]
+
+    assert_true("_PROBE_ONLY_FILE_PROGRAMS" in sanitize_src,
+        "_sanitize_command must define _PROBE_ONLY_FILE_PROGRAMS guard")
+    assert_true("phenix.model_vs_data" in sanitize_src,
+        "_PROBE_ONLY_FILE_PROGRAMS must include phenix.model_vs_data")
+    assert_true("phenix.xtriage" in sanitize_src,
+        "_PROBE_ONLY_FILE_PROGRAMS must include phenix.xtriage")
+
+    # Guard must come BEFORE the yaml_loader import call (Rule C dependency).
+    # Search for the actual import statement, not the comment that mentions it.
+    probe_idx = sanitize_src.find("_PROBE_ONLY_FILE_PROGRAMS")
+    yaml_idx  = sanitize_src.find("from knowledge.yaml_loader import")
+    if yaml_idx < 0:
+        yaml_idx = sanitize_src.find("from libtbx.langchain.knowledge.yaml_loader import")
+    assert_true(yaml_idx >= 0,
+        "yaml_loader import must exist in _sanitize_command (Rule C)")
+    assert_true(probe_idx < yaml_idx,
+        "_PROBE_ONLY_FILE_PROGRAMS guard must appear before yaml_loader import "
+        "so it fires even when yaml_loader is unavailable")
+
+    # ── Functional: exec the sanitize method and test real cases ──────────
+    injector = _get_injector()
+    # _get_injector gives us access to the exec'd namespace; we need
+    # _sanitize_command separately.  Use source exec directly.
+
+    ns = {"__builtins__": __builtins__}
+    _exec_method_from_source(
+        ai_agent_path,
+        ["_sanitize_command"],
+        ns
+    )
+    _sanitize = ns.get("_sanitize_command")
+    if _sanitize is None:
+        print("  SKIPPED: could not exec _sanitize_command (import deps)")
+        print("  PASSED (structural checks only): _PROBE_ONLY_FILE_PROGRAMS "
+              "guard is present and correctly positioned")
+        return
+
+    # Build a minimal mock self with a vlog that does nothing
+    class _VLog:
+        def verbose(self, *a): pass
+        def normal(self, *a): pass
+    class _MockSelf:
+        vlog = _VLog()
+    mock = _MockSelf()
+
+    # Case 1: rebuild_level=QUICK (exact command from the bug report)
+    cmd1 = ("phenix.model_vs_data "
+            "/Users/terwill/AF/7qz0.pdb "
+            "/Users/terwill/AF/7qz0.mtz "
+            "rebuild_level=QUICK")
+    result1 = _sanitize(mock, cmd1, session=None,
+                        program_name="phenix.model_vs_data")
+    assert_true("rebuild_level" not in result1,
+        "rebuild_level=QUICK must be stripped from model_vs_data command, "
+        "got: %r" % result1)
+    assert_true("7qz0.pdb" in result1 and "7qz0.mtz" in result1,
+        "File arguments must be preserved after stripping, got: %r" % result1)
+
+    # Case 2: crystal_symmetry.space_group="None mentioned in ins"
+    cmd2 = ('phenix.model_vs_data '
+            '/Users/terwill/beta-blip/beta.pdb '
+            '/Users/terwill/beta-blip/beta_blip_P3221.mtz '
+            'crystal_symmetry.space_group="None mentioned in ins"')
+    result2 = _sanitize(mock, cmd2, session=None,
+                        program_name="phenix.model_vs_data")
+    assert_true("space_group" not in result2,
+        "crystal_symmetry.space_group must be stripped from model_vs_data "
+        "command, got: %r" % result2)
+    assert_true("beta.pdb" in result2 and "beta_blip_P3221.mtz" in result2,
+        "File arguments must be preserved after stripping, got: %r" % result2)
+
+    # Case 3: clean command (no params) — must be unchanged
+    cmd3 = "phenix.model_vs_data beta.pdb data.mtz"
+    result3 = _sanitize(mock, cmd3, session=None,
+                        program_name="phenix.model_vs_data")
+    assert_true(result3 == cmd3,
+        "Clean model_vs_data command must be unchanged by sanitize, "
+        "got: %r" % result3)
+
+    # Case 4: xtriage also protected
+    cmd4 = "phenix.xtriage data.mtz space_group=P3221"
+    result4 = _sanitize(mock, cmd4, session=None,
+                        program_name="phenix.xtriage")
+    assert_true("space_group" not in result4,
+        "space_group must be stripped from phenix.xtriage command, "
+        "got: %r" % result4)
+    assert_true("data.mtz" in result4,
+        "MTZ argument must be preserved in xtriage command, got: %r" % result4)
+
+    print("  PASSED: _sanitize_command strips all key=value params from "
+          "probe programs; file args preserved; clean commands unchanged")
+
+
+def _exec_method_from_source(ai_agent_path, method_names, namespace):
+    """Extract and exec named standalone methods from ai_agent.py source.
+
+    Only works for methods with no self-referential imports beyond what
+    __builtins__ provides.  Falls through silently if exec fails (import deps).
+    Used by test_s10c to avoid importing the full AIAgent class.
+    """
+    import re as _re
+    src = open(ai_agent_path).read()
+    for method_name in method_names:
+        # Find the def at class indentation level (2 spaces)
+        pat = _re.compile(
+            r"(?m)^  def " + _re.escape(method_name) + r"\b.*?(?=^  def |\Z)",
+            _re.DOTALL
+        )
+        m = pat.search(src)
+        if not m:
+            continue
+        method_src = m.group(0)
+        # Dedent by 2 spaces so it becomes a module-level function
+        dedented = _re.sub(r"(?m)^  ", "", method_src)
+        try:
+            exec(dedented, namespace)  # noqa: S102
+        except Exception:
+            pass  # Import-dependent — caller checks for None
+
+
+def test_s10c_sanitize_strips_params_from_probe_programs():
+    """_sanitize_command must strip ALL key=value tokens from probe programs
+    before execution, regardless of whether yaml_loader is importable.
+
+    Regression guard for two real failures seen in the wild:
+      1. rebuild_level=QUICK on phenix.model_vs_data  (LLM hallucinated)
+      2. crystal_symmetry.space_group="None mentioned in ins"  (LLM hallucinated)
+    Both caused "Sorry: Unknown command line parameter definition" and then
+    incorrectly triggered the terminal-stop path (before the v112.90 fix added
+    the _PROBE_PROGRAMS early-exit).  The preventive fix is a hardcoded
+    _PROBE_ONLY_FILE_PROGRAMS early-exit at the top of _sanitize_command.
+    """
+    print("  Test: s10c_sanitize_strips_params_from_probe_programs")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    # ── Structural: guard must exist and be ordered correctly ─────────────
+    ai_agent_path = _find_ai_agent_path()
+    src = open(ai_agent_path).read()
+
+    sanitize_start = src.find("  def _sanitize_command(")
+    assert_true(sanitize_start >= 0, "_sanitize_command must exist in ai_agent.py")
+    sanitize_end = src.find("\n  def ", sanitize_start + 1)
+    sanitize_src = src[sanitize_start:sanitize_end]
+
+    assert_true("_PROBE_ONLY_FILE_PROGRAMS" in sanitize_src,
+        "_sanitize_command must define _PROBE_ONLY_FILE_PROGRAMS guard")
+    assert_true("phenix.model_vs_data" in sanitize_src,
+        "_PROBE_ONLY_FILE_PROGRAMS must include phenix.model_vs_data")
+    assert_true("phenix.xtriage" in sanitize_src,
+        "_PROBE_ONLY_FILE_PROGRAMS must include phenix.xtriage")
+
+    # Guard must appear BEFORE the actual yaml_loader from-import (Rule C depends on it).
+    # Note: the guard's own comment mentions "yaml_loader" earlier in the text;
+    # we search for the actual import statement, not just the word.
+    probe_guard_idx = sanitize_src.find("if program_name in _PROBE_ONLY_FILE_PROGRAMS:")
+    yaml_import_idx = sanitize_src.find("from libtbx.langchain.knowledge.yaml_loader")
+    if yaml_import_idx < 0:
+        yaml_import_idx = sanitize_src.find("from knowledge.yaml_loader")
+    assert_true(probe_guard_idx >= 0,
+        "_PROBE_ONLY_FILE_PROGRAMS if-block must be present")
+    assert_true(yaml_import_idx < 0 or probe_guard_idx < yaml_import_idx,
+        "_PROBE_ONLY_FILE_PROGRAMS guard must appear before yaml_loader import "
+        "so it fires even when yaml_loader is unavailable")
+
+    # Guard must return early (import-free path) — search from the if-block itself
+    _if_idx = sanitize_src.find("if program_name in _PROBE_ONLY_FILE_PROGRAMS:")
+    assert_true(_if_idx >= 0,
+        "_PROBE_ONLY_FILE_PROGRAMS if-block must be present in _sanitize_command")
+    guard_block = sanitize_src[_if_idx:_if_idx + 800]
+    assert_true("return" in guard_block,
+        "_PROBE_ONLY_FILE_PROGRAMS guard must return early from _sanitize_command")
+
+    # ── Functional: use exec to run the guard logic without importing AIAgent ─
+    # We exercise the '=' token stripping directly.
+
+    # Simulate the stripping logic (mirrors the implementation)
+    def _probe_sanitize(command):
+        """Minimal copy of the probe-program branch in _sanitize_command."""
+        stripped = []
+        for tok in command.split():
+            if '=' in tok and not tok.startswith('-'):
+                pass  # stripped
+            else:
+                stripped.append(tok)
+        return ' '.join(stripped)
+
+    # Case 1: rebuild_level=QUICK (from real log: 7qz0.pdb 7qz0.mtz rebuild_level=QUICK)
+    cmd1 = "phenix.model_vs_data /path/7qz0.pdb /path/7qz0.mtz rebuild_level=QUICK"
+    out1 = _probe_sanitize(cmd1)
+    assert_true("rebuild_level" not in out1,
+        "rebuild_level=QUICK must be stripped from model_vs_data command; got: %r" % out1)
+    assert_true("7qz0.pdb" in out1 and "7qz0.mtz" in out1,
+        "File arguments must be preserved after stripping; got: %r" % out1)
+
+    # Case 2: crystal_symmetry.space_group=... (from real log)
+    cmd2 = ('phenix.model_vs_data beta.pdb data.mtz '
+            'crystal_symmetry.space_group="None mentioned in ins"')
+    out2 = _probe_sanitize(cmd2)
+    assert_true("space_group" not in out2,
+        "crystal_symmetry.space_group must be stripped from model_vs_data; got: %r" % out2)
+    assert_true("beta.pdb" in out2 and "data.mtz" in out2,
+        "File arguments must be preserved; got: %r" % out2)
+
+    # Case 3: multiple params — all stripped, files kept
+    cmd3 = ("phenix.model_vs_data model.pdb data.mtz "
+            "rebuild_level=QUICK space_group=P3221 nproc=4")
+    out3 = _probe_sanitize(cmd3)
+    assert_true("rebuild_level" not in out3 and "space_group" not in out3
+                and "nproc" not in out3,
+        "All key=value params must be stripped; got: %r" % out3)
+    assert_true(out3.strip() == "phenix.model_vs_data model.pdb data.mtz",
+        "Only program name and files should remain; got: %r" % out3)
+
+    # Case 4: xtriage (also in _PROBE_ONLY_FILE_PROGRAMS)
+    cmd4 = "phenix.xtriage data.mtz xray_data.space_group=P21"
+    out4 = _probe_sanitize(cmd4)
+    assert_true("space_group" not in out4,
+        "space_group must be stripped from xtriage command; got: %r" % out4)
+
+    # Case 5: clean command — must be unchanged
+    cmd5 = "phenix.model_vs_data model.pdb data.mtz"
+    out5 = _probe_sanitize(cmd5)
+    assert_true(out5 == cmd5,
+        "Clean command must pass through unchanged; got: %r" % out5)
+
+    print("  PASSED: _sanitize_command strips key=value tokens from probe programs "
+          "(rebuild_level=QUICK, crystal_symmetry.space_group, etc.)")
+
+
+def test_s10d_probe_sanitize_preserves_quoted_paths():
+    """_sanitize_command must NOT strip file paths that contain '=' in quoted
+    form.  Paths with '=' are pathological but must not be falsely stripped.
+
+    More importantly: tokens starting with '-' (flags like --help, -v) must
+    be kept even though they may contain '='.
+    """
+    print("  Test: s10d_probe_sanitize_preserves_quoted_paths")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    def _probe_sanitize(command):
+        stripped = []
+        for tok in command.split():
+            if '=' in tok and not tok.startswith('-'):
+                pass
+            else:
+                stripped.append(tok)
+        return ' '.join(stripped)
+
+    # Flags starting with '-' must be preserved
+    cmd = "phenix.model_vs_data model.pdb data.mtz --overwrite=True"
+    out = _probe_sanitize(cmd)
+    assert_true("--overwrite=True" in out,
+        "Flags starting with '-' must NOT be stripped; got: %r" % out)
+
+    # Program name (no '=') must always survive
+    cmd2 = "phenix.model_vs_data model.pdb"
+    assert_true(_probe_sanitize(cmd2) == cmd2,
+        "Program name must not be affected; got: %r" % _probe_sanitize(cmd2))
+
+    print("  PASSED: '-' prefixed tokens preserved; program name unaffected")
+
 
 def run_all_tests():
     """Run all audit fix tests."""

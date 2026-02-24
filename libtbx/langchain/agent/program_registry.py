@@ -222,6 +222,34 @@ class ProgramRegistry:
                     required.append(slot_name)
             return required
 
+    def get_required_input_defs(self, program_name):
+        """
+        Get required input slots with their full slot definitions.
+
+        Unlike get_required_inputs() which returns only slot names,
+        this returns the complete definition for each slot including
+        extensions, flag, exclude_patterns, and require_best_files_only.
+        Used by _inject_missing_required_files for client-side file
+        completeness validation.
+
+        Args:
+            program_name: Name of program
+
+        Returns:
+            dict: {slot_name: {extensions, flag, exclude_patterns, ...}}
+                  Empty dict if program unknown or has no required inputs.
+        """
+        if self.use_yaml:
+            inputs = get_program_inputs(program_name)
+            return dict(inputs.get("required", {}))
+        else:
+            prog = self._json_templates.get(program_name, {})
+            result = {}
+            for slot_name, slot_def in prog.get("file_slots", {}).items():
+                if slot_def.get("required"):
+                    result[slot_name] = slot_def
+            return result
+
     def get_input_priorities(self, program_name, input_name):
         """
         Get file category priorities for an input slot.

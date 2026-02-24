@@ -246,6 +246,7 @@ class WorkflowEngine:
         #   - Probe has not already been run this session
         #   - Has a model AND reflection data or map (probe inputs available)
         #   - Model is NOT a predicted model (those always need MR/dock — no probe)
+        #   - User has NOT explicitly requested a program that presupposes placement
         #
         # CRITICAL: we use has_placed_model_FROM_HISTORY, NOT has_placed_model.
         # The directive model_is_placed=True can be set incorrectly by the LLM
@@ -253,6 +254,32 @@ class WorkflowEngine:
         # mode).  Using has_placed_model here would suppress the probe even when
         # the model has never actually been placed, allowing RSR to run against a
         # mismatched map and crash with a symmetry error.
+        #
+        # EXCEPTION: if the user explicitly requested a program that only makes
+        # sense on an already-placed model (e.g. phenix.refine, phenix.ligandfit),
+        # trust that request and skip the probe.  The user is asserting that
+        # placement is not in question.
+        _explicit_prog = (session_info or {}).get("explicit_program") or ""
+        _PROBE_SKIP_PROGRAMS = {
+            "phenix.refine", "phenix.ligandfit", "phenix.polder",
+            "phenix.molprobity", "phenix.autobuild",
+        }
+        _user_asserts_placed = _explicit_prog in _PROBE_SKIP_PROGRAMS
+
+        # ── User intent: does the user explicitly want ligand fitting? ───────
+        # Set when directives or session_info indicate the user wants ligandfit.
+        # Used in _detect_xray_phase to relax the r_free < 0.35 threshold and
+        # stay in the "refine" phase so ligandfit remains available, rather than
+        # falling through to "validate" and offering only validation programs.
+        _after_prog   = (directives or {}).get("stop_conditions", {}).get("after_program", "")
+        _prefer_progs = (directives or {}).get("workflow_preferences", {}).get("prefer_programs", [])
+        _explicit_lig = (session_info or {}).get("explicit_program", "")
+        context["user_wants_ligandfit"] = bool(
+            "ligandfit" in _after_prog.lower() or
+            any("ligandfit" in p.lower() for p in (_prefer_progs or [])) or
+            "ligandfit" in _explicit_lig.lower()
+        )
+
         context["placement_uncertain"] = (
             not context["has_placed_model_from_history"] and
             not context["has_placed_model_from_after_program"] and
@@ -260,7 +287,8 @@ class WorkflowEngine:
             not context["placement_probed"] and
             context["has_model"] and
             (context["has_data_mtz"] or context["has_map"]) and
-            not context["has_predicted_model"]
+            not context["has_predicted_model"] and
+            not _user_asserts_placed
         )
 
         return context
@@ -797,13 +825,13 @@ class WorkflowEngine:
         """Detect phase in X-ray workflow."""
 
         # Phase 1: Need analysis
-        if not context["xtriage_done"]:
+        if not context.get("xtriage_done"):
             return self._make_phase_result(phases, "analyze",
                 "Need to analyze data quality first")
 
         # Phase 2b: Have prediction, need to place it
-        if context["has_predicted_model"] and not context["has_placed_model"]:
-            if not context["has_processed_model"]:
+        if context.get("has_predicted_model") and not context.get("has_placed_model"):
+            if not context.get("has_processed_model"):
                 return self._make_phase_result(phases, "molecular_replacement",
                     "Have prediction, need to process for MR")
             else:
@@ -811,7 +839,7 @@ class WorkflowEngine:
                     "Model processed, need phaser")
 
         # Phase 2c: After autosol, need autobuild
-        if context["autosol_done"] and not context["autobuild_done"] and not context["has_refined_model"]:
+        if context.get("autosol_done") and not context.get("autobuild_done") and not context.get("has_refined_model"):
             return self._make_phase_result(phases, "build_from_phases",
                 "Experimental phasing complete, need autobuild")
 
@@ -819,9 +847,9 @@ class WorkflowEngine:
         # When phaser has run AND we have anomalous signal, autosol should run
         # using the phaser output as a partial model (partpdb_file) for MR-SAD.
         # Also triggered if user explicitly requested MR-SAD workflow.
-        if (context["phaser_done"] and
+        if (context.get("phaser_done") and
             (context.get("has_anomalous") or context.get("use_mr_sad")) and
-            not context["autosol_done"]):
+            not context.get("autosol_done")):
             return self._make_phase_result(phases, "experimental_phasing",
                 "Model placed by phaser, anomalous data detected - MR-SAD with autosol")
 
@@ -840,8 +868,13 @@ class WorkflowEngine:
                 return self._make_phase_result(phases, "molecular_replacement",
                     "Placement probe (model_vs_data) confirmed model is not placed "
                     "(R-free ≥ 0.50) — running MR")
-            # "placed" or None (probe ran but R-free unparseable) → fall through
-            # to normal refine routing below
+            # probe_result == "placed" OR None (probe ran but was inconclusive,
+            # e.g. crystal_symmetry_mismatch from model_vs_data).
+            # In either case we treat the model as tentatively placed and proceed
+            # to refine — phenix.refine is more permissive than the probe program
+            # and will resolve any minor discrepancy or give a clearer error.
+            if not context.get("has_placed_model"):
+                context["has_placed_model"] = True
 
         # ── Tier 3: probe not yet run, placement ambiguous → run it ──────────
         if context.get("placement_uncertain"):
@@ -850,12 +883,12 @@ class WorkflowEngine:
                 "(R-free < 0.50 → placed, ≥ 0.50 → MR)")
 
         # Phase 2: Need model
-        if not context["has_placed_model"]:
+        if not context.get("has_placed_model"):
             return self._make_phase_result(phases, "obtain_model",
                 "Data analyzed, need to obtain model")
 
         # Phase 3b: Ligand fitted, need to combine
-        if context["has_ligand_fit"] and not context["pdbtools_done"]:
+        if context.get("has_ligand_fit") and not context.get("pdbtools_done"):
             return self._make_phase_result(phases, "combine_ligand",
                 "Ligand fitted, need to combine")
 
@@ -868,27 +901,47 @@ class WorkflowEngine:
                 "Ligand fitted, need refinement of model+ligand complex")
 
         # Phase 3: Has model, may need refinement
-        if not context["has_refined_model"]:
+        if not context.get("has_refined_model"):
             return self._make_phase_result(phases, "refine",
                 "Have model, need initial refinement")
 
-        # CRITICAL: Stay in "refine" phase if ligand fitting is possible
-        # This allows ligandfit to be offered as a valid program
-        # Conditions: have ligand file, r_free is good enough, not already done, AND refinement done
-        # (ligandfit requires map coefficients from refined MTZ)
-        if (context.get("has_ligand_file") and
+        # CRITICAL: Stay in "refine" phase if ligand fitting is possible.
+        # This allows ligandfit to be offered as a valid program.
+        # Conditions: ligandfit not already done AND refinement done.
+        #
+        # We do NOT require has_ligand_file — phenix.ligandfit works with a
+        # ligand PDB file OR a residue code (ligand_type=ATP in guidelines).
+        #
+        # r_free threshold: normally < 0.35 (map quality check).  When the
+        # user explicitly requested ligand fitting (user_wants_ligandfit=True),
+        # relax to < 0.50 — the user knows their model quality and is asserting
+        # they want to proceed regardless.  This prevents the workflow from
+        # falling to the "validate" phase and offering only validation programs.
+        _wants_ligandfit = context.get("user_wants_ligandfit", False)
+        if (_wants_ligandfit and
             not context.get("ligandfit_done") and
             not context.get("has_ligand_fit") and
-            context.get("refine_count", 0) > 0):  # Must have refined first
-            # Check r_free threshold for ligandfit (< 0.35)
+            context.get("refine_count", 0) > 0):
             r_free = context.get("r_free")
-            if r_free is not None and r_free < 0.35:
+            _rfree_threshold = 0.50  # Relaxed because user explicitly requested it
+            if r_free is None or r_free < _rfree_threshold:
+                return self._make_phase_result(phases, "refine",
+                    "User requested ligand fitting — staying in refine phase")
+
+        # Also stay in refine for automatic ligandfit when a ligand file is present
+        if (context.get("has_ligand_file") and
+            not _wants_ligandfit and
+            not context.get("ligandfit_done") and
+            not context.get("has_ligand_fit") and
+            context.get("refine_count", 0) > 0):
+            r_free = context.get("r_free")
+            if r_free is None or r_free < 0.35:
                 return self._make_phase_result(phases, "refine",
                     "Model refined, ligand fitting available")
 
         # Check if validation is needed
         validation_needed = self._needs_validation(context, "xray")
-        if validation_needed and not context["validation_done"]:
+        if validation_needed and not context.get("validation_done"):
             return self._make_phase_result(phases, "validate",
                 "Model refined, need validation before stopping")
 
@@ -898,7 +951,7 @@ class WorkflowEngine:
                 "Continuing refinement to reach target")
 
         # Phase 4: At target, validate or complete
-        if not context["validation_done"]:
+        if not context.get("validation_done"):
             return self._make_phase_result(phases, "validate",
                 "Target reached, need validation")
 
@@ -914,7 +967,7 @@ class WorkflowEngine:
         # (e.g., resolve_cryo_em, dock_in_map), we're clearly past analysis.
         # This handles tutorials that skip mtriage.
         past_analysis = (
-            context["mtriage_done"] or
+            context.get("mtriage_done") or
             context.get("resolve_cryo_em_done", False) or
             context.get("dock_done", False) or
             context.get("rsr_done", False)
@@ -924,11 +977,6 @@ class WorkflowEngine:
                 "Need to analyze map quality first")
 
         # Phase 1.5: Create full map from half-maps before model building.
-        # When we have half-maps but no full map and resolve_cryo_em hasn't run,
-        # go to optimize_map first.  Without this, phase detection falls through
-        # to obtain_model and picks predict_and_build (listed first) even though
-        # resolve_cryo_em is the correct next step for the tutorial workflow
-        # mtriage → resolve_cryo_em → map_symmetry.
         if (context.get("has_half_map") and not context.get("has_full_map") and
                 not context.get("resolve_cryo_em_done") and
                 not context.get("map_sharpening_done")):
@@ -937,25 +985,16 @@ class WorkflowEngine:
                 "with resolve_cryo_em before model building")
 
         # Phase 2b: Stepwise - have prediction, need to dock it
-        # This handles the case where predict_and_build ran with stop_after_predict=True
-        if context["has_predicted_model"] and not context["has_placed_model"]:
-            # For stepwise path, need to dock the predicted model
-            if context["has_processed_model"]:
-                # Already processed, need to dock
+        if context.get("has_predicted_model") and not context.get("has_placed_model"):
+            if context.get("has_processed_model"):
                 return self._make_phase_result(phases, "dock_model",
                     "Have processed prediction, need to dock in map")
-            elif context["predict_done"] and not context["predict_full_done"]:
-                # Prediction only (stop_after_predict was used)
-                # Check if we need to process first or can dock directly
+            elif context.get("predict_done") and not context.get("predict_full_done"):
                 return self._make_phase_result(phases, "dock_model",
                     "Have prediction, need to dock in map")
 
         # ── Tier 1: unit cell mismatch → skip probe, go straight to docking ──
-        # Both map cells were readable and neither matches the model cell
-        # (> 5 % on any parameter).  Model is not placed in this map.
         if context.get("cell_mismatch") and not context.get("has_placed_model_from_history"):
-            # Tier 1: cell mismatch overrides even model_is_placed directive.
-            # Only history evidence (dock_done, refine_done, etc.) can suppress this.
             return self._make_phase_result(phases, "dock_model",
                 "Unit cell mismatch: model is not placed in this map — running docking")
 
@@ -965,8 +1004,6 @@ class WorkflowEngine:
                 return self._make_phase_result(phases, "dock_model",
                     "Placement probe (map_correlations) confirmed model is not placed "
                     "(CC ≤ 0.15) — running docking")
-            # "placed" or None (probe ran but CC unparseable) → fall through
-            # to normal refine routing below
 
         # ── Tier 3: probe not yet run, placement ambiguous → run it ──────────
         if context.get("placement_uncertain"):
@@ -975,28 +1012,28 @@ class WorkflowEngine:
                 "(CC > 0.15 → placed, ≤ 0.15 → docking)")
 
         # Phase 2: Need model
-        if not context["has_placed_model"]:
+        if not context.get("has_placed_model"):
             return self._make_phase_result(phases, "obtain_model",
                 "Map analyzed, need to obtain model")
 
         # Phase 2c: Check if map needs optimization
-        if context["has_half_map"] and not context["has_full_map"]:
+        if context.get("has_half_map") and not context.get("has_full_map"):
             return self._make_phase_result(phases, "optimize_map",
                 "Have model but only half-maps, need full map for refinement")
 
         # Phase 3a: Have docked model but not yet refined
-        if context["has_placed_model"] and not context["has_refined_model"]:
+        if context.get("has_placed_model") and not context.get("has_refined_model"):
             return self._make_phase_result(phases, "ready_to_refine",
                 "Model docked in map, ready for refinement")
 
         # Phase 3b: Refinement in progress
-        if not context["has_refined_model"]:
+        if not context.get("has_refined_model"):
             return self._make_phase_result(phases, "refine",
                 "Have model and map, need refinement")
 
         # Check validation
         validation_needed = self._needs_validation(context, "cryoem")
-        if validation_needed and not context["validation_done"]:
+        if validation_needed and not context.get("validation_done"):
             return self._make_phase_result(phases, "validate",
                 "Model refined, need validation")
 
@@ -1006,7 +1043,7 @@ class WorkflowEngine:
                 "Continuing refinement")
 
         # Validate or complete
-        if not context["validation_done"]:
+        if not context.get("validation_done"):
             return self._make_phase_result(phases, "validate",
                 "Target reached, need validation")
 
@@ -1171,6 +1208,19 @@ class WorkflowEngine:
             not context.get("phaser_done") and
             "phenix.autosol" in valid):
             valid.remove("phenix.autosol")
+
+        # Restore: if the user explicitly wants ligandfit, has refined at least once,
+        # and ligandfit hasn't run yet, add it to valid_programs even if the r_free < 0.35
+        # YAML condition was not met.  phenix.ligandfit works with a ligand PDB file OR
+        # a residue code (ligand_type=ATP); we do NOT require a separately-categorized
+        # ligand file — that would wrongly block runs where the user provides atp.pdb,
+        # gdp.pdb, or specifies the ligand by name in their guidelines.
+        if (context.get("user_wants_ligandfit") and
+                context.get("refine_count", 0) > 0 and
+                not context.get("ligandfit_done") and
+                not context.get("has_ligand_fit") and
+                "phenix.ligandfit" not in valid):
+            valid.append("phenix.ligandfit")
 
         # === APPLY USER DIRECTIVES ===
         # This is the SINGLE PLACE where directives affect valid_programs

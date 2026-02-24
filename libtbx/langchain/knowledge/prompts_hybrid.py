@@ -270,7 +270,7 @@ reconstruct it when the correct program runs.
 
 **phenix.predict_and_build** - AlphaFold prediction + MR + building
   Files: {sequence: .fa/.seq/.dat, data: .mtz/.sca (X-ray), full_map: .mrc/.ccp4 (cryo-EM), half_map: [.mrc, .mrc] (cryo-EM)}
-  Strategy: {resolution: N, stop_after_predict: true/false, rebuilding_strategy: "Quick"/"Standard"}
+  Strategy: {resolution: N, stop_after_predict: true/false}
   IMPORTANT: Set resolution if building (get from xtriage/mtriage)
   NOTE: By default (stop_after_predict=False), this runs the FULL workflow: prediction → molecular replacement → model building
   NOTE: Only set stop_after_predict=True for cryo-EM stepwise workflow where you want just the predicted model
@@ -948,6 +948,8 @@ Keep your assessment concise (3-5 sentences per section). Focus on practical ins
 === SESSION SUMMARY ===
 {session_summary}
 === END SESSION SUMMARY ===
+
+**Superseded failures**: Steps marked [SUPERSEDED] were resolved by later successful steps — do not report them as critical issues.
 
 Provide your assessment in Markdown format with the headers above."""
 

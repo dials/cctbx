@@ -377,12 +377,23 @@ Your response MUST include these sections:
    - Heavy atom type (Se, S, etc.)
    - Space group (if mentioned)
 
-5. **Special Instructions**: Any specific requirements like:
+5. **Program Parameters** (CRITICAL — translate natural language to PHIL key=value pairs):
+   Scan the instructions for any program settings expressed in plain English and emit them
+   as exact PHIL key=value pairs that can be appended to PHENIX commands.
+   Common translations:
+   - "one macro-cycle" / "1 macro-cycle" / "run only N macro-cycle(s)" → `main.number_of_macro_cycles=1` (or N)
+   - "N macro-cycles of refinement" → `main.number_of_macro_cycles=N`
+   - "superquick" refinement → `superquick=True`
+   - "N cycles of real-space refinement" → `macro_cycles=N`
+   - "resolution limit X Å" → `d_min=X`
+   Format each as a bare `key=value` line (one per line). If none, write "None".
+
+6. **Special Instructions**: Any specific requirements like:
    - Additional atom types to search for
    - Ligands to include
    - Quality targets (R-free, etc.)
 
-6. **Stop Condition**: When should the agent stop? Examples:
+7. **Stop Condition**: When should the agent stop? Examples:
    - "Stop after running xtriage" (for twinning analysis)
    - "Stop after molecular replacement" (for MR test)
    - "Stop after first refinement cycle" (for quick test)

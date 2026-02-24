@@ -1132,6 +1132,10 @@ phenix.refine:
       flag: "main.number_of_macro_cycles={value}"
       type: int
       hint: "Number of refinement macro-cycles (default is 3)"
+      natural_language:
+        - pattern: "(?:run\\s+only\\s+)?({count})\\s+macro[- ]cycles?"
+          value_group: 1
+          word_to_int: true
     macro_cycles:
       flag: "main.number_of_macro_cycles={value}"
       type: int
@@ -1140,6 +1144,9 @@ phenix.refine:
       flag: "main.simulated_annealing={value}"
       type: boolean
       hint: "Use if R-free > 0.40 and not improving"
+      natural_language:
+        - pattern: "simulated[- ]annealing"
+          value: "True"
     ordered_solvent:
       flag: "ordered_solvent={value}"
       type: boolean
@@ -1270,6 +1277,10 @@ phenix.real_space_refine:
       flag: "macro_cycles={value}"
       type: int
       hint: "More cycles for difficult cases"
+      natural_language:
+        - pattern: "(?:run\\s+only\\s+)?({count})\\s+macro[- ]cycles?"
+          value_group: 1
+          word_to_int: true
     nproc:
       flag: "nproc={value}"
       type: int
@@ -1346,6 +1357,7 @@ phenix.ligandfit:
         extensions: [.mtz]
         flag: "data="
         description: "MTZ with map coefficients (2mFo-DFc phases) - NOT raw Fobs!"
+        require_best_files_only: true  # Extension scan unsafe: any .mtz could be raw Fobs
       ligand:
         extensions: [.pdb, .cif]
         flag: "ligand="
@@ -1900,12 +1912,12 @@ phenix.model_vs_data:
 
   log_parsing:
     r_work:
-      pattern: '^\s*r_work:\s*([0-9.]+)'
+      pattern: 'r_work\s*:\s*([0-9.]+)'
       type: float
       display_name: "R-work"
       summary_format: "{value:.4f}"
     r_free:
-      pattern: '^\s*r_free:\s*([0-9.]+|None)'
+      pattern: 'r_free\s*:\s*([0-9.]+)'
       type: str
       display_name: "R-free"
       summary_format: "{value}"

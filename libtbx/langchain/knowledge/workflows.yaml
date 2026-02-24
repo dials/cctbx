@@ -114,8 +114,8 @@ xray:
 
     # Phase 2b: Place predicted model (if needed)
     molecular_replacement:
-      description: "Place predicted model in unit cell"
-      goal: "Position AlphaFold model using diffraction data"
+      description: "Place search model by molecular replacement"
+      goal: "Position model in the unit cell using MR (phenix.phaser)"
 
       programs:
         - program: phenix.process_predicted_model
@@ -125,7 +125,12 @@ xray:
 
         - program: phenix.phaser
           conditions:
-            - has: processed_model
+            # processed_model: AlphaFold prediction that has been through
+            #   process_predicted_model (the normal predicted-model MR path).
+            # model_for_mr: any model or search_model file — covers conventional
+            #   PDB search models (e.g. beta.pdb) that are used directly in MR
+            #   without going through process_predicted_model first.
+            - has_any: [processed_model, model_for_mr]
             - not_done: phaser  # MR should only run once
 
       transitions:
@@ -194,6 +199,7 @@ xray:
           conditions:
             - has: model
             - has: data_mtz
+            - has: ligand_fit
           hint: "Calculate polder omit map to verify ligand/residue placement in density"
 
       repeat:
@@ -248,6 +254,7 @@ xray:
           conditions:
             - has: model
             - has: data_mtz
+            - has: ligand_fit
           hint: "Verify ligand/residue placement with polder omit maps"
 
       transitions:

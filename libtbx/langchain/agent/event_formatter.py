@@ -167,6 +167,7 @@ class EventFormatter:
             EventType.DIRECTIVE_APPLIED: self._format_directive_applied,
             EventType.ERROR: self._format_error,
             EventType.WARNING: self._format_warning,
+            EventType.NOTICE: self._format_notice,
             EventType.DEBUG: self._format_debug,
             EventType.THOUGHT: self._format_thought,
         }
@@ -393,6 +394,22 @@ class EventFormatter:
         """Format warning event."""
         message = event.get("message", "")
         return "WARNING: %s" % message
+
+    def _format_notice(self, event):
+        """Format notice event — important info the user must see."""
+        message = event.get("message", "")
+        details = event.get("details", "")
+        lines = [
+            "",
+            "=" * 60,
+            "  NOTICE",
+            "=" * 60,
+            "  %s" % message,
+        ]
+        if details:
+            lines.append("  %s" % details)
+        lines.append("=" * 60)
+        return "\n".join(lines)
 
     def _format_debug(self, event):
         """Format debug event (only shown at debug verbosity)."""

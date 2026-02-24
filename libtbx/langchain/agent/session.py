@@ -35,6 +35,73 @@ except Exception:
     from agent.best_files_tracker import BestFilesTracker
 
 
+# ---------------------------------------------------------------------------
+# Module-level helpers for superseded-issue provenance matching
+# ---------------------------------------------------------------------------
+
+def _strip_stage_prefix(basename):
+    """Strip leading stage-prefix from a PHENIX output filename stem.
+
+    PHENIX programs produce output files named like::
+
+        refine_001_model.pdb
+        phased_model.pdb
+        ligandfit_001_model.pdb
+
+    This removes the leading ``<word>_<digits>_`` (or ``<word>_``) prefix
+    so that ``refine_001_7qz0`` and ``7qz0`` compare as equal stems.
+
+    Args:
+        basename: Filename with extension (e.g. ``"refine_001_7qz0.pdb"``).
+
+    Returns:
+        Lowercase stem with stage prefix stripped
+        (e.g. ``"7qz0"`` from ``"refine_001_7qz0.pdb"``).
+    """
+    import re as _re
+    import os as _os
+    stem = _os.path.splitext(basename.lower())[0]
+    # Remove one or two leading word_digits_ prefixes
+    stem = _re.sub(r'^[a-z]+_\d+_', '', stem)   # e.g. refine_001_model -> model
+    stem = _re.sub(r'^[a-z]+_',      '', stem)   # e.g. phased_model     -> model
+    return stem
+
+
+def _extract_file_basenames(command_str):
+    """Extract lowercase basenames of file-like tokens from a command string.
+
+    Splits on whitespace, strips ``key=`` prefixes and surrounding quotes,
+    then returns basenames for any token whose extension is a recognised
+    crystallographic file type.
+
+    Note: uses naive ``.split()`` rather than ``shlex.split()`` deliberately.
+    For a quoted path with spaces in the directory
+    (e.g. ``seq_file='/data/my dir/7qz0.fa'``), ``.split()`` yields the
+    trailing fragment ``7qz0.fa'`` whose quote is stripped to give the
+    correct basename ``7qz0.fa``.  ``shlex.split()`` would give the wrong
+    basename ``my dir/7qz0.fa``.
+
+    Args:
+        command_str: Raw command string (may be None or empty).
+
+    Returns:
+        list: Lowercase basenames of recognised file tokens (may be empty).
+    """
+    import os as _os
+    _FILE_EXTS = {'.pdb', '.cif', '.mtz', '.sca', '.hkl', '.mrc',
+                  '.ccp4', '.map', '.fa', '.fasta', '.seq', '.dat',
+                  '.ncs_spec', '.eff'}
+    result = []
+    for token in (command_str or '').split():
+        if '=' in token:
+            token = token.split('=', 1)[1]
+        token = token.strip('"\'')
+        ext = _os.path.splitext(token)[1].lower()
+        if ext in _FILE_EXTS:
+            result.append(_os.path.basename(token).lower())
+    return result
+
+
 class AgentSession:
     """
     Manages persistent state for an agent session across multiple cycles.
@@ -1017,6 +1084,37 @@ class AgentSession:
         self.data["ignored_commands"] = {}
         self.save()
 
+    def record_bad_inject_param(self, program_name, param_key):
+        """Record a parameter name that caused an 'Unknown command line parameter'
+        failure for a specific program.
+
+        Once recorded, _inject_user_params will skip this key for the same
+        program on every future cycle, breaking the inject→crash→re-inject loop.
+
+        Args:
+            program_name: e.g. "phenix.refine"
+            param_key:    The bare or dotted parameter name that was rejected,
+                          e.g. "ignore_symmetry_conflicts" or "bad.scope.key"
+        """
+        if "bad_inject_params" not in self.data:
+            self.data["bad_inject_params"] = {}
+        prog_bad = self.data["bad_inject_params"].setdefault(program_name, [])
+        if param_key not in prog_bad:
+            prog_bad.append(param_key)
+        self.save()
+
+    def get_bad_inject_params(self, program_name):
+        """Return the set of parameter keys blacklisted for *program_name*.
+
+        Args:
+            program_name: e.g. "phenix.refine"
+
+        Returns:
+            set of str — parameter keys to skip during injection
+        """
+        bad = self.data.get("bad_inject_params", {})
+        return set(bad.get(program_name, []))
+
     # =========================================================================
     # BEST FILES TRACKING
     # =========================================================================
@@ -1555,21 +1653,92 @@ class AgentSession:
 
         return removed
 
+    def get_all_failed_commands(self):
+        """
+        Get all commands that were attempted and FAILED (for exact-duplicate loop detection).
+
+        Only exact matches are meaningful here — we only want to catch the case where
+        the same command is retried verbatim after failing.  The 80%-overlap heuristic
+        is NOT applied to failed commands because partial similarity in failed attempts
+        is too noisy (e.g., two different recovery strategies that share the same data
+        file would incorrectly be flagged as duplicates).
+
+        Returns:
+            list of tuples: [(cycle_number, normalized_command), ...]
+        """
+        commands = []
+        for cycle in self.data["cycles"]:
+            program = cycle.get("program", "")
+            if program in ("CRASH", ""):
+                continue
+            result = cycle.get("result", "")
+            # Only include cycles that definitely failed (not incomplete / in-progress)
+            if not result:
+                continue
+            if result.startswith("SUCCESS"):
+                continue
+            cmd = cycle.get("command", "")
+            if cmd:
+                norm_cmd = " ".join(cmd.strip().split())
+                commands.append((cycle.get("cycle_number", 0), norm_cmd))
+        return commands
+
+    def get_cycle_result(self, cycle_number):
+        """Return the result text of a specific cycle, or None if not found.
+
+        Used by _retry_duplicate to include the original error text in the
+        feedback message when a command is rejected as a failed-duplicate.
+
+        Args:
+            cycle_number: 1-based cycle number.
+
+        Returns:
+            str or None: The result/error text stored on the cycle, or None.
+        """
+        for cycle in self.data.get("cycles", []):
+            if cycle.get("cycle_number") == cycle_number:
+                return cycle.get("result") or None
+        return None
+
+
     def is_duplicate_command(self, command):
         """
-        Check if a command (or very similar) has already been run successfully.
+        Check if a command (or very similar) has already been run.
+
+        Two-tier check:
+          1. Exact match against ALL previous commands — both successful AND failed.
+             An exact repeated failure is always a loop; stop it immediately.
+          2. 80%-token-overlap heuristic against SUCCESSFUL commands only.
+             This catches semantically equivalent successful runs (same program,
+             same core params, minor path differences) without generating false
+             positives from failed recovery attempts.
 
         Args:
             command: The command to check
 
         Returns:
-            tuple: (is_duplicate: bool, previous_cycle: int or None)
+            tuple: (is_duplicate: bool, previous_cycle: int or None,
+                    was_failure: bool)
+                   was_failure is True when the matched prior cycle failed —
+                   callers can use this to generate context-appropriate feedback.
         """
         if not command or command == "No command generated.":
             return False, None
 
         norm_new = " ".join(command.strip().split())
 
+        # ── Tier 1: exact match against ALL commands (success AND failure) ───
+        # This catches the common loop pattern where the LLM retries an identical
+        # command after a failure (e.g., missing required file, unrecognised param).
+        all_failed = self.get_all_failed_commands()
+        failed_nums = {cn for cn, _ in all_failed}
+        for cycle_num, norm_cmd in self.get_all_commands() + all_failed:
+            if not norm_cmd:
+                continue
+            if norm_cmd == norm_new:
+                return True, cycle_num, (cycle_num in failed_nums)
+
+        # ── Tier 2: 80%-overlap heuristic against SUCCESSFUL commands only ───
         # Extract program name from new command
         new_program = norm_new.split()[0] if norm_new else ""
 
@@ -1585,9 +1754,7 @@ class AgentSession:
             if os.path.basename(new_program) != os.path.basename(old_program):
                 continue
 
-            # Exact match
-            if norm_cmd == norm_new:
-                return True, cycle_num
+            # (Exact match already handled in Tier 1 above)
 
             # For predict_and_build, stop_after_predict is a critical parameter
             # Commands with different stop_after_predict values are NOT duplicates
@@ -1606,9 +1773,9 @@ class AgentSession:
             if len(new_parts) > 0 and len(old_parts) > 0:
                 overlap = len(new_parts & old_parts) / max(len(new_parts), len(old_parts))
                 if overlap > 0.8:
-                    return True, cycle_num
+                    return True, cycle_num, False  # matched successful cycle
 
-        return False, None
+        return False, None, False
 
     def get_history_for_agent(self):
         """
@@ -2289,6 +2456,236 @@ FINAL REPORT:"""
             "data": summary_data,
         }
 
+    # ── Superseded-issue authority table ──────────────────────────────────────
+    # Maps diagnosable error_type (from diagnosable_errors.yaml) to the set of
+    # programs whose *success* supersedes the concern raised by that error.
+    # Refinement carries the highest evidential weight because it is the most
+    # sensitive test of model-data compatibility.
+    _SUPERSESSION_AUTHORITY = {
+        "crystal_symmetry_mismatch": {
+            "phenix.refine", "phenix.real_space_refine",
+        },
+        "model_outside_map": {
+            "phenix.dock_in_map", "phenix.real_space_refine",
+        },
+        # Default: any program that positions, builds, or refines a model
+        # is authoritative for superseding generic probe/recoverable failures.
+        # Expanded from {refine, real_space_refine} to include:
+        #   phenix.phaser      — MR placement (supersedes needs_mr probe)
+        #   phenix.autobuild   — model building (supersedes needs_build probe)
+        #   phenix.dock_in_map — cryo-EM docking (supersedes needs_dock probe)
+        # The _files_overlap check still guards each supersession — expanding
+        # the authority set broadens candidacy, not provenance matching.
+        "_default": {
+            "phenix.refine", "phenix.real_space_refine",
+            "phenix.phaser",
+            "phenix.autobuild",
+            "phenix.dock_in_map",
+        },
+    }
+
+    @staticmethod
+    def _stage_prefix_strip(basename):
+        """Strip leading stage-prefix from a PHENIX output filename stem.
+        Delegates to the module-level _strip_stage_prefix() function.
+        """
+        return _strip_stage_prefix(basename)
+
+    @staticmethod
+    def _build_lineage_graph(cycles):
+        """Build a file provenance map from session cycle history.
+
+        Maps each output file basename (lowercase) to the set of input
+        file basenames that produced it.  Used by ``_files_overlap``
+        Strategy 4 to trace transitive file ancestry across cycles.
+
+        Example::
+
+            Cycle 2: phenix.phaser beta.pdb data.mtz → PHASER.1.pdb
+            Result:  {"phaser.1.pdb": {"beta.pdb", "data.mtz"}}
+
+        Cycles whose ``output_files`` list is empty (e.g. older sessions
+        recorded before output tracking was introduced) are silently skipped
+        — the graph will simply have fewer entries and Strategies 1–3 still
+        apply unchanged.
+
+        Args:
+            cycles: List of cycle dicts from ``session.data["cycles"]``.
+
+        Returns:
+            dict: ``{output_basename_lower: set_of_input_basename_lower}``
+        """
+        import os as _os
+        produced_by = {}
+        for cycle in cycles:
+            inputs = set(_extract_file_basenames(cycle.get("command", "")))
+            for f in cycle.get("output_files", []):
+                bn = _os.path.basename(f).lower()
+                produced_by[bn] = inputs
+        return produced_by
+
+    @staticmethod
+    def _ancestors(bn, produced_by, visited=None):
+        """Transitively resolve all ancestor file basenames for a given file.
+
+        Walks the lineage graph built by ``_build_lineage_graph`` to find
+        every input file that contributed — directly or indirectly — to
+        producing ``bn``.
+
+        Example::
+
+            graph = {"phaser.1.pdb": {"beta.pdb"}, "refined.pdb": {"phaser.1.pdb"}}
+            _ancestors("refined.pdb", graph)
+            → {"phaser.1.pdb", "beta.pdb"}
+
+        Cycle detection via ``visited`` prevents infinite recursion on
+        degenerate or cyclic graphs.
+
+        Args:
+            bn:          Lowercase basename to resolve.
+            produced_by: Lineage graph from ``_build_lineage_graph``.
+            visited:     Internal set for cycle detection (callers pass None).
+
+        Returns:
+            set: All ancestor basenames (may be empty for leaf/unknown files).
+        """
+        if visited is None:
+            visited = set()
+        if bn in visited:
+            return set()
+        visited.add(bn)
+        result = set()
+        for parent in produced_by.get(bn, set()):
+            result.add(parent)
+            result |= AgentSession._ancestors(parent, produced_by, visited)
+        return result
+
+    @staticmethod
+    def _files_overlap(probe_files, command_str, original_files, scope=None,
+                       lineage_graph=None):
+        """Return True if the probe and a later command share a semantic input file.
+
+        Handles four matching strategies in order:
+          1. Exact basename match
+          2. Stage-prefix-stripped stem match
+          3. Both trace back to the same session original file
+          4. Transitive file lineage — a command file's ancestor (via the
+             lineage graph) appears in the probe's input files.  Closes the
+             case where an intermediate program (e.g. phaser) produces a
+             derived file (PHASER.1.pdb) that a later authoritative program
+             (e.g. refine) consumes, while the probe ran on the original
+             input (beta.pdb) that phaser also used.
+
+        Args:
+            probe_files:    List of lowercase basenames from the probe command.
+            command_str:    Raw command string of the later (authoritative) cycle.
+            original_files: List of original session input file paths.
+            scope:          Failure scope ("probe" | "recoverable" | "terminal").
+                            When scope="probe" and either file list is empty,
+                            returns True (probe programs run before derived files
+                            exist and have no output history to compare against).
+                            For all other scopes, empty file lists return False.
+            lineage_graph:  Optional dict from ``_build_lineage_graph``.
+                            When None, Strategy 4 is skipped.
+
+        Returns:
+            bool
+        """
+        import os as _os
+
+        # Extract basenames from the later command
+        cmd_files = _extract_file_basenames(command_str)
+
+        if not probe_files or not cmd_files:
+            # Empty file lists: only treat as overlapping for scope="probe".
+            # Probe programs (e.g. model_vs_data) run early and may not yet
+            # have derived output files, so we give them the benefit of the doubt.
+            # For recoverable failures without parseable file provenance we
+            # conservatively return False — don't auto-supersede without evidence.
+            return scope == "probe"
+
+        # Strategy 1: exact basename
+        for pf in probe_files:
+            if pf in cmd_files:
+                return True
+
+        # Strategy 2: stage-prefix-stripped stem
+        probe_stems = {_strip_stage_prefix(f) for f in probe_files}
+        cmd_stems   = {_strip_stage_prefix(f) for f in cmd_files}
+        if probe_stems & cmd_stems:
+            return True
+
+        # Strategy 3: shared original file
+        orig_basenames = {_os.path.basename(f).lower()
+                          for f in (original_files or [])}
+        if set(probe_files) & orig_basenames and set(cmd_files) & orig_basenames:
+            return True
+
+        # Strategy 4: transitive file lineage
+        # Resolves cases where the later command operates on a file produced
+        # from one of the probe's inputs in an intermediate cycle.
+        # Example: probe ran on beta.pdb → phaser produced PHASER.1.pdb →
+        #          refine ran on PHASER.1.pdb.  Ancestors of PHASER.1.pdb
+        #          include beta.pdb, so overlap is confirmed.
+        if lineage_graph:
+            probe_set = set(probe_files)
+            for cf in cmd_files:
+                if AgentSession._ancestors(cf, lineage_graph) & probe_set:
+                    return True
+
+        return False
+
+    def _annotate_superseded_issues(self, cycles):
+        """Backward-scan cycles to mark probe/recoverable failures as superseded.
+
+        For each failed cycle carrying a failure_context with scope in
+        ("probe", "recoverable"), look forward for a successful authoritative
+        program that ran using overlapping inputs.  If found, write
+        failure_context["superseded_by"] = "<program> (cycle N)".
+
+        File overlap is checked via four strategies (see ``_files_overlap``);
+        Strategy 4 uses the lineage graph built here from ``output_files``
+        to handle cases where an intermediate cycle produces a derived file
+        that the authoritative cycle then consumes.
+
+        Args:
+            cycles: List of cycle dicts from session.data["cycles"].
+                    Modified in-place.
+        """
+        lineage_graph = self._build_lineage_graph(cycles)
+        original_files = self.data.get("original_files", [])
+
+        for i, cycle in enumerate(cycles):
+            fc = cycle.get("failure_context")
+            if not fc:
+                continue
+            if fc.get("scope") not in ("probe", "recoverable"):
+                continue
+            if fc.get("superseded_by"):
+                continue  # already annotated
+
+            error_type  = fc.get("error_type") or "_default"
+            probe_files = fc.get("input_files", [])
+            authority   = (
+                self._SUPERSESSION_AUTHORITY.get(error_type)
+                or self._SUPERSESSION_AUTHORITY["_default"]
+            )
+
+            for j in range(i + 1, len(cycles)):
+                later = cycles[j]
+                if "SUCCESS" not in str(later.get("result", "")).upper():
+                    continue
+                later_prog = later.get("program", "")
+                if later_prog not in authority:
+                    continue
+                later_cmd = later.get("command", "")
+                if self._files_overlap(probe_files, later_cmd, original_files,
+                                        scope=fc.get("scope"),
+                                        lineage_graph=lineage_graph):
+                    fc["superseded_by"] = "%s (cycle %s)" % (
+                        later_prog, later.get("cycle_number", j + 1))
+                    break
+
     def _extract_summary_data(self):
         """
         Extract structured summary data from the session.
@@ -2298,6 +2695,10 @@ FINAL REPORT:"""
         """
         cycles = self.data.get("cycles", [])
         original_files = self.data.get("original_files", [])
+
+        # Annotate superseded failures before building summary data.
+        # This writes superseded_by onto failure_context dicts in-place.
+        self._annotate_superseded_issues(cycles)
 
         # Detect experiment type
         experiment_type = self.data.get("experiment_type")
@@ -2429,12 +2830,14 @@ FINAL REPORT:"""
             else:
                 decision_brief = ""
 
+            fc = cycle.get("failure_context") or {}
             steps.append({
                 "cycle": cycle.get("cycle_number", "?"),
                 "program": program,
                 "success": success,
                 "key_metric": key_metric,
                 "decision_brief": decision_brief,
+                "superseded_by": fc.get("superseded_by"),
             })
 
         return steps
@@ -3254,10 +3657,17 @@ FINAL REPORT:"""
         # Steps Performed
         lines.append("## Steps Performed")
         lines.append("")
+        _has_superseded_step = any(
+            step.get("superseded_by") for step in data["steps"])
         lines.append("| Cycle | Program | Result | Key Metric |")
         lines.append("|-------|---------|--------|------------|")
         for step in data["steps"]:
-            result_symbol = "✓" if step["success"] else "✗"
+            if step["success"]:
+                result_symbol = "✓"
+            elif step.get("superseded_by"):
+                result_symbol = "✗*"   # failed but resolved by a later step
+            else:
+                result_symbol = "✗"
             program_short = step["program"].replace("phenix.", "")
             # Sanitize key_metric for markdown table:
             # - Replace newlines with spaces
@@ -3270,6 +3680,10 @@ FINAL REPORT:"""
             if len(key_metric) > 60:
                 key_metric = key_metric[:57] + "..."
             lines.append(f"| {step['cycle']} | {program_short} | {result_symbol} | {key_metric} |")
+        if _has_superseded_step:
+            lines.append("")
+            lines.append("_\* Failure resolved by a later successful step — "
+                         "does not affect the final result._")
         lines.append("")
 
         # Final Quality
@@ -3377,11 +3791,36 @@ FINAL REPORT:"""
         lines.append(f"WORKFLOW PATH: {data['workflow_path']}")
         lines.append("")
 
-        # Steps (brief)
+        # Steps (brief) — annotate superseded failures with [SUPERSEDED] tag
+        # Build a lookup from cycle_number to failure_context for O(1) access
+        raw_cycles = self.data.get("cycles", [])
+        _fc_by_cycle = {}
+        for _rc in raw_cycles:
+            _cn = _rc.get("cycle_number")
+            _fc = _rc.get("failure_context")
+            if _cn is not None and _fc:
+                _fc_by_cycle[_cn] = _fc
+
+        _any_superseded = any(
+            fc.get("superseded_by") for fc in _fc_by_cycle.values()
+        )
+        if _any_superseded:
+            lines.append(
+                "NOTE: Steps marked [SUPERSEDED] failed but were resolved by "
+                "later successful steps. They do not indicate problems with the "
+                "final result.")
+            lines.append("")
+
         lines.append("STEPS TAKEN:")
         for step in data["steps"]:
             status = "OK" if step["success"] else "FAILED"
-            lines.append(f"  {step['cycle']}. {step['program']} - {status} {step['key_metric']}")
+            fc = _fc_by_cycle.get(step["cycle"])
+            if fc and fc.get("superseded_by"):
+                tag = " [SUPERSEDED by %s]" % fc["superseded_by"]
+            else:
+                tag = ""
+            lines.append(f"  {step['cycle']}. {step['program']} - "
+                         f"{status}{tag} {step['key_metric']}")
         lines.append("")
 
         # Final metrics

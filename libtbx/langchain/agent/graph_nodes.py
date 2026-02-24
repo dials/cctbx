@@ -833,6 +833,14 @@ def perceive(state):
     state = _log(state, "PERCEIVE: Context: refine_count=%d, r_free=%s, has_ligand_file=%s" % (
         refine_count, r_free, has_ligand))
 
+    # Note: user_wants_ligandfit is set in context for routing decisions,
+    # but we do NOT block ligandfit based on the absence of a separate ligand
+    # coordinate file — phenix.ligandfit can work with just a residue code
+    # (e.g. ligand_type=ATP) or with a ligand PDB supplied by the user.
+    _wants_ligfit = context.get("user_wants_ligandfit", False)
+    if _wants_ligfit:
+        state = _log(state, "PERCEIVE: user_wants_ligandfit=True, has_ligand_file=%s" % has_ligand)
+
     # Log metrics trend details for debugging
     consecutive_rsr = metrics_trend.get("consecutive_rsr", 0)
     consecutive_refines = metrics_trend.get("consecutive_refines", 0)
@@ -1223,7 +1231,9 @@ def plan(state):
             )
 
             if not after_program_done:
-                # Suppress auto-stop - user wants a specific program to run first
+                # Suppress AUTO-STOP — user wants a specific program to run first.
+                # phenix.ligandfit can run with just a residue code (ligand_type=ATP)
+                # or a ligand PDB, so we do NOT block on has_ligand_file here.
                 state = _log(state, "PLAN: Suppressing AUTO-STOP because after_program=%s hasn't run yet" % after_program)
                 # Continue to LLM planning instead of stopping
             else:

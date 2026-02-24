@@ -1032,18 +1032,29 @@ def _analyze_history(history):
             if _is_failed_result(_result):
                 # ── S2L: probe failures that carry placement information ──────
                 # A failed map_correlations run before any refine/dock is the
-                # placement probe.  Some crashes are themselves definitive
-                # answers — extract the signal before discarding the entry.
+                # cryo-EM placement probe.  A failed model_vs_data run before
+                # any refine is the X-ray placement probe.  Some crashes are
+                # themselves definitive answers — extract the signal before
+                # discarding the entry.
                 #
                 # "entirely outside map": model coordinates are completely
                 #   outside the map box → model is definitively not placed →
                 #   needs_dock.
                 #
+                # "crystal symmetry mismatch" from model_vs_data:
+                #   The probe couldn't even compare — INCONCLUSIVE.  We do NOT
+                #   route to MR, because phenix.refine is often more permissive
+                #   (it can handle small cell differences) and may succeed where
+                #   model_vs_data refuses.  Mark as probed/inconclusive so the
+                #   probe is not retried, then fall through to normal refine.
+                #
                 # Any other failure: mark placement_probed=True with result=None
                 #   (inconclusive) so the probe never runs a third time.
                 #   Routing: placement_uncertain becomes False, falls through to
                 #   obtain_model → predict/dock fallback.
-                if "map_correlations" in _ecomb and not _seen_refine_or_dock:
+                _is_xray_probe = ("model_vs_data" in _ecomb and not _seen_refine_or_dock)
+                _is_cryoem_probe = ("map_correlations" in _ecomb and not _seen_refine_or_dock)
+                if _is_cryoem_probe or _is_xray_probe:
                     _rl = (_result or "").lower()
                     _outside_signals = [
                         "entirely outside map",
@@ -1057,7 +1068,9 @@ def _analyze_history(history):
                         info["placement_probed"] = True
                         info["placement_probe_result"] = "needs_dock"
                     elif not info.get("placement_probed"):
-                        # Unknown failure — prevent infinite probe retry
+                        # Unknown failure (including crystal_symmetry_mismatch
+                        # from model_vs_data) — prevent infinite probe retry
+                        # but treat as inconclusive so refine can still run.
                         info["placement_probed"] = True
                         # Leave placement_probe_result as None (inconclusive)
                 continue   # Ignore failed cycles for all other probe detection

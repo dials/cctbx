@@ -72,6 +72,7 @@ class EventType:
     # Debug/trace events (maps to old debug_log)
     DEBUG = "debug"
     THOUGHT = "thought"  # LLM chain-of-thought/reasoning traces
+    NOTICE = "notice"    # Important information for the user (not an error)
 
 
 # =============================================================================
@@ -106,6 +107,7 @@ EVENT_VERBOSITY = {
     EventType.STOP_DECISION: Verbosity.NORMAL,
     EventType.DIRECTIVE_APPLIED: Verbosity.NORMAL,
     EventType.USER_REQUEST_INVALID: Verbosity.QUIET,  # Always show - user needs to know
+    EventType.NOTICE: Verbosity.QUIET,                 # Always show - important user info
     EventType.FILES_SELECTED: Verbosity.VERBOSE,
     EventType.FILE_SCORED: Verbosity.VERBOSE,
     EventType.COMMAND_BUILT: Verbosity.NORMAL,
