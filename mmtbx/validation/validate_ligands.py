@@ -152,7 +152,7 @@ class manager(list):
 
   # ----------------------------------------------------------------------------
 
-  def show_table(self, out):
+  def show_table(self, out=sys.stdout):
     '''
     Print a summary table.
     '''
@@ -162,20 +162,25 @@ class manager(list):
     columns = [
       {'headers': ['', '', 'ligand'], 'width': 14,
        'data_fn': lambda lr: lr.id_str},
-      {'headers': ['', '', ''], 'width': 3,
-       'data_fn': lambda lr: '*' if lr.check_if_suspicious() else ''},
 
-      {'headers': ['', 'CC', '(fragments)'], 'width': 40,
+      # CC column is now split into two separate columns
+      {'headers': ['', 'RSCC', 'overall'], 'width': 9,
+       'data_fn': lambda lr: f"{lr.get_ccs().rscc:.2f}" if lr.get_ccs() else 'NA'},
+      {'headers': ['', 'RSCC', 'fragments'], 'width': 40,
        'data_fn': lambda lr: (
-           'NA' if not lr.get_ccs() else
-           f"{lr.get_ccs().rscc:.2f}" + (
-               f" ({', '.join(f'{cc:.2f}' for cc in lr.get_ccs().frag_ccs.values())})"
-               if lr.get_ccs().frag_ccs else ''
-           )
+           ', '.join(f'{cc:.2f}' for cc in lr.get_ccs().frag_ccs.values())
+           if lr.get_ccs() and lr.get_ccs().frag_ccs else '-'
        )},
 
       {'headers': ['% bad', 'map values', 'Fo-Fc'], 'width': 12,
        'data_fn': lambda lr: f"{lr.get_map_values().percent_bad_at_atom_centers}" if lr.get_map_values() else 'NA'},
+
+      # New columns for bad blobs
+      {'headers': ['', 'bad', 'blobs #'], 'width': 9,
+       'data_fn': lambda lr: f"{lr.get_map_values().n_bad_blobs}" if lr.get_map_values() else 'NA'},
+      {'headers': ['', 'bad blobs', '% grid'], 'width': 11,
+       'data_fn': lambda lr: f"{lr.get_map_values().percent_bad_blobs:.1f}" if lr.get_map_values() else 'NA'},
+
       {'headers': ['', '', 'clashes'], 'width': 9,
        'data_fn': lambda lr: f"{lr.get_overlaps().n_clashes}" if lr.get_overlaps() and lr.get_overlaps().n_clashes != 0 else '-'},
       {'headers': ['', '', 'H-bonds'], 'width': 9,
@@ -222,7 +227,7 @@ class manager(list):
         for i, col in enumerate(columns):
           if i == 0:
             sites_row_cells.append(f"{'sites':^{col['width']}}")
-          elif i == 6: # The ADPs column
+          elif i == 8: # The ADPs column
             sites_row_cells.append(f"{sites_b_str:^{col['width']}}")
           else:
             sites_row_cells.append(f"{'':^{col['width']}}")
@@ -941,7 +946,7 @@ class ligand_result(object):
     n_peaks_neg = len(peaks_neg)
     percent_bad_blobs = 0
     if sel.size() != 0:
-      percent_bad_blobs = (sum(peaks_pos)+sum(peaks_neg))/sel.size()
+      percent_bad_blobs = 100*(sum(peaks_pos)+sum(peaks_neg))/sel.size()
 
     #print('percent bad blobs', round(percent_bad_blobs, 3)*100.0)
     #print('number of bad peaks pos, neg', n_peaks_pos, n_peaks_neg)
