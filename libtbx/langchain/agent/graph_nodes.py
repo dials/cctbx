@@ -2957,6 +2957,7 @@ def _fallback_with_new_builder(state):
     builder = CommandBuilder()
 
     # Try each valid program until one works without duplicating
+    build_failures = {}  # Track why each program failed to build
     for program in runnable:
         cmd = builder.build(program, available_files, context)
 
@@ -3023,9 +3024,20 @@ def _fallback_with_new_builder(state):
             }
         elif cmd:
             state = _log(state, "FALLBACK: %s would duplicate, trying next" % program)
+            build_failures[program] = "duplicate"
         else:
             # Build failed - check if a prerequisite was identified
             prereq_program, prereq_reason = builder.get_prerequisite()
+
+            # Capture the specific missing slots for diagnostics
+            missing_slots = getattr(builder, '_last_missing_slots', None)
+            if missing_slots:
+                build_failures[program] = "missing inputs: %s" % ", ".join(missing_slots)
+                state = _log(state, "FALLBACK: %s failed to build (missing: %s)" % (
+                    program, ", ".join(missing_slots)))
+            else:
+                build_failures[program] = "build failed"
+
             if prereq_program:
                 state = _log(state, "FALLBACK: %s needs prerequisite %s (%s)" % (
                     program, prereq_program, prereq_reason))
@@ -3067,13 +3079,30 @@ def _fallback_with_new_builder(state):
 
             state = _log(state, "FALLBACK: %s failed to build, trying next" % program)
 
-    # Last resort - stop
-    state = _log(state, "FALLBACK: Cannot find non-duplicate command, stopping")
+    # Last resort - stop with diagnostic info
+    # Distinguish between "all duplicates" and "can't build anything"
+    n_duplicates = sum(1 for v in build_failures.values() if v == "duplicate")
+    n_build_fails = sum(1 for v in build_failures.values() if v != "duplicate")
+
+    if n_build_fails > 0 and n_duplicates == 0:
+        stop_reason = "cannot_build_any_program"
+        diag_msg = "FALLBACK: Cannot build any program. Failures: %s" % (
+            "; ".join("%s: %s" % (k, v) for k, v in build_failures.items()))
+    elif n_build_fails > 0:
+        stop_reason = "build_failures_and_duplicates"
+        diag_msg = "FALLBACK: Some programs can't be built, rest are duplicates. Details: %s" % (
+            "; ".join("%s: %s" % (k, v) for k, v in build_failures.items()))
+    else:
+        stop_reason = "all_commands_duplicate"
+        diag_msg = "FALLBACK: Cannot find non-duplicate command, stopping"
+
+    state = _log(state, diag_msg)
     return {
         **state,
         "command": "STOP",
         "stop": True,
-        "stop_reason": "all_commands_duplicate",
+        "stop_reason": stop_reason,
+        "abort_message": diag_msg,
         "validation_error": None,
         "fallback_used": True
     }

@@ -8903,6 +8903,141 @@ def test_s5j_session_rebuild_map_coeffs():
     print("  PASSED: _rebuild_best_files_from_cycles populates map_coeffs_mtz")
 
 
+def test_s5j_session_rebuild_supplemental_map_coeffs():
+    """Integration: best_files discovers map coefficients MTZ that wasn't
+    tracked in the cycle's output_files.
+
+    This is the root cause of ligandfit failing to build — the refine cycle
+    tracked refine_001_data.mtz (data) but not refine_001.mtz (map coefficients).
+    The _find_missing_outputs method discovers the companion file on disk,
+    and _rebuild_best_files_from_cycles must evaluate it so best_files gets
+    map_coeffs_mtz populated.
+    """
+    import json
+
+    test_dir = os.path.join(os.path.expanduser('~'), '_test_session_supplemental')
+    os.makedirs(test_dir, exist_ok=True)
+    try:
+        # Create mock files
+        model_path = os.path.join(test_dir, 'nsf-d2_noligand.pdb')
+        data_path = os.path.join(test_dir, 'nsf-d2.mtz')
+        refine_pdb = os.path.join(test_dir, 'refine_001_001.pdb')
+        refine_data_mtz = os.path.join(test_dir, 'refine_001_data.mtz')
+        # Map coefficients MTZ exists on disk but is NOT in output_files
+        refine_map_mtz = os.path.join(test_dir, 'refine_001.mtz')
+
+        for path in [model_path, data_path]:
+            with open(path, 'w') as f:
+                f.write('ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00  0.00\n')
+        for path in [refine_pdb, refine_data_mtz, refine_map_mtz]:
+            with open(path, 'w') as f:
+                f.write('MOCK')
+
+        # Create session where output_files only has _data.mtz and .pdb
+        # (the map coefficients MTZ was NOT tracked by the client)
+        session_file = os.path.join(test_dir, 'session.json')
+        session_data = {
+            "original_files": [model_path, data_path],
+            "cycles": [{
+                "cycle_number": 1,
+                "program": "phenix.refine",
+                "result": "SUCCESS",
+                "metrics": {"r_work": 0.22, "r_free": 0.26},
+                "output_files": [refine_pdb, refine_data_mtz],
+                # Note: refine_001.mtz deliberately NOT included
+            }],
+        }
+        with open(session_file, 'w') as f:
+            json.dump(session_data, f)
+
+        from agent.session import AgentSession
+        session = AgentSession(session_file=session_file)
+
+        # Check that map_coeffs_mtz is populated via supplemental discovery
+        best = session.get_best_files_dict()
+        map_coeffs = best.get('map_coeffs_mtz')
+        assert_true(map_coeffs is not None,
+            "map_coeffs_mtz must be populated via supplemental discovery: got %s" % best)
+        assert_true('refine_001.mtz' in str(map_coeffs),
+            "map_coeffs_mtz must point to refine_001.mtz, got: %s" % map_coeffs)
+
+        # Also verify available_files includes the supplemental MTZ
+        avail = session.get_available_files()
+        avail_basenames = [os.path.basename(f) for f in avail]
+        assert_true('refine_001.mtz' in avail_basenames,
+            "available_files must include supplemental refine_001.mtz, got: %s" % avail_basenames)
+
+    finally:
+        import shutil
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+    print("  PASSED: supplemental map coefficients MTZ discovered and added to best_files")
+
+
+def test_s5j_record_result_discovers_supplemental_map_coeffs():
+    """Live path: record_result discovers map coefficients MTZ not in output_files.
+
+    Same scenario as test_s5j_session_rebuild_supplemental_map_coeffs but
+    exercising the live record_result path instead of session-load rebuild.
+    """
+    import json
+
+    test_dir = os.path.join(os.path.expanduser('~'), '_test_record_result_supp')
+    os.makedirs(test_dir, exist_ok=True)
+    try:
+        # Create mock files
+        model_path = os.path.join(test_dir, 'model.pdb')
+        data_path = os.path.join(test_dir, 'data.mtz')
+        refine_pdb = os.path.join(test_dir, 'refine_001_001.pdb')
+        refine_data_mtz = os.path.join(test_dir, 'refine_001_data.mtz')
+        refine_map_mtz = os.path.join(test_dir, 'refine_001.mtz')  # on disk, not in output_files
+
+        for path in [model_path, data_path]:
+            with open(path, 'w') as f:
+                f.write('ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00  0.00\n')
+        for path in [refine_pdb, refine_data_mtz, refine_map_mtz]:
+            with open(path, 'w') as f:
+                f.write('MOCK')
+
+        # Create fresh session (no cycles yet)
+        session_file = os.path.join(test_dir, 'session.json')
+        session_data = {
+            "original_files": [model_path, data_path],
+            "cycles": [],
+        }
+        with open(session_file, 'w') as f:
+            json.dump(session_data, f)
+
+        from agent.session import AgentSession
+        session = AgentSession(session_file=session_file)
+
+        # Mock out metrics extraction (needs libtbx in real environment)
+        session._extract_metrics_from_result = lambda *a, **k: {}
+
+        # Simulate a live cycle: record decision, then record result
+        session.record_decision(
+            cycle_number=1, program="phenix.refine",
+            decision="Run refine", command="phenix.refine model.pdb data.mtz")
+        session.record_result(
+            cycle_number=1, result="SUCCESS: R=0.22 Rfree=0.26",
+            output_files=[refine_pdb, refine_data_mtz])
+        # Note: refine_001.mtz deliberately NOT in output_files
+
+        # Check that map_coeffs_mtz is populated via supplemental discovery
+        best = session.get_best_files_dict()
+        map_coeffs = best.get('map_coeffs_mtz')
+        assert_true(map_coeffs is not None,
+            "record_result must discover supplemental map_coeffs_mtz: got %s" % best)
+        assert_true('refine_001.mtz' in str(map_coeffs),
+            "map_coeffs_mtz must point to refine_001.mtz, got: %s" % map_coeffs)
+
+    finally:
+        import shutil
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+    print("  PASSED: record_result discovers supplemental map coefficients on live path")
+
+
 def run_all_tests():
     """Run all audit fix tests."""
     run_tests_with_fail_fast()

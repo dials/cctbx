@@ -93,19 +93,47 @@ restraints) as the ligand instead of the actual ATP file.
 3. New `_pdb_is_protein_model()` in `workflow_state.py` provides positive protein
    detection for ligand slot guard (safe for non-existent files).
 
+### Bug 7 — Agent stops with misleading "all_commands_duplicate" on resume
+
+When resuming after refinement, the agent stopped with `Workflow complete:
+all_commands_duplicate` instead of running ligandfit. Two independent issues:
+
+**Root cause A:** `_rebuild_best_files_from_cycles` only evaluated files listed in
+the cycle's `output_files`. If the client didn't track the map coefficients MTZ
+(e.g. `refine_001.mtz`), then `best_files["map_coeffs_mtz"]` was never populated.
+Ligandfit's `require_best_files_only: true` then caused its build to fail.
+
+**Fix A:** Both `_rebuild_best_files_from_cycles` (session load) and `record_result`
+(live path) now call `_find_missing_outputs` and evaluate supplemental files through
+the best_files tracker. On the live path, discovered files are also appended to the
+cycle's `output_files` so `get_available_files` picks them up immediately.
+All three file-discovery paths now share the same supplemental logic:
+- `get_available_files` → already called `_find_missing_outputs`
+- `_rebuild_best_files_from_cycles` → now calls it (session load)
+- `record_result` → now calls it (live cycle completion)
+
+**Root cause B:** Fallback reported `all_commands_duplicate` whether the failure was
+duplication or inability to build (missing inputs). Misleading stop reason.
+
+**Fix B:** Fallback now distinguishes `cannot_build_any_program`, 
+`build_failures_and_duplicates`, and `all_commands_duplicate`. The `abort_message`
+includes per-program diagnostics showing which input slots couldn't be filled.
+`CommandBuilder.build()` now stores `_last_missing_slots` for diagnostics.
+
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `agent/session.py` | Fixed `is_map_coeffs` regex in `_rebuild_best_files_from_cycles` AND `record_result` |
-| `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` with word-boundary matching |
+| `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result` |
+| `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` |
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
-| `agent/command_builder.py` | Content guards for model and ligand slots; exclude_patterns applied to LLM selections |
+| `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots` |
 | `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
 | `agent/workflow_state.py` | New `_pdb_is_protein_model()` for positive protein detection |
+| `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons |
 | `knowledge/programs.yaml` | Added `refine` to ligandfit ligand slot exclude_patterns |
-| `programs/ai_agent.py` | Content guards for both model and ligand slots in safety net |
-| `tests/tst_audit_fixes.py` | 5 tests: regex, word-boundary, content guards, refine CIF exclusion, session integration (227 total) |
+| `programs/ai_agent.py` | Content guards for model and ligand slots in safety net |
+| `tests/tst_audit_fixes.py` | 7 tests: regex, word-boundary, content guards, CIF exclusion, session rebuild, supplemental discovery (load + live) (229 total) |
 
 ---
 

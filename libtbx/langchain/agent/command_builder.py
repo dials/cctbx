@@ -771,7 +771,9 @@ class CommandBuilder:
         missing = [inp for inp in required_inputs if inp not in selected_files]
         if missing:
             self._log(context, "BUILD: Missing required inputs: %s" % ", ".join(missing))
+            self._last_missing_slots = missing
             return None
+        self._last_missing_slots = None
 
         # Auto-fill optional inputs
         for input_name in optional_inputs:

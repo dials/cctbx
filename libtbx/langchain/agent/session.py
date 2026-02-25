@@ -311,6 +311,38 @@ class AgentSession:
                         stage=file_stage
                     )
 
+            # Also evaluate supplemental files discovered by _find_missing_outputs.
+            # These are companion outputs (e.g. map coefficients MTZ from refine)
+            # that the client may not have tracked in output_files.
+            # Without this, best_files["map_coeffs_mtz"] won't be populated
+            # and programs with require_best_files_only (like ligandfit) can't build.
+            already_seen = {os.path.basename(f) for f in output_files if f}
+            supplemental = self._find_missing_outputs(cycle, already_seen)
+            for sf in supplemental:
+                if sf and os.path.exists(sf):
+                    sf_basename = os.path.basename(sf).lower()
+                    sf_stage = None
+                    sf_metrics = dict(metrics) if metrics else {}
+
+                    # Classify supplemental MTZ files
+                    if sf.lower().endswith('.mtz'):
+                        is_map_coeffs = (
+                            'map_coeffs' in sf_basename or
+                            'denmod' in sf_basename or
+                            bool(re.match(
+                                r'(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$',
+                                sf_basename))
+                        )
+                        if is_map_coeffs:
+                            sf_stage = "refine_map_coeffs"
+
+                    self.best_files.evaluate_file(
+                        path=sf,
+                        cycle=cycle_num,
+                        metrics=sf_metrics,
+                        stage=sf_stage
+                    )
+
     def save(self):
         """Save session to file."""
         try:
@@ -1553,6 +1585,42 @@ class AgentSession:
                     category = self.best_files._classify_category(f)
                     if category:
                         cycle.setdefault("best_file_updates", []).append(category)
+
+            # Discover and evaluate supplemental output files that the client
+            # may not have tracked.  Same logic as _rebuild_best_files_from_cycles
+            # but on the live path.  E.g., refine produces refine_001.mtz (map
+            # coefficients) alongside refine_001_data.mtz, but the client may
+            # only report the _data.mtz.  Without this, best_files["map_coeffs_mtz"]
+            # stays empty and ligandfit can't build.
+            already_seen = {os.path.basename(f) for f in output_files if f}
+            supplemental = self._find_missing_outputs(cycle, already_seen)
+            for sf in supplemental:
+                if sf and os.path.exists(sf):
+                    sf_basename = os.path.basename(sf).lower()
+                    sf_stage = None
+                    sf_metrics = dict(metrics) if metrics else {}
+
+                    if sf.lower().endswith('.mtz'):
+                        is_map_coeffs = (
+                            'map_coeffs' in sf_basename or
+                            'denmod' in sf_basename or
+                            bool(re.match(
+                                r'(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$',
+                                sf_basename))
+                        )
+                        if is_map_coeffs:
+                            sf_stage = "refine_map_coeffs"
+
+                    updated = self.best_files.evaluate_file(
+                        path=sf,
+                        cycle=cycle_number,
+                        metrics=sf_metrics,
+                        stage=sf_stage
+                    )
+                    if updated:
+                        # Also add to cycle's output_files so get_available_files
+                        # picks them up without needing _find_missing_outputs again
+                        cycle.setdefault("output_files", []).append(sf)
 
         # If this was a validation program, update best model metrics
         # (validation metrics apply to the current best model, not a new file)
