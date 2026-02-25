@@ -8777,6 +8777,74 @@ def test_s10g_crystal_symmetry_per_program_format():
     print("  PASSED: _inject_crystal_symmetry uses correct per-program PHIL form")
 
 
+def test_s10h_sanitize_quoted_spacegroup_no_orphan():
+    """_sanitize_command must not leave orphan tokens when a quoted multi-word
+    space group value is stripped from a probe-only program.
+
+    Regression: crystal_symmetry.space_group="P 32 2 1" split into
+      ['crystal_symmetry.space_group="P', '32', '2', '1"']
+    Only the first token was stripped; '32 2 1"' remained on the command line,
+    causing phenix.model_vs_data to crash with an unknown positional argument.
+
+    Fix: collapse key="quoted value" into a single token before the split loop.
+    """
+    print("  Test: s10h_sanitize_quoted_spacegroup_no_orphan")
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+
+    try:
+        import importlib.util as _ilu
+        sys.path.insert(0, _PROJECT_ROOT)
+        spec = _ilu.spec_from_file_location("_ai_agent_s10h", ai_agent_path)
+        _mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(_mod)
+        AgentClass = _mod.PhenixAIAnalysis
+    except Exception as _e:
+        print("  SKIP (cannot import PhenixAIAnalysis: %s)" % _e)
+        return
+
+    class _FakeVlog:
+        def verbose(self, msg): pass
+        def normal(self, msg): pass
+
+    agent = object.__new__(AgentClass)
+    agent.vlog = _FakeVlog()
+
+    # Exact pattern from the bug: space group with spaces, double-quoted
+    cmd = ('phenix.model_vs_data /path/to/model.pdb /path/to/data.mtz '
+           'crystal_symmetry.space_group="P 32 2 1"')
+    result = agent._sanitize_command(cmd, session=None,
+                                     program_name='phenix.model_vs_data')
+
+    # No orphan numeric tokens from the space group value
+    assert_true('32' not in result.split()[2:],
+        "Orphan token '32' must not appear in sanitized command: %r" % result)
+    assert_true('"' not in result,
+        "No stray quote must remain in sanitized command: %r" % result)
+    assert_true('space_group' not in result,
+        "space_group param must be fully removed: %r" % result)
+
+    # Files must be preserved
+    assert_true('model.pdb' in result,
+        "model.pdb must be preserved: %r" % result)
+    assert_true('data.mtz' in result,
+        "data.mtz must be preserved: %r" % result)
+
+    # Also test single-word space group (no quotes) — existing behaviour preserved
+    cmd2 = ('phenix.model_vs_data /path/to/model.pdb /path/to/data.mtz '
+            'crystal_symmetry.space_group=P3221')
+    result2 = agent._sanitize_command(cmd2, session=None,
+                                      program_name='phenix.model_vs_data')
+    assert_true('space_group' not in result2,
+        "Unquoted space_group must also be removed: %r" % result2)
+    assert_true('model.pdb' in result2,
+        "model.pdb must be preserved: %r" % result2)
+
+    print("  PASSED: quoted multi-word space group stripped cleanly, no orphan tokens")
+
+
 def run_all_tests():
     """Run all audit fix tests."""
     run_tests_with_fail_fast()
