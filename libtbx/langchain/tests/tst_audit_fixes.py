@@ -5122,14 +5122,15 @@ def test_s4b_inject_crystal_symmetry_uses_scoped_form():
                     if "command +" in ln or "command=" in ln]
     for ln in append_lines:
         # Remove all ALLOWED scoped forms before checking for bare forms:
-        #   crystal_symmetry.unit_cell=  → standard scoped form
-        #   xray_data.unit_cell=         → phaser form
-        #   crystal_symmetry=            → flat form for autobuild/autosol
-        #                                  (this is fine — it's a top-level key)
+        #   crystal_symmetry.unit_cell= / crystal_symmetry.space_group=  → refine/ligandfit/polder
+        #   crystal_info.unit_cell= / crystal_info.space_group=           → autobuild/autosol
+        #   xray_data.unit_cell= / xray_data.space_group=                 → phaser
         _ln_stripped = (ln
             .replace("crystal_symmetry.unit_cell=", "")
+            .replace("crystal_info.unit_cell=", "")
             .replace("xray_data.unit_cell=", "")
             .replace("crystal_symmetry.space_group=", "")
+            .replace("crystal_info.space_group=", "")
             .replace("xray_data.space_group=", "")
         )
         assert_true("unit_cell=" not in _ln_stripped,
@@ -8464,15 +8465,210 @@ def test_s10f_phaser_success_supersedes_probe_needs_mr():
 
 
 def test_s10g_crystal_symmetry_per_program_format():
-    """_inject_crystal_symmetry must use the correct PHIL form per program:
-      - phenix.autobuild / autobuild_denmod / autosol → crystal_symmetry=SG  (flat)
-      - phenix.phaser                                 → xray_data.space_group=SG
+    """_inject_crystal_symmetry must use the correct PHIL scope per program:
       - phenix.refine / ligandfit / polder            → crystal_symmetry.space_group=SG
-
-    Regression: autobuild got crystal_symmetry.space_group=P3221 → PHIL error
-    "Unknown command line parameter definition: space_group".
+      - phenix.autobuild / autobuild_denmod / autosol → crystal_info.space_group=SG
+      - phenix.phaser                                 → xray_data.space_group=SG
     """
     print("  Test: s10g_crystal_symmetry_per_program_format")
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+
+    with open(ai_agent_path) as _f:
+        src = _f.read()
+
+    # ── structural checks ────────────────────────────────────────────────────
+    assert_true("_CRYSTAL_INFO_PROGRAMS" in src,
+        "_CRYSTAL_INFO_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
+    assert_true("_PHASER_CS_PROGRAMS" in src,
+        "_PHASER_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
+
+    ci_block = src.split("_CRYSTAL_INFO_PROGRAMS")[1][:300]
+    assert_true("phenix.autobuild" in ci_block,
+        "phenix.autobuild must be in _CRYSTAL_INFO_PROGRAMS")
+    assert_true("phenix.autosol" in ci_block,
+        "phenix.autosol must be in _CRYSTAL_INFO_PROGRAMS")
+
+    phaser_block = src.split("_PHASER_CS_PROGRAMS")[1][:200]
+    assert_true("phenix.phaser" in phaser_block,
+        "phenix.phaser must be in _PHASER_CS_PROGRAMS")
+
+    assert_true("crystal_info.space_group=" in src,
+        "_inject_crystal_symmetry must use crystal_info.space_group= for autobuild/autosol")
+    assert_true("xray_data.space_group=" in src,
+        "_inject_crystal_symmetry must use xray_data.space_group= for phaser")
+    assert_true("crystal_symmetry.space_group=" in src,
+        "_inject_crystal_symmetry must use crystal_symmetry.space_group= for refine/etc")
+
+    # ── functional checks using importlib (if available) ────────────────────
+    try:
+        import importlib.util as _ilu
+        sys.path.insert(0, _PROJECT_ROOT)
+        spec = _ilu.spec_from_file_location("_ai_agent_s10g", ai_agent_path)
+        _mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(_mod)
+        AgentClass = _mod.PhenixAIAnalysis
+    except Exception as _e:
+        print("  (functional checks skipped: %s)" % _e)
+        print("  PASSED: structural checks passed")
+        return
+
+    class _FakeSession:
+        def get_directives(self):
+            return {"program_settings": {"default": {"space_group": "P3221"}}}
+
+    class _FakeVlog:
+        def verbose(self, msg): pass
+        def normal(self, msg): pass
+
+    agent = object.__new__(AgentClass)
+    agent.vlog = _FakeVlog()
+    session = _FakeSession()
+
+    # autobuild: crystal_info scope
+    result_ab = agent._inject_crystal_symmetry(
+        "phenix.autobuild data=data.mtz seq_file=seq.fa model=m.pdb nproc=4",
+        session, "phenix.autobuild")
+    assert_true("crystal_info.space_group=P3221" in result_ab,
+        "autobuild must get crystal_info.space_group=P3221; got: %r" % result_ab)
+    assert_true("crystal_symmetry.space_group" not in result_ab,
+        "autobuild must NOT get crystal_symmetry.space_group=; got: %r" % result_ab)
+
+    # autosol: crystal_info scope
+    result_as = agent._inject_crystal_symmetry(
+        "phenix.autosol data=data.mtz seq_file=seq.fa",
+        session, "phenix.autosol")
+    assert_true("crystal_info.space_group=P3221" in result_as,
+        "autosol must get crystal_info.space_group=P3221; got: %r" % result_as)
+
+    # refine: crystal_symmetry scope
+    result_ref = agent._inject_crystal_symmetry(
+        "phenix.refine model.pdb data.mtz",
+        session, "phenix.refine")
+    assert_true("crystal_symmetry.space_group=P3221" in result_ref,
+        "refine must get crystal_symmetry.space_group=P3221; got: %r" % result_ref)
+
+    # phaser: xray_data scope
+    result_ph = agent._inject_crystal_symmetry(
+        "phenix.phaser data.mtz model.pdb seq.fa phaser.mode=MR_AUTO",
+        session, "phenix.phaser")
+    assert_true("xray_data.space_group=P3221" in result_ph,
+        "phaser must get xray_data.space_group=P3221; got: %r" % result_ph)
+    assert_true("crystal_symmetry.space_group" not in result_ph,
+        "phaser must NOT get crystal_symmetry.space_group=; got: %r" % result_ph)
+
+    # no double-injection for autobuild
+    result_ab2 = agent._inject_crystal_symmetry(
+        "phenix.autobuild data=data.mtz seq_file=seq.fa "
+        "crystal_info.space_group=P3221 nproc=4",
+        session, "phenix.autobuild")
+    assert_true(result_ab2.count("space_group=") == 1,
+        "Must not double-inject space_group=; count=%d in %r"
+        % (result_ab2.count("space_group="), result_ab2))
+
+    print("  PASSED: _inject_crystal_symmetry uses correct per-program PHIL scope")
+
+
+    print("  Test: s10g_crystal_symmetry_per_program_format")
+    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
+    if not os.path.isfile(ai_agent_path):
+        print("  SKIP (ai_agent.py not found)")
+        return
+
+    with open(ai_agent_path) as _f:
+        src = _f.read()
+
+    # ── structural checks ────────────────────────────────────────────────────
+    assert_true("_PHASER_CS_PROGRAMS" in src,
+        "_PHASER_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
+
+    # phenix.phaser must be in the phaser set
+    phaser_block = src.split("_PHASER_CS_PROGRAMS")[1][:200]
+    assert_true("phenix.phaser" in phaser_block,
+        "phenix.phaser must be in _PHASER_CS_PROGRAMS")
+
+    # phaser form injection: xray_data.space_group=
+    assert_true("xray_data.space_group=%s" in src or "xray_data.space_group=%" in src,
+        "_inject_crystal_symmetry must use xray_data.space_group= for phaser")
+
+    # default scoped form for all other programs
+    assert_true("crystal_symmetry.space_group=%s" in src or
+                "crystal_symmetry.space_group=%" in src,
+        "_inject_crystal_symmetry must use crystal_symmetry.space_group= for refine/autobuild/etc")
+
+    # _FLAT_CS_PROGRAMS must be empty (no programs use the bare crystal_symmetry= form)
+    assert_true("_FLAT_CS_PROGRAMS = frozenset()" in src,
+        "_FLAT_CS_PROGRAMS must be empty — no programs use the flat crystal_symmetry=SG form")
+
+    # ── functional checks using importlib (if available) ────────────────────
+    try:
+        import importlib.util as _ilu
+        sys.path.insert(0, _PROJECT_ROOT)
+        spec = _ilu.spec_from_file_location("_ai_agent_s10g", ai_agent_path)
+        _mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(_mod)
+        AgentClass = _mod.PhenixAIAnalysis
+    except Exception as _e:
+        print("  (functional checks skipped: %s)" % _e)
+        print("  PASSED: structural checks passed")
+        return
+
+    class _FakeSession:
+        def get_directives(self):
+            return {"program_settings": {"default": {"space_group": "P3221"}}}
+
+    class _FakeVlog:
+        def verbose(self, msg): pass
+        def normal(self, msg): pass
+
+    agent = object.__new__(AgentClass)
+    agent.vlog = _FakeVlog()
+    session = _FakeSession()
+
+    # autobuild: scoped form (same as refine)
+    result_ab = agent._inject_crystal_symmetry(
+        "phenix.autobuild data=data.mtz seq_file=seq.fa model=m.pdb nproc=4",
+        session, "phenix.autobuild")
+    assert_true("crystal_symmetry.space_group=P3221" in result_ab,
+        "autobuild must get crystal_symmetry.space_group=P3221; got: %r" % result_ab)
+
+    # autosol: scoped form
+    result_as = agent._inject_crystal_symmetry(
+        "phenix.autosol data=data.mtz seq_file=seq.fa",
+        session, "phenix.autosol")
+    assert_true("crystal_symmetry.space_group=P3221" in result_as,
+        "autosol must get crystal_symmetry.space_group=P3221; got: %r" % result_as)
+
+    # refine: scoped form
+    result_ref = agent._inject_crystal_symmetry(
+        "phenix.refine model.pdb data.mtz",
+        session, "phenix.refine")
+    assert_true("crystal_symmetry.space_group=P3221" in result_ref,
+        "refine must get crystal_symmetry.space_group=P3221; got: %r" % result_ref)
+
+    # phaser: xray_data form (different scope)
+    result_ph = agent._inject_crystal_symmetry(
+        "phenix.phaser data.mtz model.pdb seq.fa phaser.mode=MR_AUTO",
+        session, "phenix.phaser")
+    assert_true("xray_data.space_group=P3221" in result_ph,
+        "phaser must get xray_data.space_group=P3221; got: %r" % result_ph)
+    assert_true("crystal_symmetry.space_group" not in result_ph,
+        "phaser must NOT get crystal_symmetry.space_group=; got: %r" % result_ph)
+
+    # no double-injection for autobuild
+    result_ab2 = agent._inject_crystal_symmetry(
+        "phenix.autobuild data=data.mtz seq_file=seq.fa "
+        "crystal_symmetry.space_group=P3221 nproc=4",
+        session, "phenix.autobuild")
+    assert_true(result_ab2.count("space_group=") == 1,
+        "Must not double-inject space_group=; count=%d in %r"
+        % (result_ab2.count("space_group="), result_ab2))
+
+    print("  PASSED: _inject_crystal_symmetry uses correct per-program PHIL form")
+
+
     ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
     if not os.path.isfile(ai_agent_path):
         print("  SKIP (ai_agent.py not found)")
