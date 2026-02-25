@@ -6130,6 +6130,89 @@ def test_s5h_sanitize_strips_out_of_scope_params():
           "rebuilding_strategy removed from prompt")
 
 
+def test_s5h_rule_d_strips_bare_hallucinated_params():
+    """Rule D in sanitize_command must strip bare (unscoped) key=value params
+    that are not in strategy_flags for programs that HAVE strategy_flags.
+    Scoped PHIL params (with dots) must survive — they go through PHIL validation.
+
+    Concrete case: map_type=pre_calculated must be stripped from phenix.refine
+    (map_type is not in its strategy_flags), but xray_data.r_free_flags.generate=True
+    must survive (scoped PHIL param with dots).
+    """
+    print("  Test: s5h_rule_d_strips_bare_hallucinated_params")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    from agent.command_postprocessor import sanitize_command
+
+    # map_type=pre_calculated must be stripped (bare, not in allowlist)
+    cmd = ("phenix.refine model.pdb data.mtz "
+           "xray_data.r_free_flags.generate=True output.prefix=refine_001 "
+           "map_type=pre_calculated")
+    result = sanitize_command(cmd, "phenix.refine")
+    assert_true("map_type" not in result,
+        "Rule D must strip bare hallucinated map_type; got: %s" % result)
+
+    # Scoped PHIL param must survive
+    assert_true("xray_data.r_free_flags.generate=True" in result,
+        "Rule D must keep scoped PHIL params; got: %s" % result)
+
+    # Known strategy flags must survive
+    cmd2 = "phenix.refine model.pdb data.mtz nproc=4 simulated_annealing=True"
+    result2 = sanitize_command(cmd2, "phenix.refine")
+    assert_true("nproc=4" in result2,
+        "Rule D must keep universal key nproc; got: %s" % result2)
+    assert_true("simulated_annealing=True" in result2,
+        "Rule D must keep strategy_flag simulated_annealing; got: %s" % result2)
+
+    # Verify Rule D exists in source
+    import os as _os
+    _pp_path = _os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    src = open(_pp_path).read()
+    assert_true("Rule D" in src,
+        "sanitize_command must have Rule D comment")
+
+    print("  PASSED: Rule D strips bare hallucinated params, keeps scoped PHIL "
+          "and known strategy_flags")
+
+
+def test_s5h_inject_program_defaults():
+    """inject_program_defaults must append defaults from programs.yaml when
+    they are missing from the command, and must not double-add when present.
+
+    Concrete case: xray_data.r_free_flags.generate=True must be appended
+    for phenix.refine when the LLM omits it.
+    """
+    print("  Test: s5h_inject_program_defaults")
+    import sys as _sys
+    _sys.path.insert(0, _PROJECT_ROOT)
+
+    from agent.command_postprocessor import inject_program_defaults
+    from knowledge.yaml_loader import get_program
+
+    # Verify phenix.refine has r_free_flags.generate default
+    refine = get_program("phenix.refine")
+    defaults = refine.get("defaults", {})
+    assert_true("xray_data.r_free_flags.generate" in defaults,
+        "phenix.refine must have r_free_flags.generate default; got: %s"
+        % list(defaults.keys()))
+
+    # Missing → injected
+    cmd = "phenix.refine model.pdb data.mtz output.prefix=refine_001"
+    result = inject_program_defaults(cmd, "phenix.refine")
+    assert_true("r_free_flags.generate" in result,
+        "inject_program_defaults must add r_free_flags.generate; got: %s" % result)
+
+    # Already present → no duplicate
+    cmd2 = ("phenix.refine model.pdb data.mtz "
+            "xray_data.r_free_flags.generate=True output.prefix=refine_001")
+    result2 = inject_program_defaults(cmd2, "phenix.refine")
+    assert_true(result2.count("r_free_flags") == 1,
+        "inject_program_defaults must not double-add; got: %s" % result2)
+
+    print("  PASSED: inject_program_defaults adds missing defaults, skips existing")
+
+
 def test_s5h_predict_and_build_has_no_rebuilding_strategy():
     """predict_and_build strategy_flags must NOT include rebuilding_strategy
     (it is not a real PHIL parameter for that program).

@@ -1,5 +1,269 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.69 (Rule D: strip hallucinated bare params + inject_program_defaults)
+
+Two bugs found during integration testing of the `nsf-d2-ligand` scenario.
+
+### Bug 1: `map_type=pre_calculated` not stripped
+
+The LLM hallucinated `map_type=pre_calculated` on a `phenix.refine` command.
+The parameter is ambiguous (maps to 5 different PHIL scopes) and causes a
+runtime error. The existing Rule C in `sanitize_command` only stripped bare
+params for programs with *zero* strategy_flags. `phenix.refine` has 10
+strategy_flags, so Rule C didn't fire and bare hallucinated params slipped
+through.
+
+**Fix — Rule D:** For programs WITH strategy_flags, strip bare (unscoped, no
+dots) `key=value` params not in the program's allowlist. Scoped PHIL params
+(e.g., `xray_data.r_free_flags.generate=True`) are preserved because they
+contain dots and go through PHIL validation downstream.
+
+### Bug 2: `r_free_flags.generate=True` not reliably present
+
+If the LLM omits `xray_data.r_free_flags.generate=True`, `phenix.refine` runs
+without generating R-free flags, which is always wrong for the first refinement
+cycle.
+
+**Fix — `inject_program_defaults()`:** New step 4 in the `postprocess_command`
+pipeline. Reads `defaults` from `programs.yaml` and appends any missing ones.
+If the LLM already includes the parameter, no duplicate is added. Added
+`xray_data.r_free_flags.generate: True` as a default for `phenix.refine`.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/command_postprocessor.py` | Added Rule D in `sanitize_command`; added `inject_program_defaults()` function; wired as step 4 in `postprocess_command` |
+| `knowledge/programs.yaml` | Added `defaults: {xray_data.r_free_flags.generate: True}` to `phenix.refine` |
+| `tests/tst_audit_fixes.py` | Added `test_s5h_rule_d_strips_bare_hallucinated_params` and `test_s5h_inject_program_defaults` (222 total) |
+
+---
+
+## Version 112.68 (Phase 4: Clean execution loop + post-phase cleanup)
+
+Extracted the 200-line post-execution block from `_run_single_cycle` into two
+focused methods, and applied cleanup fixes.
+
+### Structural changes
+
+**`_run_single_cycle`** (92 lines, down from 283): Now a clean orchestrator —
+start cycle, get command from graph, handle duplicates, record decision, handle
+STOP/empty, execute, delegate to `_handle_execution_result`.
+
+**`_handle_execution_result`** (new, 49 lines): Routes to failure or success
+path. Success path updates actual program, clears `advice_changed`.
+
+**`_handle_failed_execution`** (new, 150 lines): Full failure pipeline — probe
+programs → auto recovery → terminal diagnosis → annotate as recoverable.
+
+### Post-phase cleanup
+
+1. **17 bare `print("[DEBUG ...")` removed** from `ai_agent.py` — development
+   debug aids printing unconditionally to stdout on every cycle. Removed from
+   `set_defaults` (9 prints), `iterate_agent` (4 prints), `_get_command_for_cycle`
+   (4 prints). Replay notification merged into existing `self.vlog.verbose()` call.
+
+2. **SyntaxWarning in session.py** (line 3739): `"_\* Failure..."` had invalid
+   escape sequence `\*`. Fixed to `"_\\* Failure..."`.
+
+3. **Redundant `import os as _os_rf`** in `_get_command_for_cycle` → uses
+   module-level `os`.
+
+4. **Test path resolution fix** — three tests navigating to
+   `command_postprocessor.py` via relative paths broke when
+   `_find_ai_agent_path()` resolved via importlib in the PHENIX build tree.
+   Fixed to use `_PROJECT_ROOT` directly.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | Extracted `_handle_execution_result` and `_handle_failed_execution` from `_run_single_cycle`; removed 17 debug prints; removed redundant import (5,971 lines) |
+| `agent/session.py` | Fixed SyntaxWarning |
+| `tests/tst_audit_fixes.py` | Updated 3 structural tests for moved code |
+
+---
+
+## Version 112.67 (Phase 3: Consolidate stop logic & duplicate retries)
+
+The graph's PERCEIVE node is now the sole authority for all stop decisions.
+Duplicate retries now route through the normal graph path instead of a parallel
+bypass.
+
+### Phase 3a & 3b: Client-side stop checks (already removed)
+
+Both the consecutive-program cap and the directive stop check were already
+removed from `_run_single_cycle` in a prior session. The graph's PERCEIVE
+already has both:
+- `check_directive_stop()` — fires at start of cycle N+1
+- `check_consecutive_program_cap()` — fires at start of cycle N+1
+
+**Behavior change:** Directive stop now fires at the START of cycle N+1 instead
+of the END of cycle N. This is better — the workflow engine is consulted before
+the stop decision, preventing premature stops (e.g. the predict_and_build bug).
+
+### Phase 3c: Duplicate retries through graph
+
+**Problem:** `_retry_duplicate` was a parallel path that rebuilt `session_info`,
+gathered files, and called `decide_next_step` directly — duplicating ~80 lines
+of `_query_agent_for_command`. Any new field added to `session_info` had to be
+added in both places.
+
+**Fix:**
+
+1. Added `duplicate_feedback` parameter to `_query_agent_for_command` — when set,
+   feedback string is appended to guidelines before calling `decide_next_step`
+
+2. Refactored `_handle_duplicate_check` — on duplicate detection, builds feedback
+   via `_build_duplicate_feedback` (extracted static helper), calls
+   `_query_agent_for_command(duplicate_feedback=...)` through the full graph path,
+   then applies `_inject_missing_required_files` to the retry command
+
+3. Deleted `_retry_duplicate` method — 82 lines of parallel-path code eliminated
+
+4. Removed `_last_log_content` — was only saved for `_retry_duplicate` to reuse
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | Added `duplicate_feedback` param; refactored `_handle_duplicate_check`; added `_build_duplicate_feedback`; deleted `_retry_duplicate` and `_last_log_content` (6,601 → 6,532 lines) |
+| `agent/session.py` | Updated docstring reference from `_retry_duplicate` to `_build_duplicate_feedback` |
+| `tests/tst_audit_fixes.py` | Updated `test_s7g` and `test_s8i` for new duplicate retry path |
+
+---
+
+## Version 112.66 (Phases 1–2: Command post-processing migration to BUILD)
+
+Extracted all command post-processing transforms from `ai_agent.py` into
+standalone functions in a new `agent/command_postprocessor.py` module, then
+migrated them into the graph's BUILD node as the single source of truth. Uses
+the Strangler Fig pattern: Phase 1 ran new path alongside old path in shadow
+mode; Phase 2 removed old path after validation.
+
+### New module: `agent/command_postprocessor.py`
+
+Four server-safe transforms as standalone functions (no `self`/class
+dependencies):
+
+| Function | Purpose |
+|----------|---------|
+| `sanitize_command()` | Strip placeholder values, blacklisted params, cross-program hallucinations |
+| `inject_user_params()` | Append user key=value params missing from command (with scope matching) |
+| `inject_crystal_symmetry()` | Append unit_cell/space_group from directives |
+| `postprocess_command()` | Single entry point calling all transforms in order |
+
+Each function takes explicit data arguments, making them callable from both the
+graph (server-side) and `ai_agent.py` (client-side).
+
+### Phase 2 cutover
+
+Removed all 5 client-side transforms from `_get_command_for_cycle`. Only
+`_inject_missing_required_files` remains (needs `os.path.exists()`, client-only).
+
+### Issues found and fixed during implementation
+
+1. **Wrong import path** — `libtbx.langchain.command_postprocessor` →
+   `libtbx.langchain.agent.command_postprocessor`
+
+2. **`_retry_duplicate` missing `bad_inject_params`** — retry path built its own
+   `session_info` without this field
+
+3. **Transport normalization gap (pre-existing)** — `build_request_v2` allowlist
+   was missing `advice_changed`, `unplaced_model_cell`, and `bad_inject_params`.
+   All three were silently dropped during transport encoding.
+
+4. **Probe-program file-path stripping (pre-existing)** — `sanitize_command` for
+   probe programs stripped ALL `key=value` tokens, including legitimate file
+   assignments like `half_map=/path/to/map.mrc`. Fixed by preserving tokens where
+   the value contains `/` or has a crystallographic extension.
+
+5. **History replay regression** — replay path bypasses graph; replayed commands
+   would get no sanitize/inject. Fixed by calling `postprocess_command` directly
+   for replayed commands (detected via `_from_replay` flag).
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/command_postprocessor.py` | NEW — 537 lines at Phase 2 cutover |
+| `programs/ai_agent.py` | Removed client-side transforms; replay postprocess; `bad_inject_params` in `session_info` |
+| `agent/graph_nodes.py` | Added `postprocess_command()` call in `_build_with_new_builder` and `_fallback_with_new_builder` |
+| `agent/api_client.py` | Added `bad_inject_params` to `build_session_state`; fixed transport normalization allowlist |
+| `agent/graph_state.py` | Added `bad_inject_params: Dict` to `AgentState` and `create_initial_state` |
+| `phenix_ai/run_ai_agent.py` | Passes `bad_inject_params` to `create_initial_state` |
+
+---
+
+## Version 112.65 (Systematic audit: file categorization and YAML integrity)
+
+Ran 22 systematic checks across YAML configs and Python code. Found and fixed 5
+structural bugs affecting file categorization, category references, and
+intermediate file handling.
+
+### Bug 1 — CRITICAL: `parent_category` bubble-up never implemented
+**File:** `agent/workflow_state.py`
+
+The YAML defines parent-child relationships (`refined` → `model`,
+`refine_map_coeffs` → `map_coeffs_mtz`, `ligand_cif` → `ligand`) but the code
+never propagated files from subcategories to their semantic parents. This caused
+`model`, `map_coeffs_mtz`, and `ligand` to be permanently empty.
+
+**Fix:** Added bubble-up logic in `_categorize_files_yaml` that propagates files
+from child categories to their `parent_category`.
+
+### Bug 2 — `intermediate` category patterns were dead code
+**File:** `knowledge/file_categories.yaml`
+
+`intermediate` was marked `is_semantic_parent: true`, which causes both step 1
+(extension matching) and step 2 (pattern matching) to skip it entirely.
+
+**Fix:** Removed erroneous `is_semantic_parent` flag.
+
+### Bug 3 — Intermediate files leaked into `model` via `unclassified_pdb`
+**Files:** `knowledge/file_categories.yaml`, `agent/workflow_state.py`
+
+Files matching intermediate patterns also match `unclassified_pdb`'s `*`
+catch-all, which bubbles up to `model`.
+
+**Fix:** Added missing excludes to `unclassified_pdb` AND added post-processing
+that removes any file in `intermediate` from `model`/`search_model`/`pdb`.
+
+### Bug 4 — `phaser_output` lacked extension filter
+**File:** `knowledge/file_categories.yaml`
+
+`PHASER*.mtz` matched `phaser_output` (parent: `model`), causing Phaser MTZ
+files to bubble up into `model`.
+
+**Fix:** Added `extensions: [".pdb"]` to restrict to PDB files only.
+
+### Bug 5 — Broken category reference
+**File:** `knowledge/programs.yaml`
+
+`phenix.phaser.model.exclude_categories` referenced `ligand_fit` which doesn't
+exist. Fixed to `ligand_fit_output`.
+
+### Audits that passed clean
+
+All command template `{slot}` placeholders match defined inputs; all workflow
+phase transitions reference valid phases; all strategy_flags have proper type
+declarations; all invariant `has_strategy` checks have corresponding sources;
+all hardcoded `categorized_files.get("xxx")` references in Python match YAML;
+no sibling subcategories have overlapping patterns; no category/exclude overlaps
+in `input_priorities`; all program output patterns categorize correctly; all
+`also_in` and `parent_category` references point to existing categories.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/workflow_state.py` | Implemented `parent_category` bubble-up; intermediate exclusion post-processing |
+| `knowledge/file_categories.yaml` | Fixed `intermediate` flag; added `phaser_output` extension filter; added `unclassified_pdb` excludes |
+| `knowledge/programs.yaml` | Fixed `ligand_fit` → `ligand_fit_output` reference |
+| `tests/tst_audit_fixes.py` | Comprehensive categorization tests |
+
+---
+
 ## Version 112.64 (Unit cell / space group reliably propagated to commands)
 
 When the user specifies a unit cell or space group in their advice (e.g.

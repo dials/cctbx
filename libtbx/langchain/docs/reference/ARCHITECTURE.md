@@ -121,11 +121,30 @@ Both LocalAgent and RemoteAgent use the same v2 JSON API and **identical transpo
 ### Client Components
 
 #### ai_agent.py
-Main entry point and orchestrator:
-- Manages the iterative workflow loop
-- Coordinates all other components
-- Handles command execution
-- Maintains session state
+Main entry point and execution loop:
+- Manages the iterative workflow loop (prepare state → call graph → execute → repeat)
+- Coordinates GUI callbacks and session management
+- Handles command execution via PHENIX subprocess
+- Post-execution result routing (`_handle_execution_result`, `_handle_failed_execution`)
+- Duplicate command detection and retry (via `_handle_duplicate_check` with graph re-query)
+- Client-only file injection (`_inject_missing_required_files`, needs `os.path.exists`)
+
+**Not responsible for** (moved to graph in v112.66–112.69):
+- Command sanitization, user param injection, crystal symmetry injection (→ BUILD)
+- Stop decisions: directive stops, consecutive-program cap (→ PERCEIVE)
+- Duplicate retries bypass (deleted `_retry_duplicate`, now uses graph)
+
+#### command_postprocessor.py
+Server-safe command transforms called by the BUILD node (new in v112.66):
+- `sanitize_command()` — Rules A–D: strip placeholders, blacklisted params, hallucinated cross-program params, bare unscoped params
+- `inject_user_params()` — append user key=value params missing from command (scope-matched)
+- `inject_crystal_symmetry()` — append unit_cell/space_group from directives
+- `inject_program_defaults()` — append defaults from programs.yaml if missing (safety net)
+- `postprocess_command()` — single entry point calling all four in order
+
+All functions take explicit data arguments (no `self`/class dependencies), making
+them callable from both the graph (server-side) and `ai_agent.py` (client-side
+replay path).
 
 #### Session Tracker (session.py)
 Persists workflow state across cycles:
@@ -470,7 +489,10 @@ session_state = {
     "resolution": 2.5,
     "experiment_type": "xray",
     "rfree_mtz": "/path/to/data.mtz",
-    "best_files": {"model": "/path/to/model.pdb"}
+    "best_files": {"model": "/path/to/model.pdb"},
+    "bad_inject_params": {"phenix.refine": ["ignore_symmetry_conflicts"]},
+    "advice_changed": False,
+    "unplaced_model_cell": None,
 }
 
 request = build_request_v2(
@@ -480,7 +502,22 @@ request = build_request_v2(
     history=cycle_history,
     session_state=session_state,
     user_advice=guidelines,
-    ...\n)
+    ...
+)
+```
+
+**`bad_inject_params` flow** (added in v112.66): Parameters that previously
+caused PHENIX errors are blacklisted and propagated to BUILD for stripping:
+
+```
+ai_agent.py: session.data["bad_inject_params"]
+    → session_info["bad_inject_params"]
+    → build_session_state() → session_state
+    → build_request_v2() → normalized_session_state
+    → transport encode/decode
+    → run_ai_agent.py → create_initial_state(bad_inject_params=...)
+    → graph state["bad_inject_params"]
+    → BUILD: postprocess_command(bad_inject_params=set(...))
 ```
 
 **`best_files` value type contract:** Most entries are plain strings (`category → path`). However, multi-file entries such as `half_map` may be stored as a list:
@@ -520,7 +557,7 @@ command = history_record["command"]
 See the [README.md](../README.md#directory-structure) for the complete directory tree.
 
 Key directories:
-- `agent/` — Core agent logic (session, graph nodes, command builder, workflow engine, etc.)
+- `agent/` — Core agent logic (session, graph nodes, command builder, command postprocessor, workflow engine, etc.)
 - `knowledge/` — YAML configuration files and supporting Python modules
 - `phenix_ai/` — Runtime entry points (local/remote agent, log parsers)
 - `programs/` — PHENIX program integration (main entry point `ai_agent.py`)
@@ -545,8 +582,11 @@ Key directories:
 **Rationale**: Allows server-side updates without client reinstallation.
 
 **Implementation**:
-- Client only gathers inputs and executes commands
-- Server makes all decisions
+- Client gathers inputs, executes commands, and handles results
+- Server makes all decisions (program selection, command construction, stop logic)
+- All command post-processing (sanitize, inject params, inject symmetry, inject
+  defaults) runs in the graph's BUILD node (server-side)
+- Only `_inject_missing_required_files` remains client-side (needs `os.path.exists`)
 - Clean API boundary via JSON protocol
 
 ### 3. Configuration Over Code
@@ -576,6 +616,42 @@ Key directories:
 - Discrete nodes (PERCEIVE, PLAN, BUILD, VALIDATE, OUTPUT)
 - State passed between nodes
 - Easy to add/modify nodes
+
+### 5a. Single Source of Truth (v112.66–112.69 refactor)
+
+**Rationale**: The agent had accumulated overlapping decision layers — "should we
+stop?" was answered in 5 places and "fix the command" in 2 places. This caused
+real bugs: 20× refine loops, premature stops, crystal symmetry mismatches.
+
+**Implementation**: The graph is the single authority for decisions:
+- **"Should we stop?"** → PERCEIVE + PLAN only
+- **"Fix the command"** → BUILD only (via `postprocess_command()`)
+- **"Execute and recover"** → `ai_agent.py` only
+
+`ai_agent.py` is a pure execution loop: prepare state → call graph → execute
+command → handle result. No parallel decision paths remain. Duplicate retries
+flow through the graph (via `duplicate_feedback` parameter) rather than bypassing
+it.
+
+**Command post-processing pipeline** (runs in BUILD after command construction):
+
+```
+postprocess_command():
+  1. sanitize_command()         — Rules A–D (strip bad params)
+  2. inject_user_params()       — from user advice text
+  3. inject_crystal_symmetry()  — from directives
+  4. inject_program_defaults()  — from programs.yaml defaults
+```
+
+**Sanitization rules:**
+
+| Rule | Fires when | Strips |
+|------|-----------|--------|
+| Probe | Program in `_PROBE_ONLY_FILE_PROGRAMS` | All key=value except file paths |
+| A | Always | Blacklisted params (`bad_inject_params`) |
+| B | key contains `space_group` or `unit_cell` | Placeholder values ("Not specified", etc.) |
+| C | Program has zero strategy_flags | Any key=value not in `_UNIVERSAL_KEYS` |
+| D | Program HAS strategy_flags, key has no dots | Bare params not in program's allowlist |
 
 ### 6. Automation Modes
 
