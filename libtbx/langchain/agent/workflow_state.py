@@ -215,6 +215,34 @@ def _pdb_is_small_molecule(path, max_bytes=8192):
         return False                # Be conservative on read errors
 
 
+def _pdb_is_protein_model(path, max_bytes=8192):
+    """
+    Return True if the PDB file contains ATOM records — the signature of a
+    polymer model (protein, DNA, RNA) as opposed to a small-molecule ligand.
+
+    Unlike ``not _pdb_is_small_molecule()``, this function returns False for
+    unreadable or non-existent files rather than True, making it safe for use
+    as a rejection filter in ligand-slot guards where a false positive would
+    incorrectly discard a valid candidate.
+
+    Args:
+        path:      Full path to the PDB file.
+        max_bytes: How much of the file to read (default 8 KB).
+
+    Returns:
+        True  → file is positively identified as a protein model (has ATOM)
+        False → file is a small molecule, unreadable, or non-existent
+    """
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            for line in fh.read(max_bytes).splitlines():
+                if line.startswith('ATOM  ') or line.startswith('ATOM '):
+                    return True
+        return False
+    except Exception:
+        return False                # Can't read → don't reject
+
+
 
 def _categorize_files(available_files):
     """

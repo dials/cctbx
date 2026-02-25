@@ -52,6 +52,47 @@ still be selected as a "model" because its filename has no ligand-like pattern.
 model/protein/pdb_file slots. Small-molecule PDB files are rejected from model
 slots and left for the ligand slot.
 
+### Bug 4 — Protein model PDB assigned to ligand slot
+
+The LLM assigned `refine_001_001.pdb` (the protein model) to both the `model` and
+`ligand` slots of `phenix.ligandfit`, causing it to try fitting the protein as a
+ligand instead of the actual ATP file.
+
+**Fix:** Added inverse content-based guard using new `_pdb_is_protein_model()`
+function. When filling the `ligand` slot, PDB files positively identified as
+protein models (contain ATOM records) are rejected. Applied in three locations:
+- `CommandBuilder` LLM file hint validation (rejects LLM's wrong assignment)
+- `CommandBuilder._find_file_for_slot` (auto-fill path)
+- `_inject_missing_required_files._find_candidate_for_slot` (safety net)
+
+Uses `_pdb_is_protein_model()` (positive protein check) rather than
+`not _pdb_is_small_molecule()` because the latter returns False for non-existent
+files, which would incorrectly reject valid candidates.
+
+### Bug 5 — `inject_user_params` re-injects stripped bare params
+
+`sanitize_command` (Rule D) correctly stripped hallucinated bare params like
+`d_min=2.5` and `elements='Se S'` from autosol/autobuild commands, but
+`inject_user_params` re-added them from user advice text.
+
+**Fix:** `inject_user_params` now validates bare (undotted) keys against the
+program's strategy_flags allowlist before injection, mirroring Rule D's check.
+
+### Bug 6 — Refinement restraints CIF used as ligand
+
+After the protein PDB guard correctly rejected `refine_001_001.pdb` from the
+ligand slot, auto-fill grabbed `refine_001_001.cif` (refinement geometry
+restraints) as the ligand instead of the actual ATP file.
+
+**Fix:** Three changes:
+1. Added `refine` to `exclude_patterns` for ligandfit ligand slot in programs.yaml.
+   Word-boundary matching catches `refine_001_001.cif`, `refine_001.cif`,
+   `7qz0_refine_001.cif` but NOT `atp_refined.cif`.
+2. LLM-selected files now checked against slot `exclude_patterns` before acceptance
+   (previously only auto-fill applied exclude_patterns).
+3. New `_pdb_is_protein_model()` in `workflow_state.py` provides positive protein
+   detection for ligand slot guard (safe for non-existent files).
+
 ### Files changed
 
 | File | Change |
@@ -59,9 +100,12 @@ slots and left for the ligand slot.
 | `agent/session.py` | Fixed `is_map_coeffs` regex in `_rebuild_best_files_from_cycles` AND `record_result` |
 | `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` with word-boundary matching |
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
-| `agent/command_builder.py` | Imports `matches_exclude_pattern`; uses it for exclude/prefer patterns; added `_pdb_is_small_molecule` guard for model slots |
-| `programs/ai_agent.py` | Imports `matches_exclude_pattern`; uses it for exclude/prefer patterns; added `_pdb_is_small_molecule` guard for model slots |
-| `tests/tst_audit_fixes.py` | Added 3 tests: regex + classify_mtz_type, word-boundary matching, session integration (225 total) |
+| `agent/command_builder.py` | Content guards for model and ligand slots; exclude_patterns applied to LLM selections |
+| `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
+| `agent/workflow_state.py` | New `_pdb_is_protein_model()` for positive protein detection |
+| `knowledge/programs.yaml` | Added `refine` to ligandfit ligand slot exclude_patterns |
+| `programs/ai_agent.py` | Content guards for both model and ligand slots in safety net |
+| `tests/tst_audit_fixes.py` | 5 tests: regex, word-boundary, content guards, refine CIF exclusion, session integration (227 total) |
 
 ---
 

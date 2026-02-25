@@ -1365,6 +1365,7 @@ phenix.ligandfit:
         extensions: [.pdb, .cif]
         flag: "ligand="
         prefer_patterns: [lig, ligand]
+        exclude_patterns: [refine]
 
   # Input priorities: ligandfit REQUIRES map coefficients with calculated phases
   # It CANNOT work with data_mtz (which only has Fobs, no phases)

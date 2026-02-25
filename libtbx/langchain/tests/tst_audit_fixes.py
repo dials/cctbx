@@ -8748,6 +8748,105 @@ def test_s5j_matches_exclude_pattern_word_boundary():
     print("  PASSED: word-boundary exclude/prefer pattern matching correct")
 
 
+def test_s5j_content_guard_ligand_and_model_slots():
+    """Bug: LLM assigned refine_001_001.pdb (protein) to the ligand slot.
+
+    Content-based guards should reject:
+    - protein PDBs from the ligand slot (proteins have ATOM records)
+    - small-molecule PDBs from model/protein/pdb_file slots (HETATM-only)
+
+    The ligand slot guard uses _pdb_is_protein_model (positive protein check)
+    rather than "not _pdb_is_small_molecule" to avoid rejecting unreadable
+    or non-existent files.
+    """
+    test_dir = os.path.join(os.path.expanduser('~'), '_test_content_guard')
+    os.makedirs(test_dir, exist_ok=True)
+
+    try:
+        # Create a protein PDB (has ATOM records)
+        protein_pdb = os.path.join(test_dir, 'refine_001.pdb')
+        with open(protein_pdb, 'w') as f:
+            f.write("ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00 10.00           N\n")
+            f.write("ATOM      2  CA  ALA A   1       2.000   3.000   4.000  1.00 10.00           C\n")
+            f.write("END\n")
+
+        # Create a small-molecule PDB (HETATM only)
+        ligand_pdb = os.path.join(test_dir, 'atp.pdb')
+        with open(ligand_pdb, 'w') as f:
+            f.write("HETATM    1  PG  ATP A   1       1.000   2.000   3.000  1.00 10.00           P\n")
+            f.write("HETATM    2  O1G ATP A   1       2.000   3.000   4.000  1.00 10.00           O\n")
+            f.write("END\n")
+
+        from agent.workflow_state import _pdb_is_small_molecule, _pdb_is_protein_model
+
+        # _pdb_is_small_molecule: True for HETATM-only, False otherwise
+        assert_false(_pdb_is_small_molecule(protein_pdb),
+            "refine_001.pdb (has ATOM) must NOT be classified as small molecule")
+        assert_true(_pdb_is_small_molecule(ligand_pdb),
+            "atp.pdb (HETATM-only) must be classified as small molecule")
+
+        # _pdb_is_protein_model: True for ATOM records, False otherwise
+        assert_true(_pdb_is_protein_model(protein_pdb),
+            "refine_001.pdb (has ATOM) must be identified as protein model")
+        assert_false(_pdb_is_protein_model(ligand_pdb),
+            "atp.pdb (HETATM-only) must NOT be identified as protein model")
+
+        # Critical: non-existent files must NOT be rejected from ligand slot
+        # _pdb_is_protein_model returns False for missing files (conservative)
+        assert_false(_pdb_is_protein_model('/nonexistent/ligand.pdb'),
+            "Non-existent file must NOT be identified as protein (would block ligand slot)")
+        # _pdb_is_small_molecule also returns False for missing files
+        assert_false(_pdb_is_small_molecule('/nonexistent/ligand.pdb'),
+            "Non-existent file returns False for small_molecule too")
+
+        print("  PASSED: content-based ligand/model slot guards correct")
+
+    finally:
+        import shutil
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+
+def test_s5j_refine_cif_excluded_from_ligand_slot():
+    """Bug: refine_001_001.cif (refinement restraints) was used as ligand.
+
+    After the protein PDB guard correctly rejected the protein model from
+    the ligand slot, the auto-fill picked refine_001_001.cif (geometry
+    restraints from refinement) instead of the actual ligand file.
+
+    Fix: 'refine' added to exclude_patterns for ligandfit ligand slot,
+    and exclude_patterns now applied to LLM-selected files too.
+    """
+    from agent.file_utils import matches_exclude_pattern
+
+    # Verify the ligandfit ligand slot has 'refine' in exclude_patterns
+    from knowledge.yaml_loader import get_program_inputs
+    inputs = get_program_inputs('phenix.ligandfit')
+    ligand_def = inputs.get('required', {}).get('ligand', {})
+    excl = ligand_def.get('exclude_patterns', [])
+    assert_true('refine' in excl,
+        "ligandfit ligand slot must have 'refine' in exclude_patterns, got: %s" % excl)
+
+    # Refine output CIFs must be excluded
+    assert_true(matches_exclude_pattern('refine_001_001.cif', excl),
+        "refine_001_001.cif must match ligand exclude_patterns")
+    assert_true(matches_exclude_pattern('refine_001.cif', excl),
+        "refine_001.cif must match ligand exclude_patterns")
+    assert_true(matches_exclude_pattern('7qz0_refine_001.cif', excl),
+        "7qz0_refine_001.cif must match ligand exclude_patterns")
+
+    # Actual ligand files must NOT be excluded
+    assert_false(matches_exclude_pattern('ATP.cif', excl),
+        "ATP.cif must NOT match ligand exclude_patterns")
+    assert_false(matches_exclude_pattern('ligand.cif', excl),
+        "ligand.cif must NOT match ligand exclude_patterns")
+    assert_false(matches_exclude_pattern('atp.pdb', excl),
+        "atp.pdb must NOT match ligand exclude_patterns")
+    assert_false(matches_exclude_pattern('atp_refined.cif', excl),
+        "atp_refined.cif must NOT match (refined != refine at word boundary)")
+
+    print("  PASSED: refine CIF correctly excluded from ligand slot")
+
+
 def test_s5j_session_rebuild_map_coeffs():
     """Integration: _rebuild_best_files_from_cycles correctly populates
     map_coeffs_mtz after a successful refinement cycle produces refine_001.mtz.

@@ -661,6 +661,53 @@ class CommandBuilder:
                         if is_intermediate:
                             continue  # Skip intermediate file
 
+                    # Content-based guard: validate PDB file suitability
+                    if corrected_str.lower().endswith('.pdb'):
+                        try:
+                            try:
+                                from libtbx.langchain.agent.workflow_state import _pdb_is_small_molecule
+                            except ImportError:
+                                from agent.workflow_state import _pdb_is_small_molecule
+                            is_small = _pdb_is_small_molecule(corrected_str)
+
+                            # Reject small-molecule PDB from model/protein slots
+                            if canonical_slot in ("model", "protein", "pdb_file") and is_small:
+                                self._log(context,
+                                    "BUILD: LLM file rejected (small molecule in model slot): %s=%s" % (
+                                        canonical_slot, os.path.basename(corrected_str)))
+                                continue
+
+                            # Reject protein PDB from ligand slot
+                            if canonical_slot == "ligand" and not is_small:
+                                try:
+                                    try:
+                                        from libtbx.langchain.agent.workflow_state import _pdb_is_protein_model
+                                    except ImportError:
+                                        from agent.workflow_state import _pdb_is_protein_model
+                                    if _pdb_is_protein_model(corrected_str):
+                                        self._log(context,
+                                            "BUILD: LLM file rejected (protein model in ligand slot): %s=%s" % (
+                                                canonical_slot, os.path.basename(corrected_str)))
+                                        continue
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    # Apply exclude_patterns from input definition to LLM selections
+                    # (same check that _find_file_for_slot applies for auto-fill)
+                    if canonical_slot in all_inputs:
+                        # Look up input_def from required or optional
+                        _idef = inputs.get("required", {}).get(canonical_slot,
+                                inputs.get("optional", {}).get(canonical_slot, {}))
+                        _excl = _idef.get("exclude_patterns", [])
+                        if _excl:
+                            if matches_exclude_pattern(os.path.basename(corrected_str), _excl):
+                                self._log(context,
+                                    "BUILD: LLM file rejected (matches exclude_patterns): %s=%s" % (
+                                        canonical_slot, os.path.basename(corrected_str)))
+                                continue
+
                     selected_files[canonical_slot] = corrected
                     self._record_selection(canonical_slot, corrected_str, "llm_selected")
                 else:
@@ -1065,6 +1112,29 @@ class CommandBuilder:
                             from agent.workflow_state import _pdb_is_small_molecule
                         if _pdb_is_small_molecule(f):
                             self._log(context, "BUILD: Excluded small-molecule PDB from model slot: %s" %
+                                     os.path.basename(f))
+                            continue
+                    except Exception:
+                        pass
+                filtered.append(f)
+            candidates = filtered
+
+        # Inverse guard: reject protein PDB files from ligand slot.
+        # The ligand slot should only contain small-molecule files (HETATM-only).
+        # This prevents the refined model from being used as the ligand.
+        # Uses _pdb_is_protein_model (positive protein check) rather than
+        # "not _pdb_is_small_molecule" to avoid rejecting unreadable files.
+        if input_name == "ligand" and '.pdb' in extensions:
+            filtered = []
+            for f in candidates:
+                if f.lower().endswith('.pdb'):
+                    try:
+                        try:
+                            from libtbx.langchain.agent.workflow_state import _pdb_is_protein_model
+                        except ImportError:
+                            from agent.workflow_state import _pdb_is_protein_model
+                        if _pdb_is_protein_model(f):
+                            self._log(context, "BUILD: Excluded protein PDB from ligand slot: %s" %
                                      os.path.basename(f))
                             continue
                     except Exception:
