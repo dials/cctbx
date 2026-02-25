@@ -23,6 +23,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 
+try:
+    from libtbx.langchain.agent.file_utils import matches_exclude_pattern
+except ImportError:
+    from agent.file_utils import matches_exclude_pattern
+
 # Centralized pattern utilities
 from libtbx.langchain.agent.pattern_manager import extract_cycle_number, extract_all_numbers
 
@@ -1042,8 +1047,30 @@ class CommandBuilder:
         exclude_patterns = input_def.get("exclude_patterns", [])
         if exclude_patterns:
             candidates = [f for f in candidates
-                          if not any(pat.lower() in os.path.basename(f).lower()
-                                    for pat in exclude_patterns)]
+                          if not matches_exclude_pattern(
+                              os.path.basename(f), exclude_patterns)]
+
+        # Content-based guard: reject small-molecule PDB files from model slots.
+        # This catches files like atp.pdb or gdp.pdb that have no ligand-like
+        # name pattern but are HETATM-only and should never be used as the
+        # protein model.
+        if input_name in ("model", "protein", "pdb_file") and '.pdb' in extensions:
+            filtered = []
+            for f in candidates:
+                if f.lower().endswith('.pdb'):
+                    try:
+                        try:
+                            from libtbx.langchain.agent.workflow_state import _pdb_is_small_molecule
+                        except ImportError:
+                            from agent.workflow_state import _pdb_is_small_molecule
+                        if _pdb_is_small_molecule(f):
+                            self._log(context, "BUILD: Excluded small-molecule PDB from model slot: %s" %
+                                     os.path.basename(f))
+                            continue
+                    except Exception:
+                        pass
+                filtered.append(f)
+            candidates = filtered
 
         # Apply priority_patterns from input_def (prefer files matching these patterns)
         priority_patterns = input_def.get("priority_patterns", [])
@@ -1059,8 +1086,8 @@ class CommandBuilder:
         prefer_patterns = input_def.get("prefer_patterns", [])
         if prefer_patterns and candidates:
             preferred = [f for f in candidates
-                        if any(pat.lower() in os.path.basename(f).lower()
-                              for pat in prefer_patterns)]
+                        if matches_exclude_pattern(
+                            os.path.basename(f), prefer_patterns)]
             if preferred:
                 self._log(context, "BUILD: Preferring files matching patterns: %s" % prefer_patterns)
                 candidates = preferred

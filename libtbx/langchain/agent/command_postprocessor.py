@@ -170,6 +170,32 @@ _UNIVERSAL_KEYS = {
     'prefix', 'overwrite', 'verbose', 'quiet',
 }
 
+# Crystallographic file extensions — values matching these are file paths,
+# not hallucinated parameters.  Shared by probe-program stripping and
+# Rules C/D.
+_FILE_EXTS = frozenset({
+    '.pdb', '.cif', '.mtz', '.sca', '.hkl',
+    '.mrc', '.ccp4', '.map',
+    '.fa', '.fasta', '.seq', '.dat',
+    '.ncs_spec', '.eff',
+})
+
+
+def _value_is_filepath(val):
+    """Return True if *val* (the RHS of key=value) looks like a file path.
+
+    Heuristic: contains a '/' (absolute/relative path) OR ends with a
+    known crystallographic extension.  Used by Rules C and D to preserve
+    legitimate file arguments like ``model=/path/to/refine_001.pdb``
+    that would otherwise be stripped as unknown bare parameters.
+    """
+    import os.path as _osp
+    v = val.strip().strip('"').strip("'")
+    if '/' in v:
+        return True
+    ext = _osp.splitext(v)[1].lower()
+    return ext in _FILE_EXTS
+
 
 def _is_placeholder_value(val):
     """Return True if val is a known extraction-failure placeholder."""
@@ -253,12 +279,6 @@ def sanitize_command(command, program_name=None, bad_inject_params=None,
         # has a crystallographic extension).  The CommandBuilder legitimately
         # produces key=value file assignments like half_map=/path/to/map.mrc
         # that must survive sanitization.
-        _FILE_EXTS = frozenset({
-            '.pdb', '.cif', '.mtz', '.sca', '.hkl',
-            '.mrc', '.ccp4', '.map',
-            '.fa', '.fasta', '.seq', '.dat',
-            '.ncs_spec', '.eff',
-        })
         command_for_tokens = re.sub(
             r'(\S+=)"([^"]*)"',
             lambda m: m.group(1) + m.group(2).replace(' ', '\x00'),
@@ -336,10 +356,11 @@ def sanitize_command(command, program_name=None, bad_inject_params=None,
                             % token.strip())
 
             # Rule C: key=value on a program with no strategy_flags
+            # Preserve file-path values (model=/path/to/file.pdb)
             if (not _strip and prog_allowlist is not None and
                     len(strategy_flags) == 0):
                 bare = key_short.lower()
-                if bare not in _UNIVERSAL_KEYS:
+                if bare not in _UNIVERSAL_KEYS and not _value_is_filepath(val):
                     _strip = True
                     if log:
                         log("  [sanitize_command] removed key=value param %r from "
@@ -350,10 +371,11 @@ def sanitize_command(command, program_name=None, bad_inject_params=None,
             # programs that HAVE strategy_flags.  Scoped PHIL params
             # (containing dots, e.g. xray_data.r_free_flags.generate)
             # are kept — they go through PHIL validation downstream.
+            # File-path values (model=/path/to/file.pdb) are also kept.
             if (not _strip and prog_allowlist is not None and
                     len(strategy_flags) > 0 and '.' not in key_full):
                 bare = key_full.lower()
-                if bare not in prog_allowlist:
+                if bare not in prog_allowlist and not _value_is_filepath(val):
                     _strip = True
                     if log:
                         log("  [sanitize_command] removed bare param %r from "
@@ -453,6 +475,13 @@ def inject_user_params(command, user_advice, program_name='',
     _UNIVERSAL_SCOPES = {'general', 'output', 'job', 'data_manager', 'nproc'}
     _SKIP_KEYS = {'e', 'i', 'http', 'https', 'key', 'param', 'setting'}
 
+    # Load strategy_flags allowlist for Rule D consistency: bare (undotted)
+    # keys extracted from user advice are only injected if they're in the
+    # program's strategy_flags or universal keys.  Without this check,
+    # inject_user_params re-adds params that sanitize_command (Rule D)
+    # just stripped — e.g. d_min=2.5 or elements=Se.
+    prog_allowlist, _sf = _load_prog_allowlist(program_name)
+
     command_lower = command.lower()
     appended = []
     skipped = []
@@ -474,6 +503,13 @@ def inject_user_params(command, user_advice, program_name='',
                 )
                 if not scope_matches:
                     skipped.append(key)
+                    continue
+        else:
+            # Bare (undotted) key: only inject if in strategy_flags allowlist
+            # (mirrors Rule D in sanitize_command)
+            if prog_allowlist is not None and len(_sf) > 0:
+                if key.lower() not in prog_allowlist:
+                    skipped.append('%s (bare, not in strategy_flags)' % key)
                     continue
 
         short_key = key.split('.')[-1]

@@ -1,5 +1,70 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.70 (Ligandfit missing data file + model/ligand swap)
+
+After running `phenix.refine`, the agent tried to run `phenix.ligandfit` with
+no data file, swapped model and ligand, and used `atp.pdb` (the small molecule)
+as the protein model. Three independent bugs:
+
+### Bug 1 — `refine_001.mtz` classified as `data_mtz` instead of `map_coeffs_mtz`
+
+**Root cause:** `session._rebuild_best_files_from_cycles` had a hardcoded regex
+`refine_\d+_001\.mtz$` that only matched two-level serial output
+(`refine_001_001.mtz`), NOT the standard single-serial output (`refine_001.mtz`).
+So `best_files["map_coeffs_mtz"]` was never populated after refinement, and
+ligandfit's `require_best_files_only: true` on `map_coeffs_mtz` meant neither
+BUILD nor the safety net could find the data file.
+
+**Fix:** Updated regex to `(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$` — matches
+all four patterns: `refine_001.mtz`, `refine_001_001.mtz`, `7qz0_refine_001.mtz`,
+`7qz0_refine_001_001.mtz`. Applied in three locations:
+- `session._rebuild_best_files_from_cycles` (session load path)
+- `session.record_result` (live cycle recording path)
+- `file_utils.classify_mtz_type` (shared classifier used by BestFilesTracker)
+
+**Secondary fix:** Added `refine_map_coeffs`, `denmod_map_coeffs`,
+`predict_build_map_coeffs`, `original_data_mtz`, and `phased_data_mtz` to
+`BestFilesTracker.STAGE_TO_PARENT`. Without these, passing `stage="refine_map_coeffs"`
+to `evaluate_file()` caused the category to be inferred from the filename instead
+of the stage, creating a silent mismatch.
+
+### Bug 2 — `exclude_patterns` used substring matching
+
+The model slot's `exclude_patterns: [ligand, ...]` used substring matching
+(`pat in basename`), so `nsf-d2_noligand.pdb` was incorrectly excluded from the
+model slot because "noligand" contains "ligand". This caused the safety net to
+skip the protein model and pick `atp.pdb` instead.
+
+**Fix:** New `matches_exclude_pattern()` function in `agent/file_utils.py` uses
+word-boundary matching: patterns must appear at the start of the name or after a
+separator (`_`, `-`, `.`). Applied in both `CommandBuilder._find_file_for_slot`
+(server) and `_inject_missing_required_files._find_candidate_for_slot` (client).
+Also applied to `prefer_patterns` for consistency.
+
+### Bug 3 — No content-based small-molecule guard for model slots
+
+Even after fixing exclude_patterns, `atp.pdb` (HETATM-only small molecule) could
+still be selected as a "model" because its filename has no ligand-like pattern.
+
+**Fix:** Both `CommandBuilder._find_file_for_slot` and
+`_inject_missing_required_files._find_candidate_for_slot` now call
+`_pdb_is_small_molecule()` (reads first 8KB, checks for HETATM-only) when filling
+model/protein/pdb_file slots. Small-molecule PDB files are rejected from model
+slots and left for the ligand slot.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agent/session.py` | Fixed `is_map_coeffs` regex in `_rebuild_best_files_from_cycles` AND `record_result` |
+| `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` with word-boundary matching |
+| `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
+| `agent/command_builder.py` | Imports `matches_exclude_pattern`; uses it for exclude/prefer patterns; added `_pdb_is_small_molecule` guard for model slots |
+| `programs/ai_agent.py` | Imports `matches_exclude_pattern`; uses it for exclude/prefer patterns; added `_pdb_is_small_molecule` guard for model slots |
+| `tests/tst_audit_fixes.py` | Added 3 tests: regex + classify_mtz_type, word-boundary matching, session integration (225 total) |
+
+---
+
 ## Version 112.69 (Rule D: strip hallucinated bare params + inject_program_defaults)
 
 Two bugs found during integration testing of the `nsf-d2-ligand` scenario.

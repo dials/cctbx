@@ -216,6 +216,13 @@ class BestFilesTracker:
         # ligand subcategories
         "ligand_pdb": "ligand",
         "ligand_cif": "ligand",
+        # map_coeffs_mtz subcategories
+        "refine_map_coeffs": "map_coeffs_mtz",
+        "denmod_map_coeffs": "map_coeffs_mtz",
+        "predict_build_map_coeffs": "map_coeffs_mtz",
+        # data_mtz subcategories
+        "original_data_mtz": "data_mtz",
+        "phased_data_mtz": "data_mtz",
         # intermediate - NOT tracked (returns None)
         "intermediate_mr": None,
         "autobuild_temp": None,

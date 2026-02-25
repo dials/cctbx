@@ -6134,6 +6134,8 @@ def test_s5h_rule_d_strips_bare_hallucinated_params():
     """Rule D in sanitize_command must strip bare (unscoped) key=value params
     that are not in strategy_flags for programs that HAVE strategy_flags.
     Scoped PHIL params (with dots) must survive — they go through PHIL validation.
+    File-path values (model=/path/to/file.pdb) must survive — they are legitimate
+    flagged file arguments from CommandBuilder.
 
     Concrete case: map_type=pre_calculated must be stripped from phenix.refine
     (map_type is not in its strategy_flags), but xray_data.r_free_flags.generate=True
@@ -6165,6 +6167,42 @@ def test_s5h_rule_d_strips_bare_hallucinated_params():
     assert_true("simulated_annealing=True" in result2,
         "Rule D must keep strategy_flag simulated_annealing; got: %s" % result2)
 
+    # ---- FILE-PATH GUARD ----
+    # File-path values must survive Rule D even if key is not in allowlist.
+    # This is the ligandfit bug: model=/path/to/file.pdb was stripped.
+
+    # Absolute path (contains '/')
+    cmd3 = ("phenix.ligandfit model=/path/to/refine_001.pdb "
+            "data=/path/to/refine_001.mtz ligand=/path/to/atp.pdb "
+            "general.nproc=4")
+    result3 = sanitize_command(cmd3, "phenix.ligandfit")
+    assert_true("model=/path/to/refine_001.pdb" in result3,
+        "Rule D must preserve model= with file path; got: %s" % result3)
+    assert_true("data=/path/to/refine_001.mtz" in result3,
+        "Rule D must preserve data= with file path; got: %s" % result3)
+    assert_true("ligand=/path/to/atp.pdb" in result3,
+        "Rule D must preserve ligand= with file path; got: %s" % result3)
+
+    # Bare filename with crystallographic extension (no '/' but .pdb)
+    cmd4 = ("phenix.ligandfit model=refine_001.pdb data=refine_001.mtz "
+            "ligand=atp.pdb general.nproc=4 map_type=pre_calculated")
+    result4 = sanitize_command(cmd4, "phenix.ligandfit")
+    assert_true("model=refine_001.pdb" in result4,
+        "Rule D must preserve model=file.pdb; got: %s" % result4)
+    assert_true("data=refine_001.mtz" in result4,
+        "Rule D must preserve data=file.mtz; got: %s" % result4)
+    assert_true("map_type" not in result4,
+        "Rule D must still strip hallucinated non-file params; got: %s" % result4)
+
+    # Rule C file-path guard (programs with no strategy_flags)
+    cmd5 = ("phenix.phaser model=refine_001.pdb data=data.mtz "
+            "bogus_param=42")
+    result5 = sanitize_command(cmd5, "phenix.phaser")
+    assert_true("model=refine_001.pdb" in result5,
+        "Rule C must preserve model=file.pdb; got: %s" % result5)
+    assert_true("bogus_param" not in result5,
+        "Rule C must strip non-file bare params; got: %s" % result5)
+
     # Verify Rule D exists in source
     import os as _os
     _pp_path = _os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
@@ -6172,8 +6210,8 @@ def test_s5h_rule_d_strips_bare_hallucinated_params():
     assert_true("Rule D" in src,
         "sanitize_command must have Rule D comment")
 
-    print("  PASSED: Rule D strips bare hallucinated params, keeps scoped PHIL "
-          "and known strategy_flags")
+    print("  PASSED: Rule D strips bare hallucinated params, keeps scoped PHIL, "
+          "known strategy_flags, and file-path values")
 
 
 def test_s5h_inject_program_defaults():
@@ -8598,6 +8636,172 @@ def test_s10h_sanitize_quoted_spacegroup_no_orphan():
         "model.pdb must be preserved: %r" % result2)
 
     print("  PASSED: quoted multi-word space group stripped cleanly, no orphan tokens")
+
+
+# =============================================================================
+# S5j — Ligandfit file selection fixes
+# =============================================================================
+
+def test_s5j_refine_mtz_classified_as_map_coeffs():
+    """Bug: refine_001.mtz was classified as data_mtz instead of map_coeffs_mtz.
+
+    The is_map_coeffs regex in session._rebuild_best_files_from_cycles only
+    matched refine_NNN_001.mtz (two-level serial), not the standard
+    refine_001.mtz output.  This caused best_files["map_coeffs_mtz"] to
+    never be populated after refinement, so ligandfit had no data file.
+
+    Same bug existed in file_utils.classify_mtz_type (used by
+    BestFilesTracker._classify_mtz_type for live evaluations) and in
+    session.record_result (used when recording cycle output files).
+    """
+    import re
+
+    # Test the session.py regex (used in _rebuild_best_files_from_cycles
+    # and record_result)
+    def is_map_coeffs_fixed(basename):
+        return bool(
+            'map_coeffs' in basename or
+            'denmod' in basename or
+            re.match(r'(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$', basename)
+        )
+
+    # All refine MTZ patterns should be recognized as map coefficients
+    assert_true(is_map_coeffs_fixed('refine_001.mtz'),
+        "refine_001.mtz must be map_coeffs")
+    assert_true(is_map_coeffs_fixed('refine_001_001.mtz'),
+        "refine_001_001.mtz must be map_coeffs")
+    assert_true(is_map_coeffs_fixed('7qz0_refine_001.mtz'),
+        "7qz0_refine_001.mtz must be map_coeffs")
+    assert_true(is_map_coeffs_fixed('7qz0_refine_001_001.mtz'),
+        "7qz0_refine_001_001.mtz must be map_coeffs")
+
+    # Data MTZ files must NOT be classified as map coefficients
+    assert_false(is_map_coeffs_fixed('nsf-d2.mtz'),
+        "nsf-d2.mtz must NOT be map_coeffs")
+    assert_false(is_map_coeffs_fixed('nsf-d2_data.mtz'),
+        "nsf-d2_data.mtz must NOT be map_coeffs")
+    assert_false(is_map_coeffs_fixed('data.mtz'),
+        "data.mtz must NOT be map_coeffs")
+
+    # Also verify file_utils.classify_mtz_type (the shared classifier)
+    from agent.file_utils import classify_mtz_type
+    assert_equal(classify_mtz_type('/path/refine_001.mtz'), 'map_coeffs_mtz',
+        "classify_mtz_type must handle refine_001.mtz")
+    assert_equal(classify_mtz_type('/path/refine_001_001.mtz'), 'map_coeffs_mtz',
+        "classify_mtz_type must handle refine_001_001.mtz")
+    assert_equal(classify_mtz_type('/path/7qz0_refine_001.mtz'), 'map_coeffs_mtz',
+        "classify_mtz_type must handle 7qz0_refine_001.mtz")
+    assert_equal(classify_mtz_type('/path/nsf-d2.mtz'), 'data_mtz',
+        "classify_mtz_type must keep nsf-d2.mtz as data_mtz")
+
+    print("  PASSED: refine MTZ output correctly classified as map_coeffs_mtz")
+
+
+def test_s5j_matches_exclude_pattern_word_boundary():
+    """Bug: exclude_patterns used substring matching, so 'ligand' in
+    exclude_patterns matched 'nsf-d2_noligand.pdb' — a protein model
+    whose name happens to contain 'noligand'.
+
+    Now uses word-boundary matching: 'ligand' only matches when preceded
+    by start-of-string or a separator (_, -, .).
+    """
+    from agent.file_utils import matches_exclude_pattern
+
+    # 'ligand' must NOT match inside 'noligand'
+    assert_false(matches_exclude_pattern('nsf-d2_noligand.pdb', ['ligand']),
+        "noligand must not match 'ligand' exclude")
+
+    # 'ligand' MUST match when it's a proper word
+    assert_true(matches_exclude_pattern('ligand.pdb', ['ligand']),
+        "ligand.pdb must match")
+    assert_true(matches_exclude_pattern('atp_ligand.pdb', ['ligand']),
+        "atp_ligand.pdb must match")
+    assert_true(matches_exclude_pattern('my_ligand_001.pdb', ['ligand']),
+        "my_ligand_001.pdb must match")
+
+    # 'lig.pdb' pattern (with extension) must match exactly
+    assert_true(matches_exclude_pattern('lig.pdb', ['lig.pdb']),
+        "lig.pdb must match itself")
+    assert_false(matches_exclude_pattern('nolig.pdb', ['lig.pdb']),
+        "nolig.pdb must not match lig.pdb pattern")
+    assert_false(matches_exclude_pattern('lig.cif', ['lig.pdb']),
+        "lig.cif must not match lig.pdb (wrong extension)")
+
+    # Half-map patterns
+    assert_true(matches_exclude_pattern('half_1.mrc', ['half_1']),
+        "half_1.mrc must match")
+    assert_false(matches_exclude_pattern('nothalf_1.mrc', ['half_1']),
+        "nothalf_1.mrc must not match")
+    assert_true(matches_exclude_pattern('model_half_1.mrc', ['half_1']),
+        "model_half_1.mrc must match (separator before half)")
+
+    # 'lig' pattern for prefer_patterns
+    assert_true(matches_exclude_pattern('lig_001.pdb', ['lig']),
+        "lig_001.pdb must match")
+    assert_false(matches_exclude_pattern('nolig_001.pdb', ['lig']),
+        "nolig_001.pdb must not match")
+
+    # atp.pdb has no ligand-like word boundary
+    assert_false(matches_exclude_pattern('atp.pdb', ['lig', 'ligand']),
+        "atp.pdb must not match lig/ligand patterns")
+
+    print("  PASSED: word-boundary exclude/prefer pattern matching correct")
+
+
+def test_s5j_session_rebuild_map_coeffs():
+    """Integration: _rebuild_best_files_from_cycles correctly populates
+    map_coeffs_mtz after a successful refinement cycle produces refine_001.mtz.
+    """
+    import json
+
+    # Use /home/claude as base to avoid /tmp/ triggering the intermediate
+    # file filter in BestFilesTracker._is_intermediate_file.
+    test_dir = os.path.join(os.path.expanduser('~'), '_test_session_rebuild')
+    os.makedirs(test_dir, exist_ok=True)
+    try:
+        # Create mock files
+        model_path = os.path.join(test_dir, 'nsf-d2_noligand.pdb')
+        data_path = os.path.join(test_dir, 'nsf-d2.mtz')
+        refine_pdb = os.path.join(test_dir, 'refine_001.pdb')
+        refine_mtz = os.path.join(test_dir, 'refine_001.mtz')
+
+        for path in [model_path, data_path]:
+            with open(path, 'w') as f:
+                f.write('ATOM      1  CA  ALA A   1       1.0   2.0   3.0  1.00  0.00\n')
+        for path in [refine_pdb, refine_mtz]:
+            with open(path, 'w') as f:
+                f.write('MOCK')
+
+        # Create session with one successful refine cycle
+        session_file = os.path.join(test_dir, 'session.json')
+        session_data = {
+            "original_files": [model_path, data_path],
+            "cycles": [{
+                "cycle_number": 1,
+                "program": "phenix.refine",
+                "result": "SUCCESS",
+                "metrics": {"r_work": 0.22, "r_free": 0.26},
+                "output_files": [refine_pdb, refine_mtz],
+            }],
+        }
+        with open(session_file, 'w') as f:
+            json.dump(session_data, f)
+
+        from agent.session import AgentSession
+        session = AgentSession(session_file=session_file)
+
+        # Check that map_coeffs_mtz is now populated
+        best = session.get_best_files_dict()
+        map_coeffs = best.get('map_coeffs_mtz')
+        assert_true(map_coeffs is not None,
+            "map_coeffs_mtz must be populated after refine: got %s" % best)
+        assert_true('refine_001.mtz' in str(map_coeffs),
+            "map_coeffs_mtz must point to refine_001.mtz, got: %s" % map_coeffs)
+    finally:
+        import shutil
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+    print("  PASSED: _rebuild_best_files_from_cycles populates map_coeffs_mtz")
 
 
 def run_all_tests():

@@ -242,10 +242,18 @@ class AgentSession:
                         )
 
                         # Classify as data_mtz or map_coeffs_mtz
+                        # Refine output MTZ files contain map coefficients
+                        # (2mFo-DFc, Fo-Fc) AND R-free flags.  They should be
+                        # classified as map_coeffs, NOT data_mtz.
+                        # Patterns from file_categories.yaml refine_map_coeffs:
+                        #   refine_001.mtz, 7qz0_refine_001.mtz,
+                        #   refine_001_001.mtz, 7qz0_refine_001_001.mtz
                         is_map_coeffs = (
                             'map_coeffs' in basename or
                             'denmod' in basename or
-                            re.match(r'refine_\d+_001\.mtz$', basename)
+                            bool(re.match(
+                                r'(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$',
+                                basename))
                         )
 
                         if is_map_coeffs:
@@ -1420,10 +1428,14 @@ class AgentSession:
                     )
 
                     # Check if this is map coefficients (for visualization/ligand fitting)
+                    # Matches: refine_001.mtz, refine_001_001.mtz,
+                    #          7qz0_refine_001.mtz, 7qz0_refine_001_001.mtz
                     is_map_coeffs = (
                         'map_coeffs' in basename or
                         'denmod' in basename or
-                        re.match(r'refine_\d+_001\.mtz$', basename)
+                        re.match(
+                            r'(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$',
+                            basename)
                     )
 
                     if is_map_coeffs:
