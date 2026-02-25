@@ -33,6 +33,7 @@ class AgentState(TypedDict):
                                   #   - experiment_type: "xray" or "cryoem"
                                   #   - best_files: {category: path} from BestFilesTracker
     directives: Dict              # User directives extracted from advice
+    bad_inject_params: Dict       # {program: [param_names]} — blacklisted params per program
 
     # === CONFIGURATION ===
     maximum_automation: bool      # If True, use fully automated cryo-EM path
@@ -83,7 +84,8 @@ def create_initial_state(
     session_info=None,
     abort_on_red_flags=True,
     abort_on_warnings=False,
-    directives=None
+    directives=None,
+    bad_inject_params=None
 ):
     """
     Factory function to create a properly initialized AgentState.
@@ -124,6 +126,7 @@ def create_initial_state(
         "session_resolution": session_resolution,
         "session_info": session_info if session_info is not None else {},
         "directives": directives if directives is not None else {},
+        "bad_inject_params": bad_inject_params if bad_inject_params is not None else {},
 
         # Configuration
         "maximum_automation": maximum_automation,

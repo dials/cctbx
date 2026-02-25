@@ -97,6 +97,11 @@ def build_session_state(session_info, session_resolution=None):
         if session_info.get("unplaced_model_cell"):
             session_state["unplaced_model_cell"] = session_info["unplaced_model_cell"]
 
+        # Parameter blacklist: params that caused PHIL errors for specific programs
+        # (e.g. {"phenix.refine": ["ignore_symmetry_conflicts"]})
+        if session_info.get("bad_inject_params"):
+            session_state["bad_inject_params"] = session_info["bad_inject_params"]
+
     return session_state
 
 
@@ -192,6 +197,15 @@ def build_request_v2(
         # Explicit program request
         if session_state.get("explicit_program"):
             normalized_session_state["explicit_program"] = session_state["explicit_program"]
+        # Resume flag — new advice on a completed workflow (Q1 fix)
+        if session_state.get("advice_changed"):
+            normalized_session_state["advice_changed"] = True
+        # S2L: client-side model CRYST1 cell for server-side placement check
+        if session_state.get("unplaced_model_cell"):
+            normalized_session_state["unplaced_model_cell"] = session_state["unplaced_model_cell"]
+        # Parameter blacklist for command post-processing
+        if session_state.get("bad_inject_params"):
+            normalized_session_state["bad_inject_params"] = session_state["bad_inject_params"]
 
     # Build settings
     settings = {

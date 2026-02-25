@@ -436,6 +436,22 @@ def _filter_intermediate_files(available_files):
 
 
 # =============================================================================
+# PERCEIVE helpers — stop checks (imported from standalone module)
+# =============================================================================
+
+try:
+    from libtbx.langchain.agent.perceive_checks import (
+        check_directive_stop,
+        check_consecutive_program_cap,
+    )
+except ImportError:
+    from agent.perceive_checks import (
+        check_directive_stop,
+        check_consecutive_program_cap,
+    )
+
+
+# =============================================================================
 # NODE: PERCEIVE
 # =============================================================================
 
@@ -1021,6 +1037,44 @@ def perceive(state):
                 "red_flag_issues": [i.to_dict() for i in sanity_result.issues],
                 "abort_message": abort_msg,
             }
+
+    # ── Directive stop check ──────────────────────────────────────────────
+    # Check if user directives say we should stop (after_program, after_cycle,
+    # metrics targets).  This fires at START of cycle N+1 based on cycle N
+    # results — no extra program execution occurs.
+    _dir_stop, _dir_reason = check_directive_stop(
+        state.get("directives"), history, cycle_number,
+        current_metrics=analysis)
+    if _dir_stop:
+        state = _log(state, "PERCEIVE: DIRECTIVE STOP — %s" % _dir_reason)
+        return {
+            **state,
+            "log_analysis": analysis or {},
+            "metrics_history": metrics_history,
+            "metrics_trend": metrics_trend,
+            "workflow_state": workflow_state,
+            "command": "STOP",
+            "stop": True,
+            "stop_reason": "directive",
+            "abort_message": _dir_reason,
+        }
+
+    # ── Consecutive-program cap ────────────────────────────────────────────
+    # Guard against infinite loops where the same program runs repeatedly.
+    _cap_stop, _cap_reason = check_consecutive_program_cap(history)
+    if _cap_stop:
+        state = _log(state, "PERCEIVE: CONSECUTIVE CAP — %s" % _cap_reason)
+        return {
+            **state,
+            "log_analysis": analysis or {},
+            "metrics_history": metrics_history,
+            "metrics_trend": metrics_trend,
+            "workflow_state": workflow_state,
+            "command": "STOP",
+            "stop": True,
+            "stop_reason": "consecutive_cap",
+            "abort_message": _cap_reason,
+        }
 
     return {
         **state,
@@ -2156,6 +2210,43 @@ def _build_with_new_builder(state):
         except ImportError:
             pass  # No fix_program_parameters available
 
+    # === POST-PROCESS COMMAND (Phase 1: sanitize, inject user params, crystal symmetry) ===
+    # These transforms were previously applied only in ai_agent.py (client-side).
+    # Moving them here ensures they run in the graph pipeline as single source of truth.
+    try:
+        try:
+            from libtbx.langchain.agent.command_postprocessor import postprocess_command
+        except ImportError:
+            from agent.command_postprocessor import postprocess_command
+    except ImportError:
+        postprocess_command = None  # Module not available — client-side handles it
+
+    if postprocess_command is not None:
+        try:
+            pre_postprocess = command
+            directives = state.get("directives", {})
+            user_advice = state.get("user_advice", "")
+            # bad_inject_params is {program: [param_names]} — extract set for this program
+            all_bad = state.get("bad_inject_params", {})
+            bad_set = set(all_bad.get(program, []))
+
+            # Collect postprocess log messages for graph debug log
+            _pp_logs = []
+            command = postprocess_command(
+                command, program_name=program, directives=directives,
+                user_advice=user_advice, bad_inject_params=bad_set,
+                log=lambda msg: _pp_logs.append(msg))
+
+            if command != pre_postprocess:
+                state = _log(state, "BUILD_POSTPROCESS: command modified by postprocess_command")
+                state = _log(state, "BUILD_POSTPROCESS:   before: %s" % pre_postprocess[:200])
+                state = _log(state, "BUILD_POSTPROCESS:   after:  %s" % command[:200])
+                for _ppmsg in _pp_logs:
+                    state = _log(state, "BUILD_POSTPROCESS: %s" % _ppmsg.strip())
+        except Exception as _pp_err:
+            # Non-fatal during shadow mode — client-side transforms are still active
+            state = _log(state, "BUILD_POSTPROCESS: ERROR: %s (client-side fallback active)" % _pp_err)
+
     state = _log(state, "BUILD: Generated command: %s" % command[:150])
 
     # === EMIT FILES_SELECTED EVENT (verbose level) ===
@@ -2880,6 +2971,26 @@ def _fallback_with_new_builder(state):
                     cmd = fix_program_parameters(cmd, program)
                 except ImportError:
                     pass
+
+        # Apply post-processing (sanitize, inject user params, crystal symmetry)
+        if cmd:
+            try:
+                try:
+                    from libtbx.langchain.agent.command_postprocessor import postprocess_command
+                except ImportError:
+                    from agent.command_postprocessor import postprocess_command
+                directives = state.get("directives", {})
+                user_advice = state.get("user_advice", "")
+                all_bad = state.get("bad_inject_params", {})
+                bad_set = set(all_bad.get(program, []))
+                cmd = postprocess_command(
+                    cmd, program_name=program, directives=directives,
+                    user_advice=user_advice, bad_inject_params=bad_set,
+                    log=lambda msg: None)
+            except ImportError:
+                pass  # Module not available
+            except Exception:
+                pass  # Non-fatal during shadow mode
 
         if cmd and cmd not in previous_commands:
             state = _log(state, "FALLBACK: Built command for %s" % program)

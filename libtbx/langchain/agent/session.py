@@ -1115,8 +1115,9 @@ class AgentSession:
         """Record a parameter name that caused an 'Unknown command line parameter'
         failure for a specific program.
 
-        Once recorded, _inject_user_params will skip this key for the same
-        program on every future cycle, breaking the inject→crash→re-inject loop.
+        Once recorded, inject_user_params (in command_postprocessor.py) will
+        skip this key for the same program on every future cycle, breaking
+        the inject→crash→re-inject loop.
 
         Args:
             program_name: e.g. "phenix.refine"
@@ -1713,8 +1714,8 @@ class AgentSession:
     def get_cycle_result(self, cycle_number):
         """Return the result text of a specific cycle, or None if not found.
 
-        Used by _retry_duplicate to include the original error text in the
-        feedback message when a command is rejected as a failed-duplicate.
+        Used by _build_duplicate_feedback to include the original error text
+        in the feedback message when a command is rejected as a failed-duplicate.
 
         Args:
             cycle_number: 1-based cycle number.
@@ -3735,7 +3736,7 @@ FINAL REPORT:"""
             lines.append(f"| {step['cycle']} | {program_short} | {result_symbol} | {key_metric} |")
         if _has_superseded_step:
             lines.append("")
-            lines.append("_\* Failure resolved by a later successful step — "
+            lines.append("_\\* Failure resolved by a later successful step — "
                          "does not affect the final result._")
         lines.append("")
 

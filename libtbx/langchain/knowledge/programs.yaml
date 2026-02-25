@@ -1123,6 +1123,9 @@ phenix.refine:
 
   command: "phenix.refine {model} {data_mtz} xray_data.r_free_flags.generate=True"
 
+  defaults:
+    xray_data.r_free_flags.generate: True
+
   strategy_flags:
     output_prefix:
       flag: "output.prefix={value}"

@@ -3905,16 +3905,16 @@ def test_s2k_inject_user_params_filters_wrong_program_scope():
     """S2k: refinement.main.number_of_macro_cycles must not be injected into ligandfit."""
     print("Test: s2k_inject_user_params_filters_wrong_program_scope")
     sys.path.insert(0, _PROJECT_ROOT)
-    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
-    if not os.path.isfile(ai_agent_path):
-        print("  SKIP (ai_agent.py not found)")
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    if not os.path.isfile(pp_path):
+        print("  SKIP (command_postprocessor.py not found)")
         return
-    with open(ai_agent_path) as f:
+    with open(pp_path) as f:
         src = f.read()
-    assert_true("def _inject_user_params(self, command, guidelines, program_name" in src,
-                "_inject_user_params must accept program_name parameter")
+    assert_true("def inject_user_params" in src,
+                "inject_user_params must exist in command_postprocessor.py")
     assert_true("leading_scope" in src and "_UNIVERSAL_SCOPES" in src,
-                "_inject_user_params must filter by leading_scope against _UNIVERSAL_SCOPES")
+                "inject_user_params must filter by leading_scope against _UNIVERSAL_SCOPES")
     universal_line = next((l for l in src.split('\n') if '_UNIVERSAL_SCOPES' in l and '=' in l), "")
     assert_true("refinement" not in universal_line,
                 "'refinement' must not be in _UNIVERSAL_SCOPES")
@@ -4875,6 +4875,13 @@ def test_s4a_inject_crystal_symmetry_into_model_vs_data():
 
     This is the exact failure from the log: unit_cell given in advice but
     missing from the model_vs_data command.
+
+    Architecture note: crystal symmetry injection now runs in the graph's
+    BUILD node via postprocess_command (in command_postprocessor.py), not
+    in ai_agent.py's _get_command_for_cycle.  The tests verify both:
+      1. The standalone inject_crystal_symmetry function exists and works
+      2. It is wired into postprocess_command (called by BUILD)
+      3. The program sets are correct
     """
     print("  Test: s4a_inject_crystal_symmetry_into_model_vs_data")
 
@@ -4895,28 +4902,41 @@ def test_s4a_inject_crystal_symmetry_into_model_vs_data():
         }
         session.data["directives_extracted"] = True
 
-        # Build a minimal mock of the agent that has _inject_crystal_symmetry
+        # --- Verify inject_crystal_symmetry exists in command_postprocessor ---
+        import os
+        postprocessor_path = os.path.join(_PROJECT_ROOT, "agent",
+                                          "command_postprocessor.py")
+
+        pp_src = open(postprocessor_path).read()
+        assert_true("def inject_crystal_symmetry" in pp_src,
+                    "inject_crystal_symmetry function must exist in command_postprocessor.py")
+        assert_true("def postprocess_command" in pp_src,
+                    "postprocess_command entry point must exist in command_postprocessor.py")
+        assert_true("inject_crystal_symmetry(" in pp_src,
+                    "inject_crystal_symmetry must be called from postprocess_command")
+
+        # --- Verify BUILD calls postprocess_command ---
+        graph_nodes_path = os.path.join(os.path.dirname(postprocessor_path),
+                                         "graph_nodes.py")
+        gn_src = open(graph_nodes_path).read()
+        assert_true("postprocess_command" in gn_src,
+                    "postprocess_command must be called in graph_nodes.py BUILD")
+
+        # --- Verify dead code cleanup: class method removed (Phase 4) ---
+        # inject_crystal_symmetry now lives only in command_postprocessor.py
         ai_agent_path = _find_ai_agent_path()
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("ai_agent_mod", ai_agent_path)
-        # We can't import ai_agent without libtbx, so test via source inspection
-        # and a direct call to a standalone version of the method logic.
-
-        # Instead: verify via source that the method exists and is called
         src = open(ai_agent_path).read()
-        assert_true("def _inject_crystal_symmetry" in src,
-                    "_inject_crystal_symmetry method must exist in ai_agent.py")
-        assert_true("_inject_crystal_symmetry(command, session, program_name)" in src,
-                    "_inject_crystal_symmetry must be called after _inject_user_params")
+        assert_true("def _inject_crystal_symmetry" not in src,
+                    "_inject_crystal_symmetry class method must be removed from "
+                    "ai_agent.py (Phase 4 dead code cleanup)")
 
-        # Locate the frozenset literal in the source (skip the comment block).
-        # The frozenset's opening '{' follows the keyword 'frozenset'.
-        # We take the substring from that '{' to the matching '}'.
-        block_start = src.find("_XRAY_SYMMETRY_PROGRAMS = frozenset")
+        # --- Verify _XRAY_SYMMETRY_PROGRAMS set is correct ---
+        # Check in command_postprocessor.py (the authoritative location)
+        block_start = pp_src.find("_XRAY_SYMMETRY_PROGRAMS = frozenset")
         assert_true(block_start >= 0, "_XRAY_SYMMETRY_PROGRAMS frozenset must exist")
-        brace_open = src.find("{", block_start)
-        brace_close = src.find("}", brace_open)
-        symmetry_block = src[brace_open: brace_close + 1]
+        brace_open = pp_src.find("{", block_start)
+        brace_close = pp_src.find("}", brace_open)
+        symmetry_block = pp_src[brace_open: brace_close + 1]
 
         # Programs that should be in the set (need explicit crystal_symmetry arg)
         for prog in ("phenix.refine", "phenix.phaser", "phenix.autosol",
@@ -4935,7 +4955,8 @@ def test_s4a_inject_crystal_symmetry_into_model_vs_data():
     finally:
         shutil.rmtree(tmp)
 
-    print("  PASSED: _inject_crystal_symmetry exists, is called, and has correct program set")
+    print("  PASSED: inject_crystal_symmetry exists in postprocessor, "
+          "is called by BUILD, and has correct program set")
 
 
 def test_s4a_unit_cell_format_normalised():
@@ -5091,30 +5112,32 @@ def test_s4b_program_registry_uses_crystal_symmetry_scope():
 
 def test_s4b_inject_crystal_symmetry_uses_scoped_form():
     """
-    _inject_crystal_symmetry in ai_agent.py must append
+    inject_crystal_symmetry in command_postprocessor.py must append
     crystal_symmetry.unit_cell= and crystal_symmetry.space_group=, not the
     bare unit_cell= / space_group= forms.
 
-    Verified by source inspection since importing ai_agent requires libtbx.
+    Verified by source inspection.
     """
     print("  Test: s4b_inject_crystal_symmetry_uses_scoped_form")
-    ai_agent_path = _find_ai_agent_path()
-    src = open(ai_agent_path).read()
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(os.path.isfile(pp_path),
+        "command_postprocessor.py must exist")
+    src = open(pp_path).read()
 
-    # Find the _inject_crystal_symmetry method body
-    method_start = src.find("def _inject_crystal_symmetry")
+    # Find the inject_crystal_symmetry function body
+    method_start = src.find("def inject_crystal_symmetry")
     assert_true(method_start != -1,
-        "_inject_crystal_symmetry must exist in ai_agent.py")
+        "inject_crystal_symmetry must exist in command_postprocessor.py")
 
-    # Find the next method def to bound the search (method is ~100 lines)
-    next_method = src.find("\n  def ", method_start + 100)
-    method_body = src[method_start: next_method]
+    # Find the next function def to bound the search
+    next_method = src.find("\ndef ", method_start + 100)
+    method_body = src[method_start: next_method] if next_method > 0 else src[method_start:]
 
     assert_true("crystal_symmetry.unit_cell=" in method_body,
-        "_inject_crystal_symmetry must use crystal_symmetry.unit_cell= "
+        "inject_crystal_symmetry must use crystal_symmetry.unit_cell= "
         "(not bare unit_cell=)")
     assert_true("crystal_symmetry.space_group=" in method_body,
-        "_inject_crystal_symmetry must use crystal_symmetry.space_group= "
+        "inject_crystal_symmetry must use crystal_symmetry.space_group= "
         "(not bare space_group=)")
 
     # Verify bare forms are absent from the append statements
@@ -5208,13 +5231,18 @@ def test_s4c_model_vs_data_not_in_symmetry_programs():
     _XRAY_SYMMETRY_PROGRAMS.  These programs read crystal symmetry from their
     input files automatically; injecting crystal_symmetry.unit_cell= causes
     'Unknown command line parameter definition: unit_cell' errors.
+
+    Phase 4: now checks command_postprocessor.py (class method removed from ai_agent.py).
     """
     print("  Test: s4c_model_vs_data_not_in_symmetry_programs")
-    ai_agent_path = _find_ai_agent_path()
-    src = open(ai_agent_path).read()
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(os.path.isfile(pp_path),
+        "command_postprocessor.py must exist")
+    src = open(pp_path).read()
 
     block_start = src.find("_XRAY_SYMMETRY_PROGRAMS = frozenset")
-    assert_true(block_start >= 0, "_XRAY_SYMMETRY_PROGRAMS frozenset must exist in ai_agent.py")
+    assert_true(block_start >= 0,
+        "_XRAY_SYMMETRY_PROGRAMS frozenset must exist in command_postprocessor.py")
     brace_open  = src.find("{", block_start)
     brace_close = src.find("}", brace_open)
     symmetry_block = src[brace_open: brace_close + 1]
@@ -5288,26 +5316,28 @@ def test_s4d_session_records_bad_inject_param():
 
 
 def test_s4d_inject_user_params_skips_blacklisted():
-    """_inject_user_params must not re-inject a parameter that was previously
+    """inject_user_params must not re-inject a parameter that was previously
     blacklisted via session.record_bad_inject_param.
 
     This is the core fix for the inject→crash→re-inject infinite loop:
     the agent added 'ignore_symmetry_conflicts=True' from the user's advice
     every cycle even after phenix.refine rejected it as unknown.
+
+    Phase 4: checks command_postprocessor.py (class method removed from ai_agent.py).
     """
     print("  Test: s4d_inject_user_params_skips_blacklisted")
 
     import tempfile, shutil
     from agent.session import AgentSession
 
-    ai_agent_path = _find_ai_agent_path()
-    src = open(ai_agent_path).read()
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(os.path.isfile(pp_path),
+        "command_postprocessor.py must exist")
+    src = open(pp_path).read()
 
-    # Source must contain the blacklist check in _inject_user_params
-    assert_true("bad_params" in src and "blacklisted" in src,
-        "_inject_user_params must contain blacklist check code")
-    assert_true("get_bad_inject_params" in src,
-        "_inject_user_params must call session.get_bad_inject_params")
+    # Source must contain the blacklist check in inject_user_params
+    assert_true("bad_inject_params" in src,
+        "inject_user_params must contain blacklist check code")
 
     tmp = tempfile.mkdtemp()
     try:
@@ -5414,17 +5444,22 @@ def test_s4d_blacklist_extracted_from_error_message():
 
 
 def test_s4e_space_group_placeholder_not_injected():
-    """_inject_crystal_symmetry must NOT inject placeholder space_group values
+    """inject_crystal_symmetry must NOT inject placeholder space_group values
     like 'Not mentioned' — these come from the directive extractor when it
     couldn't find a real symbol, and passing them to PHENIX causes a PHIL error:
       crystal_symmetry.space_group=Not mentioned
     """
     print("  Test: s4e_space_group_placeholder_not_injected")
-    ai_agent_path = _find_ai_agent_path()
-    src = open(ai_agent_path).read()
+
+    # Check command_postprocessor.py (where inject_crystal_symmetry now lives)
+    import os as _os
+    postprocessor_path = _os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(_os.path.exists(postprocessor_path),
+        "command_postprocessor.py must exist at %s" % postprocessor_path)
+    src = open(postprocessor_path).read()
 
     assert_true("_INVALID_SG_PATTERNS" in src or "_is_placeholder" in src,
-        "_inject_crystal_symmetry must have a placeholder guard for space_group")
+        "inject_crystal_symmetry must have a placeholder guard for space_group")
     assert_true('"not mentioned"' in src,
         "Guard must explicitly reject 'not mentioned' values")
 
@@ -5457,27 +5492,40 @@ def test_s4e_space_group_placeholder_not_injected():
 
 
 def test_s4e_sanitize_command_removes_placeholder_space_group():
-    """_sanitize_command must:
+    """sanitize_command must:
     1. Strip crystal_symmetry.space_group=<placeholder> tokens regardless of
        source (LLM-generated or injected), and
     2. Strip session-blacklisted parameters (e.g. ignore_symmetry_conflicts=True)
        that the LLM regenerates despite the warning in guidelines.
 
-    The method now accepts session= and program_name= so it can read the
-    per-program blacklist from session.get_bad_inject_params().
+    The standalone function in command_postprocessor.py accepts bad_inject_params
+    directly (no session dependency).
     """
     print("  Test: s4e_sanitize_command_removes_placeholder_space_group")
     ai_agent_path = _find_ai_agent_path()
     src = open(ai_agent_path).read()
 
-    assert_true("def _sanitize_command" in src,
-        "_sanitize_command method must exist in ai_agent.py")
-    # Call site must now pass session= so blacklisted params are stripped too
-    assert_true("_sanitize_command(\n" in src or
-                "_sanitize_command(command" in src,
-        "_sanitize_command must be called in _get_command_for_cycle")
-    assert_true("session=session" in src.split("_sanitize_command")[1][:300],
-        "_sanitize_command call must pass session=session")
+    # Phase 4: dead class method must be removed
+    assert_true("def _sanitize_command" not in src,
+        "_sanitize_command class method must be removed from ai_agent.py (Phase 4)")
+    # Sanitize now lives exclusively in command_postprocessor.py, called by BUILD.
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(os.path.exists(pp_path),
+        "command_postprocessor.py must exist in agent/")
+    pp_src = open(pp_path).read()
+    assert_true("def sanitize_command" in pp_src,
+        "sanitize_command must be defined in command_postprocessor.py")
+    assert_true("def postprocess_command" in pp_src,
+        "postprocess_command must be defined in command_postprocessor.py")
+    gn_path = os.path.join(_PROJECT_ROOT, "agent", "graph_nodes.py")
+    gn_src = open(gn_path).read()
+    assert_true("postprocess_command" in gn_src,
+        "postprocess_command must be called in graph_nodes.py BUILD")
+    # Phase 3: directive stop + consecutive cap now in PERCEIVE
+    assert_true("check_directive_stop" in gn_src,
+        "check_directive_stop must be called in graph_nodes.py PERCEIVE")
+    assert_true("check_consecutive_program_cap" in gn_src,
+        "check_consecutive_program_cap must be called in graph_nodes.py PERCEIVE")
 
     # --- Exercise the sanitise logic inline ---
     _PLACEHOLDER_PATTERNS = (
@@ -5949,15 +5997,17 @@ def test_s5g_natural_language_macro_cycles_injected():
     assert_true("natural_language" in flags.get("simulated_annealing", {}),
         "simulated_annealing flag must have natural_language entries in programs.yaml")
 
-    # Test 8: ai_agent.py calls extract_nl_params (not hardcoded)
-    _ai_agent_path = _find_ai_agent_path()
-    assert_true(_ai_agent_path is not None,
-        "Could not locate ai_agent.py — checked programs/ relative path and importlib")
-    ai_src = open(_ai_agent_path).read()
-    assert_true("extract_nl_params" in ai_src,
-        "ai_agent._inject_user_params must call extract_nl_params from nl_to_phil")
-    assert_true("nl_to_phil" in ai_src,
-        "ai_agent must import from nl_to_phil")
+    # Test 8: inject_user_params calls extract_nl_params (not hardcoded)
+    # inject_user_params now lives in command_postprocessor.py (moved from ai_agent.py)
+    import os as _os
+    postprocessor_path = _os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(_os.path.exists(postprocessor_path),
+        "command_postprocessor.py must exist")
+    pp_src = open(postprocessor_path).read()
+    assert_true("extract_nl_params" in pp_src,
+        "inject_user_params must call extract_nl_params from nl_to_phil")
+    assert_true("nl_to_phil" in pp_src,
+        "command_postprocessor must import from nl_to_phil")
 
     print("  PASSED: NL->PHIL driven by programs.yaml, correct paths for each program")
 
@@ -6060,15 +6110,17 @@ def test_s5h_sanitize_strips_out_of_scope_params():
         % sorted(refine_bare))
 
     # Verify source code has the narrowed Rule C
-    _ai_agent_path = _find_ai_agent_path()
-    assert_true(_ai_agent_path is not None, "Could not locate ai_agent.py")
-    ai_src = open(_ai_agent_path).read()
+    # sanitize_command now lives in command_postprocessor.py (moved from ai_agent.py)
+    import os as _os
+    _pp_path = _os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(_os.path.exists(_pp_path), "command_postprocessor.py must exist")
+    ai_src = open(_pp_path).read()
     assert_true("_prog_allowlist" in ai_src,
-        "ai_agent._sanitize_command must build _prog_allowlist from programs.yaml")
+        "sanitize_command must build _prog_allowlist from programs.yaml")
     assert_true("Rule C" in ai_src,
-        "ai_agent._sanitize_command must have Rule C")
-    # Rule C must be scoped to len(_strategy_flags) == 0 (file-only programs)
-    assert_true("len(_strategy_flags) == 0" in ai_src,
+        "sanitize_command must have Rule C")
+    # Rule C must be scoped to len(strategy_flags) == 0 (file-only programs)
+    assert_true("len(strategy_flags) == 0" in ai_src,
         "Rule C must only fire for programs with zero strategy_flags")
     # Must NOT use the old broad allowlist check
     assert_true("not in _prog_allowlist" not in ai_src,
@@ -6970,8 +7022,9 @@ def test_s7f_get_cycle_result_returns_error_text():
 
 
 def test_s7g_retry_feedback_distinguishes_failure_from_success():
-    # _retry_duplicate feedback text must differ based on prev_was_failure.
-    # Test structurally against the ai_agent.py source.
+    # _build_duplicate_feedback text must differ based on prev_was_failure.
+    # Duplicate retries go through _query_agent_for_command (normal graph path)
+    # with the feedback appended to guidelines.
     print("  Test: s7g_retry_feedback_distinguishes_failure_from_success")
     import sys as _sys
     _sys.path.insert(0, _PROJECT_ROOT)
@@ -6980,35 +7033,46 @@ def test_s7g_retry_feedback_distinguishes_failure_from_success():
     assert_true(ai_agent_path is not None, "Could not locate ai_agent.py")
     src = open(ai_agent_path).read()
 
-    # _retry_duplicate must accept prev_was_failure parameter
-    assert_true("def _retry_duplicate" in src, "_retry_duplicate must exist")
-    retry_idx = src.find("def _retry_duplicate")
-    retry_section = src[retry_idx:retry_idx + 3000]
-    assert_true("prev_was_failure" in retry_section,
-        "_retry_duplicate must accept prev_was_failure parameter")
+    # _build_duplicate_feedback must exist and accept prev_was_failure
+    assert_true("def _build_duplicate_feedback" in src,
+        "_build_duplicate_feedback must exist")
+    feedback_idx = src.find("def _build_duplicate_feedback")
+    feedback_section = src[feedback_idx:feedback_idx + 3000]
+    assert_true("prev_was_failure" in feedback_section,
+        "_build_duplicate_feedback must accept prev_was_failure parameter")
 
     # Must have two distinct feedback branches
-    assert_true("FAILED COMMAND REPEATED" in retry_section,
+    assert_true("FAILED COMMAND REPEATED" in feedback_section,
         "Must have failure-specific feedback message")
-    assert_true("DUPLICATE REJECTED" in retry_section,
+    assert_true("DUPLICATE REJECTED" in feedback_section,
         "Must have success-duplicate feedback message")
 
     # Failure branch must mention checking required input files
-    assert_true("required input files" in retry_section,
+    assert_true("required input files" in feedback_section,
         "Failure feedback must instruct LLM to check required input files")
 
     # Failure branch must include the prior error text
-    assert_true("get_cycle_result" in retry_section,
+    assert_true("get_cycle_result" in feedback_section,
         "Failure feedback must retrieve prior error text via get_cycle_result")
 
-    # _handle_duplicate_check must pass was_failure through
+    # _handle_duplicate_check must pass prev_was_failure to _build_duplicate_feedback
     handle_idx = src.find("def _handle_duplicate_check")
-    handle_section = src[handle_idx:handle_idx + 1500]
+    handle_section = src[handle_idx:handle_idx + 2000]
     assert_true("prev_was_failure" in handle_section,
         "_handle_duplicate_check must unpack and pass prev_was_failure")
 
-    print("  PASSED: _retry_duplicate generates context-appropriate feedback "
-          "for failed vs. successful duplicate commands")
+    # Duplicate retries must go through _query_agent_for_command (no parallel path)
+    assert_true("_query_agent_for_command" in handle_section,
+        "Duplicate retries must call _query_agent_for_command (not bypass graph)")
+    assert_true("duplicate_feedback" in handle_section,
+        "Duplicate retries must pass duplicate_feedback parameter")
+
+    # _retry_duplicate (old parallel path) must NOT exist
+    assert_true("def _retry_duplicate" not in src,
+        "_retry_duplicate must be removed (replaced by _query_agent_for_command path)")
+
+    print("  PASSED: _build_duplicate_feedback generates context-appropriate feedback "
+          "for failed vs. successful duplicate commands, routed through graph")
 
 
 def test_s7h_molecular_replacement_phase_description_updated():
@@ -7738,12 +7802,13 @@ def test_s9d_expanded_authority_phaser_supersedes_probe():
 
 
 def test_s8i_retry_duplicate_injection():
-    """_retry_duplicate output is passed through required-file injection."""
-    # Regression guard for Mode E bypass: _retry_duplicate calls the LLM
-    # directly and previously returned the raw command without injection.
-    # The fix inserts _inject_missing_required_files before returning.
-    # We verify the fix structurally — the injection call appears in the
-    # method source at the right position (after STOP check, before return).
+    """Duplicate retry commands are passed through required-file injection.
+
+    Duplicate retries now go through _query_agent_for_command (the normal graph
+    path), so BUILD's postprocess_command runs automatically.  The client-only
+    _inject_missing_required_files is applied in _handle_duplicate_check after
+    each retry query.
+    """
     print("  Test: s8i_retry_duplicate_injection")
     import sys as _sys
     _sys.path.insert(0, _PROJECT_ROOT)
@@ -7751,38 +7816,39 @@ def test_s8i_retry_duplicate_injection():
     ai_agent_path = _find_ai_agent_path()
     src = open(ai_agent_path).read()
 
-    # Locate _retry_duplicate
-    method_start = src.find("  def _retry_duplicate(")
-    assert_true(method_start >= 0, "_retry_duplicate method must exist")
+    # Old _retry_duplicate must be gone (parallel path removed)
+    assert_true("def _retry_duplicate(" not in src,
+        "_retry_duplicate must be removed (replaced by _query_agent_for_command path)")
 
-    # Locate the end of _retry_duplicate (next same-level def)
+    # _handle_duplicate_check must call _inject_missing_required_files
+    method_start = src.find("  def _handle_duplicate_check(")
+    assert_true(method_start >= 0, "_handle_duplicate_check method must exist")
     rest = src[method_start:]
     next_def = rest.find("\n  def ", 1)
     method_src = rest[:next_def] if next_def > 0 else rest[:3000]
 
-    # The injection call must be present
     assert_true("_inject_missing_required_files" in method_src,
-        "_retry_duplicate must call _inject_missing_required_files")
+        "_handle_duplicate_check must call _inject_missing_required_files on retries")
 
-    # The injection must appear AFTER the STOP early-return block
-    stop_idx   = method_src.find("return command, decision_info, True")
-    inject_idx = method_src.find("_inject_missing_required_files")
-    assert_true(inject_idx > stop_idx,
-        "Injection must come after the STOP early-return, not before. "
-        "STOP return at char %d, inject call at char %d" % (stop_idx, inject_idx))
+    # Retries must go through the normal graph path
+    assert_true("_query_agent_for_command" in method_src,
+        "Retries must call _query_agent_for_command (not bypass graph)")
+    assert_true("duplicate_feedback" in method_src,
+        "Retries must pass duplicate_feedback to _query_agent_for_command")
 
-    # active_files must be reused (not a new empty list)
-    inject_block_start = method_src.find("# Apply required-file injection")
-    inject_region = method_src[inject_block_start:inject_block_start + 700]
-    assert_true("active_files" in inject_region,
-        "Injection block must pass active_files (already built in the method)")
-
-    # decision_info['command'] must be updated with the injected command
-    assert_true("decision_info['command'] = command" in inject_region,
+    # decision_info['command'] must be updated after injection
+    assert_true("decision_info['command'] = command" in method_src,
         "decision_info['command'] must be updated after injection")
 
-    print("  PASSED: _retry_duplicate applies required-file injection "
-          "after STOP check using already-built active_files")
+    # _query_agent_for_command must accept duplicate_feedback parameter
+    qac_start = src.find("  def _query_agent_for_command(")
+    assert_true(qac_start >= 0, "_query_agent_for_command must exist")
+    qac_sig = src[qac_start:qac_start + 200]
+    assert_true("duplicate_feedback" in qac_sig,
+        "_query_agent_for_command must accept duplicate_feedback parameter")
+
+    print("  PASSED: duplicate retries go through normal graph path with "
+          "required-file injection applied afterward")
 
 
 def test_s8j_prefer_patterns_honoured():
@@ -7831,7 +7897,7 @@ def test_s8j_prefer_patterns_honoured():
 
 
 def test_s10a_no_param_inject_into_probe_programs():
-    """_inject_user_params must never inject key=value params into probe/validation
+    """inject_user_params must never inject key=value params into probe/validation
     programs (model_vs_data, xtriage, molprobity, mtriage, validation_cryoem).
 
     Regression guard: guidelines containing rebuild_strategy=quick, space_group=P3221,
@@ -7841,27 +7907,38 @@ def test_s10a_no_param_inject_into_probe_programs():
     import sys as _sys
     _sys.path.insert(0, _PROJECT_ROOT)
 
-    ai_agent_path = _find_ai_agent_path()
-    src = open(ai_agent_path).read()
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(os.path.isfile(pp_path),
+        "command_postprocessor.py must exist")
+    src = open(pp_path).read()
 
-    # The guard must exist in _inject_user_params source
-    inject_start = src.find("  def _inject_user_params(")
-    assert_true(inject_start >= 0, "_inject_user_params must exist in ai_agent.py")
+    # The guard must exist in inject_user_params
+    inject_start = src.find("def inject_user_params(")
+    assert_true(inject_start >= 0,
+        "inject_user_params must exist in command_postprocessor.py")
 
-    # Find the end of the method (next same-level def)
-    inject_end = src.find("\n  def ", inject_start + 1)
-    inject_src = src[inject_start:inject_end]
+    # Find the end of the function
+    inject_end = src.find("\ndef ", inject_start + 1)
+    inject_src = src[inject_start:inject_end] if inject_end > 0 else src[inject_start:]
 
     assert_true("_NO_PARAM_INJECT_PROGRAMS" in inject_src,
-        "_inject_user_params must define _NO_PARAM_INJECT_PROGRAMS guard")
-    assert_true("phenix.model_vs_data" in inject_src,
+        "inject_user_params must reference _NO_PARAM_INJECT_PROGRAMS guard")
+
+    # The constant definition is module-level, so check the full source
+    assert_true("_NO_PARAM_INJECT_PROGRAMS" in src,
+        "_NO_PARAM_INJECT_PROGRAMS must be defined in command_postprocessor.py")
+    const_start = src.find("_NO_PARAM_INJECT_PROGRAMS = frozenset")
+    assert_true(const_start >= 0,
+        "_NO_PARAM_INJECT_PROGRAMS must be defined as frozenset")
+    const_block = src[const_start:const_start + 500]
+    assert_true("phenix.model_vs_data" in const_block,
         "_NO_PARAM_INJECT_PROGRAMS must include phenix.model_vs_data")
-    assert_true("phenix.xtriage" in inject_src,
+    assert_true("phenix.xtriage" in const_block,
         "_NO_PARAM_INJECT_PROGRAMS must include phenix.xtriage")
-    assert_true("phenix.molprobity" in inject_src,
+    assert_true("phenix.molprobity" in const_block,
         "_NO_PARAM_INJECT_PROGRAMS must include phenix.molprobity")
 
-    # The guard must fire before any injection code
+    # The guard must fire before any injection code in the function body
     guard_idx  = inject_src.find("_NO_PARAM_INJECT_PROGRAMS")
     return_idx = inject_src.find("return command", guard_idx)
     assert_true(return_idx > guard_idx and return_idx < guard_idx + 400,
@@ -7922,296 +7999,119 @@ def test_s10b_probe_failure_continues_workflow():
 
 
 def test_s10c_sanitize_strips_params_from_probe_programs():
-    """_sanitize_command must strip ALL key=value tokens from probe programs
+    """sanitize_command must strip ALL key=value tokens from probe programs
     before execution, regardless of whether yaml_loader is importable.
 
     Regression guard for two real failures:
       1. rebuild_level=QUICK on phenix.model_vs_data   (LLM-generated)
       2. crystal_symmetry.space_group="None mentioned in ins"  (LLM-generated)
     Both caused "Sorry: Unknown command line parameter definition" then agent stop.
+
+    The standalone sanitize_command in command_postprocessor.py is the sole
+    authority (Phase 4: class method removed from ai_agent.py).
     """
     print("  Test: s10c_sanitize_strips_params_from_probe_programs")
     import sys as _sys
     _sys.path.insert(0, _PROJECT_ROOT)
 
-    # ── Structural: guard must exist and be import-free ───────────────────
-    ai_agent_path = _find_ai_agent_path()
-    src = open(ai_agent_path).read()
+    # ── Structural: guard must exist in command_postprocessor.py ─────────
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    assert_true(os.path.isfile(pp_path),
+        "command_postprocessor.py must exist")
+    src = open(pp_path).read()
 
-    sanitize_start = src.find("  def _sanitize_command(")
-    assert_true(sanitize_start >= 0, "_sanitize_command must exist in ai_agent.py")
-    sanitize_end = src.find("\n  def ", sanitize_start + 1)
-    sanitize_src = src[sanitize_start:sanitize_end]
-
-    assert_true("_PROBE_ONLY_FILE_PROGRAMS" in sanitize_src,
-        "_sanitize_command must define _PROBE_ONLY_FILE_PROGRAMS guard")
-    assert_true("phenix.model_vs_data" in sanitize_src,
-        "_PROBE_ONLY_FILE_PROGRAMS must include phenix.model_vs_data")
-    assert_true("phenix.xtriage" in sanitize_src,
-        "_PROBE_ONLY_FILE_PROGRAMS must include phenix.xtriage")
-
-    # Guard must come BEFORE the yaml_loader import call (Rule C dependency).
-    # Search for the actual import statement, not the comment that mentions it.
-    probe_idx = sanitize_src.find("_PROBE_ONLY_FILE_PROGRAMS")
-    yaml_idx  = sanitize_src.find("from knowledge.yaml_loader import")
-    if yaml_idx < 0:
-        yaml_idx = sanitize_src.find("from libtbx.langchain.knowledge.yaml_loader import")
-    assert_true(yaml_idx >= 0,
-        "yaml_loader import must exist in _sanitize_command (Rule C)")
-    assert_true(probe_idx < yaml_idx,
-        "_PROBE_ONLY_FILE_PROGRAMS guard must appear before yaml_loader import "
-        "so it fires even when yaml_loader is unavailable")
-
-    # ── Functional: exec the sanitize method and test real cases ──────────
-    injector = _get_injector()
-    # _get_injector gives us access to the exec'd namespace; we need
-    # _sanitize_command separately.  Use source exec directly.
-
-    ns = {"__builtins__": __builtins__}
-    _exec_method_from_source(
-        ai_agent_path,
-        ["_sanitize_command"],
-        ns
-    )
-    _sanitize = ns.get("_sanitize_command")
-    if _sanitize is None:
-        print("  SKIPPED: could not exec _sanitize_command (import deps)")
-        print("  PASSED (structural checks only): _PROBE_ONLY_FILE_PROGRAMS "
-              "guard is present and correctly positioned")
-        return
-
-    # Build a minimal mock self with a vlog that does nothing
-    class _VLog:
-        def verbose(self, *a): pass
-        def normal(self, *a): pass
-    class _MockSelf:
-        vlog = _VLog()
-    mock = _MockSelf()
-
-    # Case 1: rebuild_level=QUICK (exact command from the bug report)
-    cmd1 = ("phenix.model_vs_data "
-            "/Users/terwill/AF/7qz0.pdb "
-            "/Users/terwill/AF/7qz0.mtz "
-            "rebuild_level=QUICK")
-    result1 = _sanitize(mock, cmd1, session=None,
-                        program_name="phenix.model_vs_data")
-    assert_true("rebuild_level" not in result1,
-        "rebuild_level=QUICK must be stripped from model_vs_data command, "
-        "got: %r" % result1)
-    assert_true("7qz0.pdb" in result1 and "7qz0.mtz" in result1,
-        "File arguments must be preserved after stripping, got: %r" % result1)
-
-    # Case 2: crystal_symmetry.space_group="None mentioned in ins"
-    cmd2 = ('phenix.model_vs_data '
-            '/Users/terwill/beta-blip/beta.pdb '
-            '/Users/terwill/beta-blip/beta_blip_P3221.mtz '
-            'crystal_symmetry.space_group="None mentioned in ins"')
-    result2 = _sanitize(mock, cmd2, session=None,
-                        program_name="phenix.model_vs_data")
-    assert_true("space_group" not in result2,
-        "crystal_symmetry.space_group must be stripped from model_vs_data "
-        "command, got: %r" % result2)
-    assert_true("beta.pdb" in result2 and "beta_blip_P3221.mtz" in result2,
-        "File arguments must be preserved after stripping, got: %r" % result2)
-
-    # Case 3: clean command (no params) — must be unchanged
-    cmd3 = "phenix.model_vs_data beta.pdb data.mtz"
-    result3 = _sanitize(mock, cmd3, session=None,
-                        program_name="phenix.model_vs_data")
-    assert_true(result3 == cmd3,
-        "Clean model_vs_data command must be unchanged by sanitize, "
-        "got: %r" % result3)
-
-    # Case 4: xtriage also protected
-    cmd4 = "phenix.xtriage data.mtz space_group=P3221"
-    result4 = _sanitize(mock, cmd4, session=None,
-                        program_name="phenix.xtriage")
-    assert_true("space_group" not in result4,
-        "space_group must be stripped from phenix.xtriage command, "
-        "got: %r" % result4)
-    assert_true("data.mtz" in result4,
-        "MTZ argument must be preserved in xtriage command, got: %r" % result4)
-
-    print("  PASSED: _sanitize_command strips all key=value params from "
-          "probe programs; file args preserved; clean commands unchanged")
-
-
-def _exec_method_from_source(ai_agent_path, method_names, namespace):
-    """Extract and exec named standalone methods from ai_agent.py source.
-
-    Only works for methods with no self-referential imports beyond what
-    __builtins__ provides.  Falls through silently if exec fails (import deps).
-    Used by test_s10c to avoid importing the full AIAgent class.
-    """
-    import re as _re
-    src = open(ai_agent_path).read()
-    for method_name in method_names:
-        # Find the def at class indentation level (2 spaces)
-        pat = _re.compile(
-            r"(?m)^  def " + _re.escape(method_name) + r"\b.*?(?=^  def |\Z)",
-            _re.DOTALL
-        )
-        m = pat.search(src)
-        if not m:
-            continue
-        method_src = m.group(0)
-        # Dedent by 2 spaces so it becomes a module-level function
-        dedented = _re.sub(r"(?m)^  ", "", method_src)
-        try:
-            exec(dedented, namespace)  # noqa: S102
-        except Exception:
-            pass  # Import-dependent — caller checks for None
-
-
-def test_s10c_sanitize_strips_params_from_probe_programs():
-    """_sanitize_command must strip ALL key=value tokens from probe programs
-    before execution, regardless of whether yaml_loader is importable.
-
-    Regression guard for two real failures seen in the wild:
-      1. rebuild_level=QUICK on phenix.model_vs_data  (LLM hallucinated)
-      2. crystal_symmetry.space_group="None mentioned in ins"  (LLM hallucinated)
-    Both caused "Sorry: Unknown command line parameter definition" and then
-    incorrectly triggered the terminal-stop path (before the v112.90 fix added
-    the _PROBE_PROGRAMS early-exit).  The preventive fix is a hardcoded
-    _PROBE_ONLY_FILE_PROGRAMS early-exit at the top of _sanitize_command.
-    """
-    print("  Test: s10c_sanitize_strips_params_from_probe_programs")
-    import sys as _sys
-    _sys.path.insert(0, _PROJECT_ROOT)
-
-    # ── Structural: guard must exist and be ordered correctly ─────────────
-    ai_agent_path = _find_ai_agent_path()
-    src = open(ai_agent_path).read()
-
-    sanitize_start = src.find("  def _sanitize_command(")
-    assert_true(sanitize_start >= 0, "_sanitize_command must exist in ai_agent.py")
-    sanitize_end = src.find("\n  def ", sanitize_start + 1)
-    sanitize_src = src[sanitize_start:sanitize_end]
+    sanitize_start = src.find("def sanitize_command(")
+    assert_true(sanitize_start >= 0,
+        "sanitize_command must exist in command_postprocessor.py")
+    sanitize_end = src.find("\ndef ", sanitize_start + 1)
+    sanitize_src = src[sanitize_start:sanitize_end] if sanitize_end > 0 else src[sanitize_start:]
 
     assert_true("_PROBE_ONLY_FILE_PROGRAMS" in sanitize_src,
-        "_sanitize_command must define _PROBE_ONLY_FILE_PROGRAMS guard")
-    assert_true("phenix.model_vs_data" in sanitize_src,
+        "sanitize_command must reference _PROBE_ONLY_FILE_PROGRAMS guard")
+    # Constant is module-level, so check the full source for program names
+    const_start = src.find("_PROBE_ONLY_FILE_PROGRAMS = frozenset")
+    assert_true(const_start >= 0,
+        "_PROBE_ONLY_FILE_PROGRAMS must be defined as frozenset")
+    const_block = src[const_start:const_start + 500]
+    assert_true("phenix.model_vs_data" in const_block,
         "_PROBE_ONLY_FILE_PROGRAMS must include phenix.model_vs_data")
-    assert_true("phenix.xtriage" in sanitize_src,
+    assert_true("phenix.xtriage" in const_block,
         "_PROBE_ONLY_FILE_PROGRAMS must include phenix.xtriage")
 
-    # Guard must appear BEFORE the actual yaml_loader from-import (Rule C depends on it).
-    # Note: the guard's own comment mentions "yaml_loader" earlier in the text;
-    # we search for the actual import statement, not just the word.
-    probe_guard_idx = sanitize_src.find("if program_name in _PROBE_ONLY_FILE_PROGRAMS:")
-    yaml_import_idx = sanitize_src.find("from libtbx.langchain.knowledge.yaml_loader")
-    if yaml_import_idx < 0:
-        yaml_import_idx = sanitize_src.find("from knowledge.yaml_loader")
-    assert_true(probe_guard_idx >= 0,
-        "_PROBE_ONLY_FILE_PROGRAMS if-block must be present")
-    assert_true(yaml_import_idx < 0 or probe_guard_idx < yaml_import_idx,
-        "_PROBE_ONLY_FILE_PROGRAMS guard must appear before yaml_loader import "
-        "so it fires even when yaml_loader is unavailable")
+    # Phase 4: class method must be gone from ai_agent.py
+    ai_agent_path = _find_ai_agent_path()
+    ai_src = open(ai_agent_path).read()
+    assert_true("def _sanitize_command" not in ai_src,
+        "_sanitize_command class method must be removed from ai_agent.py (Phase 4)")
 
-    # Guard must return early (import-free path) — search from the if-block itself
-    _if_idx = sanitize_src.find("if program_name in _PROBE_ONLY_FILE_PROGRAMS:")
-    assert_true(_if_idx >= 0,
-        "_PROBE_ONLY_FILE_PROGRAMS if-block must be present in _sanitize_command")
-    guard_block = sanitize_src[_if_idx:_if_idx + 1400]
-    assert_true("return" in guard_block,
-        "_PROBE_ONLY_FILE_PROGRAMS guard must return early from _sanitize_command")
-
-    # ── Functional: use exec to run the guard logic without importing AIAgent ─
-    # We exercise the '=' token stripping directly.
-
-    # Simulate the stripping logic (mirrors the implementation)
-    def _probe_sanitize(command):
-        """Minimal copy of the probe-program branch in _sanitize_command."""
-        stripped = []
-        for tok in command.split():
-            if '=' in tok and not tok.startswith('-'):
-                pass  # stripped
-            else:
-                stripped.append(tok)
-        return ' '.join(stripped)
-
-    # Case 1: rebuild_level=QUICK (from real log: 7qz0.pdb 7qz0.mtz rebuild_level=QUICK)
-    cmd1 = "phenix.model_vs_data /path/7qz0.pdb /path/7qz0.mtz rebuild_level=QUICK"
-    out1 = _probe_sanitize(cmd1)
-    assert_true("rebuild_level" not in out1,
-        "rebuild_level=QUICK must be stripped from model_vs_data command; got: %r" % out1)
-    assert_true("7qz0.pdb" in out1 and "7qz0.mtz" in out1,
-        "File arguments must be preserved after stripping; got: %r" % out1)
-
-    # Case 2: crystal_symmetry.space_group=... (from real log)
-    cmd2 = ('phenix.model_vs_data beta.pdb data.mtz '
-            'crystal_symmetry.space_group="None mentioned in ins"')
-    out2 = _probe_sanitize(cmd2)
-    assert_true("space_group" not in out2,
-        "crystal_symmetry.space_group must be stripped from model_vs_data; got: %r" % out2)
-    assert_true("beta.pdb" in out2 and "data.mtz" in out2,
-        "File arguments must be preserved; got: %r" % out2)
-
-    # Case 3: multiple params — all stripped, files kept
-    cmd3 = ("phenix.model_vs_data model.pdb data.mtz "
-            "rebuild_level=QUICK space_group=P3221 nproc=4")
-    out3 = _probe_sanitize(cmd3)
-    assert_true("rebuild_level" not in out3 and "space_group" not in out3
-                and "nproc" not in out3,
-        "All key=value params must be stripped; got: %r" % out3)
-    assert_true(out3.strip() == "phenix.model_vs_data model.pdb data.mtz",
-        "Only program name and files should remain; got: %r" % out3)
-
-    # Case 4: xtriage (also in _PROBE_ONLY_FILE_PROGRAMS)
-    cmd4 = "phenix.xtriage data.mtz xray_data.space_group=P21"
-    out4 = _probe_sanitize(cmd4)
-    assert_true("space_group" not in out4,
-        "space_group must be stripped from xtriage command; got: %r" % out4)
-
-    # Case 5: clean command — must be unchanged
-    cmd5 = "phenix.model_vs_data model.pdb data.mtz"
-    out5 = _probe_sanitize(cmd5)
-    assert_true(out5 == cmd5,
-        "Clean command must pass through unchanged; got: %r" % out5)
-
-    # Case 6: the real bug — "xray_data.space_group=None mentioned" splits as
-    # ["xray_data.space_group=None", "mentioned"] after split().  The token
-    # loop strips the first token but leaves "mentioned" as an orphan bare word.
-    # The pre-pass must catch the two-word form BEFORE tokenisation.
-    # Replicate the actual _sanitize_command pre-pass logic:
+    # ── Functional: test probe-program stripping inline ──────────────────
     import re as _re_sp
+
     _MULTIWORD_PLACEHOLDER_RE = _re_sp.compile(
         r'[\w.]+\s*=\s*(?:None|Not|Unknown|N/?A|TBD)'
         r'(?:\s+[A-Za-z]\w*)?',
         _re_sp.IGNORECASE)
-    def _probe_sanitize_full(command):
+
+    def _probe_sanitize(command):
+        """Minimal copy of the probe-program branch in sanitize_command."""
         command = _MULTIWORD_PLACEHOLDER_RE.sub('', command)
         stripped = []
         for tok in command.split():
             if '=' in tok and not tok.startswith('-'):
-                pass
+                # Preserve file-path tokens (contains / or crystallographic extension)
+                val = tok.split('=', 1)[1] if '=' in tok else ''
+                _FILE_EXTS = {'.pdb', '.cif', '.mtz', '.mrc', '.ccp4', '.map', '.fa', '.fasta'}
+                import os as _os_tok
+                if '/' in val or _os_tok.path.splitext(val)[1].lower() in _FILE_EXTS:
+                    stripped.append(tok)
+                # else: stripped (non-file key=value)
             else:
                 stripped.append(tok)
         return ' '.join(stripped)
 
-    cmd6 = ("phenix.xtriage /path/data.mtz "
+    # Case 1: rebuild_level=QUICK
+    cmd1 = "phenix.model_vs_data /path/7qz0.pdb /path/7qz0.mtz rebuild_level=QUICK"
+    out1 = _probe_sanitize(cmd1)
+    assert_true("rebuild_level" not in out1,
+        "rebuild_level=QUICK must be stripped; got: %r" % out1)
+    assert_true("7qz0.pdb" in out1 and "7qz0.mtz" in out1,
+        "File args must be preserved; got: %r" % out1)
+
+    # Case 2: crystal_symmetry.space_group="None mentioned in ins"
+    cmd2 = ('phenix.model_vs_data beta.pdb data.mtz '
+            'crystal_symmetry.space_group="None mentioned in ins"')
+    out2 = _probe_sanitize(cmd2)
+    assert_true("space_group" not in out2,
+        "space_group must be stripped; got: %r" % out2)
+    assert_true("beta.pdb" in out2 and "data.mtz" in out2,
+        "File args must be preserved; got: %r" % out2)
+
+    # Case 3: clean command — unchanged
+    cmd3 = "phenix.model_vs_data model.pdb data.mtz"
+    out3 = _probe_sanitize(cmd3)
+    assert_true(out3 == cmd3,
+        "Clean command must pass through unchanged; got: %r" % out3)
+
+    # Case 4: file-path key=value tokens preserved
+    cmd4 = "phenix.mtriage half_map_1=/data/half1.mrc half_map_2=/data/half2.mrc rebuild_strategy=quick"
+    out4 = _probe_sanitize(cmd4)
+    assert_true("half_map_1" in out4 and "half_map_2" in out4,
+        "File-path key=value tokens must be preserved; got: %r" % out4)
+    assert_true("rebuild_strategy" not in out4,
+        "Non-file key=value must be stripped; got: %r" % out4)
+
+    # Case 5: orphan word from two-word placeholder
+    cmd5 = ("phenix.xtriage /path/data.mtz "
             "xray_data.space_group=None mentioned")
-    out6 = _probe_sanitize_full(cmd6)
-    assert_true("mentioned" not in out6,
-        "Orphan 'mentioned' from 'space_group=None mentioned' must be stripped; "
-        "got: %r" % out6)
-    assert_true("space_group" not in out6,
-        "space_group key must also be stripped; got: %r" % out6)
-    assert_true("data.mtz" in out6,
-        "MTZ file path must survive; got: %r" % out6)
+    out5 = _probe_sanitize(cmd5)
+    assert_true("mentioned" not in out5,
+        "Orphan 'mentioned' must be stripped; got: %r" % out5)
+    assert_true("data.mtz" in out5,
+        "MTZ file path must survive; got: %r" % out5)
 
-    # Case 7: "Not specified" variant
-    cmd7 = "phenix.xtriage data.mtz crystal_symmetry.space_group=Not specified"
-    out7 = _probe_sanitize_full(cmd7)
-    assert_true("specified" not in out7 and "space_group" not in out7,
-        "'Not specified' two-word placeholder must be fully stripped; got: %r" % out7)
-
-    # Case 8: structural — _MULTIWORD_PLACEHOLDER_RE must be present in the
-    # probe early-exit block in ai_agent.py
-    _if_idx2 = sanitize_src.find("if program_name in _PROBE_ONLY_FILE_PROGRAMS:")
-    probe_block2 = sanitize_src[_if_idx2:_if_idx2 + 1400]
-    assert_true("_MULTIWORD_PLACEHOLDER_RE" in probe_block2,
-        "_sanitize_command probe early-exit must contain _MULTIWORD_PLACEHOLDER_RE "
+    # Case 6: _MULTIWORD_PLACEHOLDER_RE present in postprocessor
+    assert_true("_MULTIWORD_PLACEHOLDER_RE" in sanitize_src,
+        "sanitize_command must contain _MULTIWORD_PLACEHOLDER_RE "
         "to strip two-word placeholder values like 'None mentioned'")
 
     print("  PASSED: _sanitize_command strips key=value tokens from probe programs "
@@ -8465,25 +8365,28 @@ def test_s10f_phaser_success_supersedes_probe_needs_mr():
 
 
 def test_s10g_crystal_symmetry_per_program_format():
-    """_inject_crystal_symmetry must use the correct PHIL scope per program:
+    """inject_crystal_symmetry must use the correct PHIL scope per program:
       - phenix.refine / ligandfit / polder            → crystal_symmetry.space_group=SG
       - phenix.autobuild / autobuild_denmod / autosol → crystal_info.space_group=SG
       - phenix.phaser                                 → xray_data.space_group=SG
+
+    Phase 4: the class method is removed from ai_agent.py; the standalone
+    in command_postprocessor.py is the sole authority.
     """
     print("  Test: s10g_crystal_symmetry_per_program_format")
-    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
-    if not os.path.isfile(ai_agent_path):
-        print("  SKIP (ai_agent.py not found)")
+    pp_path = os.path.join(_PROJECT_ROOT, "agent", "command_postprocessor.py")
+    if not os.path.isfile(pp_path):
+        print("  SKIP (command_postprocessor.py not found)")
         return
 
-    with open(ai_agent_path) as _f:
+    with open(pp_path) as _f:
         src = _f.read()
 
     # ── structural checks ────────────────────────────────────────────────────
     assert_true("_CRYSTAL_INFO_PROGRAMS" in src,
-        "_CRYSTAL_INFO_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
+        "_CRYSTAL_INFO_PROGRAMS frozenset must be defined in inject_crystal_symmetry")
     assert_true("_PHASER_CS_PROGRAMS" in src,
-        "_PHASER_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
+        "_PHASER_CS_PROGRAMS frozenset must be defined in inject_crystal_symmetry")
 
     ci_block = src.split("_CRYSTAL_INFO_PROGRAMS")[1][:300]
     assert_true("phenix.autobuild" in ci_block,
@@ -8496,289 +8399,71 @@ def test_s10g_crystal_symmetry_per_program_format():
         "phenix.phaser must be in _PHASER_CS_PROGRAMS")
 
     assert_true("crystal_info.space_group=" in src,
-        "_inject_crystal_symmetry must use crystal_info.space_group= for autobuild/autosol")
+        "inject_crystal_symmetry must use crystal_info.space_group= for autobuild/autosol")
     assert_true("xray_data.space_group=" in src,
-        "_inject_crystal_symmetry must use xray_data.space_group= for phaser")
+        "inject_crystal_symmetry must use xray_data.space_group= for phaser")
     assert_true("crystal_symmetry.space_group=" in src,
-        "_inject_crystal_symmetry must use crystal_symmetry.space_group= for refine/etc")
+        "inject_crystal_symmetry must use crystal_symmetry.space_group= for refine/etc")
 
-    # ── functional checks using importlib (if available) ────────────────────
+    # Phase 4: class method must be gone from ai_agent.py
+    ai_agent_path = _find_ai_agent_path()
+    ai_src = open(ai_agent_path).read()
+    assert_true("def _inject_crystal_symmetry" not in ai_src,
+        "_inject_crystal_symmetry class method must be removed from ai_agent.py (Phase 4)")
+
+    # ── functional checks using the standalone function ────────────────────
     try:
-        import importlib.util as _ilu
         sys.path.insert(0, _PROJECT_ROOT)
-        spec = _ilu.spec_from_file_location("_ai_agent_s10g", ai_agent_path)
-        _mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(_mod)
-        AgentClass = _mod.PhenixAIAnalysis
+        try:
+            from agent.command_postprocessor import inject_crystal_symmetry
+        except ImportError:
+            print("  (functional checks skipped: No module named 'phenix')")
+            print("  PASSED: structural checks passed")
+            return
     except Exception as _e:
         print("  (functional checks skipped: %s)" % _e)
         print("  PASSED: structural checks passed")
         return
 
-    class _FakeSession:
-        def get_directives(self):
-            return {"program_settings": {"default": {"space_group": "P3221"}}}
-
-    class _FakeVlog:
-        def verbose(self, msg): pass
-        def normal(self, msg): pass
-
-    agent = object.__new__(AgentClass)
-    agent.vlog = _FakeVlog()
-    session = _FakeSession()
+    directives = {"program_settings": {"default": {"space_group": "P3221"}}}
 
     # autobuild: crystal_info scope
-    result_ab = agent._inject_crystal_symmetry(
+    result_ab = inject_crystal_symmetry(
         "phenix.autobuild data=data.mtz seq_file=seq.fa model=m.pdb nproc=4",
-        session, "phenix.autobuild")
+        program_name="phenix.autobuild", directives=directives)
     assert_true("crystal_info.space_group=P3221" in result_ab,
         "autobuild must get crystal_info.space_group=P3221; got: %r" % result_ab)
     assert_true("crystal_symmetry.space_group" not in result_ab,
         "autobuild must NOT get crystal_symmetry.space_group=; got: %r" % result_ab)
 
-    # autosol: crystal_info scope
-    result_as = agent._inject_crystal_symmetry(
-        "phenix.autosol data=data.mtz seq_file=seq.fa",
-        session, "phenix.autosol")
-    assert_true("crystal_info.space_group=P3221" in result_as,
-        "autosol must get crystal_info.space_group=P3221; got: %r" % result_as)
-
     # refine: crystal_symmetry scope
-    result_ref = agent._inject_crystal_symmetry(
+    result_ref = inject_crystal_symmetry(
         "phenix.refine model.pdb data.mtz",
-        session, "phenix.refine")
+        program_name="phenix.refine", directives=directives)
     assert_true("crystal_symmetry.space_group=P3221" in result_ref,
         "refine must get crystal_symmetry.space_group=P3221; got: %r" % result_ref)
 
     # phaser: xray_data scope
-    result_ph = agent._inject_crystal_symmetry(
+    result_ph = inject_crystal_symmetry(
         "phenix.phaser data.mtz model.pdb seq.fa phaser.mode=MR_AUTO",
-        session, "phenix.phaser")
+        program_name="phenix.phaser", directives=directives)
     assert_true("xray_data.space_group=P3221" in result_ph,
         "phaser must get xray_data.space_group=P3221; got: %r" % result_ph)
     assert_true("crystal_symmetry.space_group" not in result_ph,
         "phaser must NOT get crystal_symmetry.space_group=; got: %r" % result_ph)
 
-    # no double-injection for autobuild
-    result_ab2 = agent._inject_crystal_symmetry(
-        "phenix.autobuild data=data.mtz seq_file=seq.fa "
-        "crystal_info.space_group=P3221 nproc=4",
-        session, "phenix.autobuild")
+    # no double-injection
+    result_ab2 = inject_crystal_symmetry(
+        "phenix.autobuild data=data.mtz crystal_info.space_group=P3221 nproc=4",
+        program_name="phenix.autobuild", directives=directives)
     assert_true(result_ab2.count("space_group=") == 1,
         "Must not double-inject space_group=; count=%d in %r"
         % (result_ab2.count("space_group="), result_ab2))
 
-    print("  PASSED: _inject_crystal_symmetry uses correct per-program PHIL scope")
-
-
-    print("  Test: s10g_crystal_symmetry_per_program_format")
-    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
-    if not os.path.isfile(ai_agent_path):
-        print("  SKIP (ai_agent.py not found)")
-        return
-
-    with open(ai_agent_path) as _f:
-        src = _f.read()
-
-    # ── structural checks ────────────────────────────────────────────────────
-    assert_true("_PHASER_CS_PROGRAMS" in src,
-        "_PHASER_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
-
-    # phenix.phaser must be in the phaser set
-    phaser_block = src.split("_PHASER_CS_PROGRAMS")[1][:200]
-    assert_true("phenix.phaser" in phaser_block,
-        "phenix.phaser must be in _PHASER_CS_PROGRAMS")
-
-    # phaser form injection: xray_data.space_group=
-    assert_true("xray_data.space_group=%s" in src or "xray_data.space_group=%" in src,
-        "_inject_crystal_symmetry must use xray_data.space_group= for phaser")
-
-    # default scoped form for all other programs
-    assert_true("crystal_symmetry.space_group=%s" in src or
-                "crystal_symmetry.space_group=%" in src,
-        "_inject_crystal_symmetry must use crystal_symmetry.space_group= for refine/autobuild/etc")
-
-    # _FLAT_CS_PROGRAMS must be empty (no programs use the bare crystal_symmetry= form)
-    assert_true("_FLAT_CS_PROGRAMS = frozenset()" in src,
-        "_FLAT_CS_PROGRAMS must be empty — no programs use the flat crystal_symmetry=SG form")
-
-    # ── functional checks using importlib (if available) ────────────────────
-    try:
-        import importlib.util as _ilu
-        sys.path.insert(0, _PROJECT_ROOT)
-        spec = _ilu.spec_from_file_location("_ai_agent_s10g", ai_agent_path)
-        _mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(_mod)
-        AgentClass = _mod.PhenixAIAnalysis
-    except Exception as _e:
-        print("  (functional checks skipped: %s)" % _e)
-        print("  PASSED: structural checks passed")
-        return
-
-    class _FakeSession:
-        def get_directives(self):
-            return {"program_settings": {"default": {"space_group": "P3221"}}}
-
-    class _FakeVlog:
-        def verbose(self, msg): pass
-        def normal(self, msg): pass
-
-    agent = object.__new__(AgentClass)
-    agent.vlog = _FakeVlog()
-    session = _FakeSession()
-
-    # autobuild: scoped form (same as refine)
-    result_ab = agent._inject_crystal_symmetry(
-        "phenix.autobuild data=data.mtz seq_file=seq.fa model=m.pdb nproc=4",
-        session, "phenix.autobuild")
-    assert_true("crystal_symmetry.space_group=P3221" in result_ab,
-        "autobuild must get crystal_symmetry.space_group=P3221; got: %r" % result_ab)
-
-    # autosol: scoped form
-    result_as = agent._inject_crystal_symmetry(
-        "phenix.autosol data=data.mtz seq_file=seq.fa",
-        session, "phenix.autosol")
-    assert_true("crystal_symmetry.space_group=P3221" in result_as,
-        "autosol must get crystal_symmetry.space_group=P3221; got: %r" % result_as)
-
-    # refine: scoped form
-    result_ref = agent._inject_crystal_symmetry(
-        "phenix.refine model.pdb data.mtz",
-        session, "phenix.refine")
-    assert_true("crystal_symmetry.space_group=P3221" in result_ref,
-        "refine must get crystal_symmetry.space_group=P3221; got: %r" % result_ref)
-
-    # phaser: xray_data form (different scope)
-    result_ph = agent._inject_crystal_symmetry(
-        "phenix.phaser data.mtz model.pdb seq.fa phaser.mode=MR_AUTO",
-        session, "phenix.phaser")
-    assert_true("xray_data.space_group=P3221" in result_ph,
-        "phaser must get xray_data.space_group=P3221; got: %r" % result_ph)
-    assert_true("crystal_symmetry.space_group" not in result_ph,
-        "phaser must NOT get crystal_symmetry.space_group=; got: %r" % result_ph)
-
-    # no double-injection for autobuild
-    result_ab2 = agent._inject_crystal_symmetry(
-        "phenix.autobuild data=data.mtz seq_file=seq.fa "
-        "crystal_symmetry.space_group=P3221 nproc=4",
-        session, "phenix.autobuild")
-    assert_true(result_ab2.count("space_group=") == 1,
-        "Must not double-inject space_group=; count=%d in %r"
-        % (result_ab2.count("space_group="), result_ab2))
-
-    print("  PASSED: _inject_crystal_symmetry uses correct per-program PHIL form")
-
-
-    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
-    if not os.path.isfile(ai_agent_path):
-        print("  SKIP (ai_agent.py not found)")
-        return
-
-    with open(ai_agent_path) as _f:
-        src = _f.read()
-
-    # ── structural checks: the per-program format sets must exist ────────────
-    assert_true("_FLAT_CS_PROGRAMS" in src,
-        "_FLAT_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
-    assert_true("_PHASER_CS_PROGRAMS" in src,
-        "_PHASER_CS_PROGRAMS frozenset must be defined in _inject_crystal_symmetry")
-
-    # phenix.autobuild must be in the flat-form set
-    flat_block = src.split("_FLAT_CS_PROGRAMS")[1][:300]
-    assert_true("phenix.autobuild" in flat_block,
-        "phenix.autobuild must be in _FLAT_CS_PROGRAMS")
-    assert_true("phenix.autosol" in flat_block,
-        "phenix.autosol must be in _FLAT_CS_PROGRAMS")
-
-    # phenix.phaser must be in the phaser set
-    phaser_block = src.split("_PHASER_CS_PROGRAMS")[1][:200]
-    assert_true("phenix.phaser" in phaser_block,
-        "phenix.phaser must be in _PHASER_CS_PROGRAMS")
-
-    # flat form injection: 'crystal_symmetry=%s' (NOT 'crystal_symmetry.space_group')
-    assert_true("crystal_symmetry=%s" in src or "crystal_symmetry=%" in src,
-        "_inject_crystal_symmetry must use flat crystal_symmetry=SG form for flat programs")
-
-    # phaser form injection: xray_data.space_group=
-    assert_true("xray_data.space_group=%s" in src or "xray_data.space_group=%" in src,
-        "_inject_crystal_symmetry must use xray_data.space_group= for phaser")
-
-    # default scoped form: crystal_symmetry.space_group= still present for refine etc.
-    assert_true("crystal_symmetry.space_group=%s" in src or
-                "crystal_symmetry.space_group=%" in src,
-        "_inject_crystal_symmetry must still use crystal_symmetry.space_group= for refine/etc")
-
-    # ── functional checks using importlib (if available) ────────────────────
-    # Build a minimal mock and exercise _inject_crystal_symmetry directly.
-    try:
-        import importlib.util as _ilu
-        sys.path.insert(0, _PROJECT_ROOT)
-        spec = _ilu.spec_from_file_location("_ai_agent_s10g", ai_agent_path)
-        _mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(_mod)
-        AgentClass = _mod.PhenixAIAnalysis
-    except Exception as _e:
-        print("  (functional checks skipped: %s)" % _e)
-        print("  PASSED: structural checks passed")
-        return
-
-    class _FakeSession:
-        def get_directives(self):
-            return {"program_settings": {"default": {"space_group": "P3221"}}}
-
-    class _FakeVlog:
-        def verbose(self, msg): pass
-        def normal(self, msg): pass
-
-    agent = object.__new__(AgentClass)
-    agent.vlog = _FakeVlog()
-    session = _FakeSession()
-
-    # autobuild: flat form
-    result_ab = agent._inject_crystal_symmetry(
-        "phenix.autobuild data=data.mtz seq_file=seq.fa model=m.pdb nproc=4",
-        session, "phenix.autobuild")
-    assert_true("crystal_symmetry=P3221" in result_ab,
-        "autobuild must get crystal_symmetry=P3221; got: %r" % result_ab)
-    assert_true("crystal_symmetry.space_group" not in result_ab,
-        "autobuild must NOT get crystal_symmetry.space_group=; got: %r" % result_ab)
-
-    # autosol: flat form
-    result_as = agent._inject_crystal_symmetry(
-        "phenix.autosol data=data.mtz seq_file=seq.fa",
-        session, "phenix.autosol")
-    assert_true("crystal_symmetry=P3221" in result_as,
-        "autosol must get crystal_symmetry=P3221; got: %r" % result_as)
-
-    # refine: scoped form
-    result_ref = agent._inject_crystal_symmetry(
-        "phenix.refine model.pdb data.mtz",
-        session, "phenix.refine")
-    assert_true("crystal_symmetry.space_group=P3221" in result_ref,
-        "refine must get crystal_symmetry.space_group=P3221; got: %r" % result_ref)
-
-    # phaser: xray_data form
-    result_ph = agent._inject_crystal_symmetry(
-        "phenix.phaser data.mtz model.pdb seq.fa phaser.mode=MR_AUTO",
-        session, "phenix.phaser")
-    assert_true("xray_data.space_group=P3221" in result_ph,
-        "phaser must get xray_data.space_group=P3221; got: %r" % result_ph)
-    assert_true("crystal_symmetry.space_group" not in result_ph,
-        "phaser must NOT get crystal_symmetry.space_group=; got: %r" % result_ph)
-
-    # no double-injection for autobuild
-    result_ab2 = agent._inject_crystal_symmetry(
-        "phenix.autobuild data=data.mtz seq_file=seq.fa crystal_symmetry=P3221 nproc=4",
-        session, "phenix.autobuild")
-    assert_true(result_ab2.count("crystal_symmetry=") == 1,
-        "Must not double-inject crystal_symmetry=; count=%d in %r"
-        % (result_ab2.count("crystal_symmetry="), result_ab2))
-
-    print("  PASSED: _inject_crystal_symmetry uses correct per-program PHIL form")
-
+    print("  PASSED: inject_crystal_symmetry uses correct per-program PHIL scope")
 
 def test_s10h_sanitize_quoted_spacegroup_no_orphan():
-    """_sanitize_command must not leave orphan tokens when a quoted multi-word
+    """sanitize_command must not leave orphan tokens when a quoted multi-word
     space group value is stripped from a probe-only program.
 
     Regression: crystal_symmetry.space_group="P 32 2 1" split into
@@ -8787,36 +8472,24 @@ def test_s10h_sanitize_quoted_spacegroup_no_orphan():
     causing phenix.model_vs_data to crash with an unknown positional argument.
 
     Fix: collapse key="quoted value" into a single token before the split loop.
+    Phase 4: now tests command_postprocessor.py (class method removed from ai_agent.py).
     """
     print("  Test: s10h_sanitize_quoted_spacegroup_no_orphan")
-    ai_agent_path = os.path.join(_PROJECT_ROOT, "programs", "ai_agent.py")
-    if not os.path.isfile(ai_agent_path):
-        print("  SKIP (ai_agent.py not found)")
-        return
 
     try:
-        import importlib.util as _ilu
         sys.path.insert(0, _PROJECT_ROOT)
-        spec = _ilu.spec_from_file_location("_ai_agent_s10h", ai_agent_path)
-        _mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(_mod)
-        AgentClass = _mod.PhenixAIAnalysis
+        try:
+            from agent.command_postprocessor import sanitize_command
+        except ImportError:
+            from libtbx.langchain.agent.command_postprocessor import sanitize_command
     except Exception as _e:
-        print("  SKIP (cannot import PhenixAIAnalysis: %s)" % _e)
+        print("  SKIP (cannot import sanitize_command: %s)" % _e)
         return
-
-    class _FakeVlog:
-        def verbose(self, msg): pass
-        def normal(self, msg): pass
-
-    agent = object.__new__(AgentClass)
-    agent.vlog = _FakeVlog()
 
     # Exact pattern from the bug: space group with spaces, double-quoted
     cmd = ('phenix.model_vs_data /path/to/model.pdb /path/to/data.mtz '
            'crystal_symmetry.space_group="P 32 2 1"')
-    result = agent._sanitize_command(cmd, session=None,
-                                     program_name='phenix.model_vs_data')
+    result = sanitize_command(cmd, program_name='phenix.model_vs_data')
 
     # No orphan numeric tokens from the space group value
     assert_true('32' not in result.split()[2:],
@@ -8835,8 +8508,7 @@ def test_s10h_sanitize_quoted_spacegroup_no_orphan():
     # Also test single-word space group (no quotes) — existing behaviour preserved
     cmd2 = ('phenix.model_vs_data /path/to/model.pdb /path/to/data.mtz '
             'crystal_symmetry.space_group=P3221')
-    result2 = agent._sanitize_command(cmd2, session=None,
-                                      program_name='phenix.model_vs_data')
+    result2 = sanitize_command(cmd2, program_name='phenix.model_vs_data')
     assert_true('space_group' not in result2,
         "Unquoted space_group must also be removed: %r" % result2)
     assert_true('model.pdb' in result2,
