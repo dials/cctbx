@@ -442,7 +442,7 @@ phenix.phaser:
       markers: ['phaser']
       exclude_markers: ['real_space']
 
-  gui_app_id: "PhaserEP"
+  gui_app_id: "AutoMR"
   stop_directive_patterns:
     - 'phaser'
     - 'molecular\s+replacement'
@@ -477,7 +477,7 @@ phenix.phaser:
       # Can also accept positioned models as templates (less common but valid)
       fallback_categories: [model]
       # Exclude ligands - they are NOT search models!
-      exclude_categories: [ligand, ligand_pdb, ligand_cif, ligand_fit]
+      exclude_categories: [ligand, ligand_pdb, ligand_cif, ligand_fit_output]
     data_mtz:
       categories: [data_mtz]  # Original data with Fobs
 

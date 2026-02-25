@@ -224,8 +224,6 @@ data_label_parameters:
     parameter: "autosol.input.xray_data.obs_labels"
   phenix.autobuild:
     parameter: "autobuild.input.xray_data.obs_labels"
-  phenix.maps:
-    parameter: "maps.input.xray_data.obs_labels"
   default:
     parameter: "obs_labels"
 

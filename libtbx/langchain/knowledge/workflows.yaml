@@ -665,7 +665,6 @@ shared:
     # Ligand-related phases (matched by substring in state name)
     ligand_priority:
       - phenix.ligandfit
-      - phenix.elbow
       - phenix.pdbtools
       - phenix.refine
 

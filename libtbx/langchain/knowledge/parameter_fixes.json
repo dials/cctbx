@@ -3,14 +3,24 @@
     "phenix.ligandfit": {
         "map_coeffs": "data",
         "input_labels": "file_info.input_labels",
-        "nproc": "general.nproc"
+        "nproc": "general.nproc",
+        "_comment_cs": "LigandFit uses crystal_symmetry.* scope",
+        "crystal_info.space_group": "crystal_symmetry.space_group",
+        "crystal_info.unit_cell": "crystal_symmetry.unit_cell",
+        "xray_data.space_group": "crystal_symmetry.space_group",
+        "xray_data.unit_cell": "crystal_symmetry.unit_cell"
     },
     "phenix.phaser": {
         "data": "",
         "model": "",
         "nproc": "phaser.keywords.general.jobs",
         "search.copies": null,
-        "ensemble.pdb": "phaser.ensemble.coordinates"
+        "ensemble.pdb": "phaser.ensemble.coordinates",
+        "_comment_cs": "Phaser uses xray_data.* scope",
+        "crystal_symmetry.space_group": "xray_data.space_group",
+        "crystal_symmetry.unit_cell": "xray_data.unit_cell",
+        "crystal_info.space_group": "xray_data.space_group",
+        "crystal_info.unit_cell": "xray_data.unit_cell"
     },
     "phenix.predict_and_build": {
         "data_file": "xray_data_file",
@@ -19,7 +29,12 @@
         "prediction.nproc": null
     },
     "phenix.refine": {
-        "nproc": "main.nproc"
+        "nproc": "main.nproc",
+        "_comment_cs": "Refine uses crystal_symmetry.* scope",
+        "crystal_info.space_group": "crystal_symmetry.space_group",
+        "crystal_info.unit_cell": "crystal_symmetry.unit_cell",
+        "xray_data.space_group": "crystal_symmetry.space_group",
+        "xray_data.unit_cell": "crystal_symmetry.unit_cell"
     },
     "phenix.xtriage": {
         "nproc": null,
@@ -35,13 +50,37 @@
         "resolution": null,
         "high_resolution": null,
         "low_resolution": null,
-        "d_min": null
+        "d_min": null,
+        "_comment_cs": "Polder uses crystal_symmetry.* scope",
+        "crystal_info.space_group": "crystal_symmetry.space_group",
+        "crystal_info.unit_cell": "crystal_symmetry.unit_cell",
+        "xray_data.space_group": "crystal_symmetry.space_group",
+        "xray_data.unit_cell": "crystal_symmetry.unit_cell"
+    },
+    "phenix.autobuild": {
+        "_comment_cs": "AutoBuild uses crystal_info.* scope — LLM often generates wrong crystal_symmetry.* scope",
+        "crystal_symmetry.space_group": "crystal_info.space_group",
+        "crystal_symmetry.unit_cell": "crystal_info.unit_cell",
+        "xray_data.space_group": "crystal_info.space_group",
+        "xray_data.unit_cell": "crystal_info.unit_cell"
+    },
+    "phenix.autobuild_denmod": {
+        "_comment_cs": "AutoBuild denmod uses crystal_info.* scope",
+        "crystal_symmetry.space_group": "crystal_info.space_group",
+        "crystal_symmetry.unit_cell": "crystal_info.unit_cell",
+        "xray_data.space_group": "crystal_info.space_group",
+        "xray_data.unit_cell": "crystal_info.unit_cell"
     },
     "phenix.autosol": {
         "_comment": "AutoSol handles labels internally - do not pass obs_labels",
         "autosol.input.xray_data.obs_labels": null,
         "scaling.input.xray_data.obs_labels": null,
         "obs_labels": null,
-        "input_labels": null
+        "input_labels": null,
+        "_comment_cs": "AutoSol uses crystal_info.* scope",
+        "crystal_symmetry.space_group": "crystal_info.space_group",
+        "crystal_symmetry.unit_cell": "crystal_info.unit_cell",
+        "xray_data.space_group": "crystal_info.space_group",
+        "xray_data.unit_cell": "crystal_info.unit_cell"
     }
 }

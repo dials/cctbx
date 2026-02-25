@@ -596,29 +596,56 @@ class AgentSession:
 
         try:
             from libtbx.langchain.agent.directive_extractor import check_stop_conditions
-            return check_stop_conditions(directives, cycle_number, last_program, metrics)
+            should_stop, reason = check_stop_conditions(
+                directives, cycle_number, last_program, metrics)
         except ImportError:
             # Manual implementation if import fails
             stop_cond = directives.get("stop_conditions", {})
             if not stop_cond:
                 return False, None
 
+            should_stop = False
+            reason = None
+
             # Check after_cycle
             if "after_cycle" in stop_cond:
                 if cycle_number >= stop_cond["after_cycle"]:
-                    return True, "Reached cycle %d (directive)" % cycle_number
+                    should_stop = True
+                    reason = "Reached cycle %d (directive)" % cycle_number
 
             # Check after_program - normalize names for comparison
-            if "after_program" in stop_cond:
+            if not should_stop and "after_program" in stop_cond:
                 target_program = stop_cond["after_program"]
                 # Normalize: remove "phenix." prefix for comparison
                 target_normalized = target_program.replace("phenix.", "")
                 last_normalized = last_program.replace("phenix.", "") if last_program else ""
 
                 if last_normalized == target_normalized or last_program == target_program:
-                    return True, "Completed %s (directive)" % target_program
+                    should_stop = True
+                    reason = "Completed %s (directive)" % target_program
 
+        if not should_stop:
             return False, None
+
+        # ── Guard: predict_and_build with stop_after_predict ─────────────
+        # If the after_program matched predict_and_build, check whether
+        # the actual command used stop_after_predict=True.  In that case,
+        # only the AlphaFold prediction ran — the full workflow (MR +
+        # build + refine) still needs to continue.  Suppress the stop.
+        if (last_program and "predict_and_build" in last_program and
+                reason and "predict_and_build" in reason):
+            last_command = self._get_last_cycle_command()
+            if last_command and "stop_after_predict" in last_command.lower():
+                return False, None
+
+        return should_stop, reason
+
+    def _get_last_cycle_command(self):
+        """Get the command string from the most recent cycle."""
+        cycles = self.data.get("cycles", [])
+        if cycles:
+            return cycles[-1].get("command", "")
+        return ""
 
     def should_skip_validation(self):
         """
@@ -1776,6 +1803,32 @@ class AgentSession:
                     return True, cycle_num, False  # matched successful cycle
 
         return False, None, False
+
+    def get_consecutive_program_count(self, program_name):
+        """Count how many times a program ran consecutively at the end of history.
+
+        Looks at the tail of completed (SUCCESS) cycles and counts how many
+        consecutive entries match *program_name* (compared by base name,
+        e.g. "phenix.refine" matches "phenix.refine").
+
+        Returns:
+            int: Number of consecutive runs (0 if last cycle was different).
+        """
+        count = 0
+        target = os.path.basename(program_name) if program_name else ""
+        # Walk cycles in reverse
+        for cycle in reversed(self.data.get("cycles", [])):
+            prog = cycle.get("program", "")
+            result = cycle.get("result", "")
+            if not prog or prog in ("CRASH", ""):
+                continue
+            if not result.startswith("SUCCESS"):
+                continue
+            if os.path.basename(prog) == target:
+                count += 1
+            else:
+                break  # different program — stop counting
+        return count
 
     def get_history_for_agent(self):
         """

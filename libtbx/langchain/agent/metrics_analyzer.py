@@ -406,8 +406,8 @@ def _analyze_xray_trend(metrics_history, resolution, result):
             result["recommendation"] = "stop"
             return result
 
-    # 3. EXCESSIVE REFINEMENT: 8+ consecutive refines (was 5, now more patience)
-    if consecutive >= 8:
+    # 3. EXCESSIVE REFINEMENT: 5+ consecutive refines
+    if consecutive >= 5:
         result["should_stop"] = True
         result["reason"] = "EXCESSIVE: %d consecutive refinement cycles" % consecutive
         result["recommendation"] = "stop"
@@ -489,8 +489,8 @@ def _analyze_cryoem_trend(metrics_history, result):
             result["recommendation"] = "stop"
             return result
 
-    # 3. EXCESSIVE: 8+ consecutive real_space_refine (was 5, now more patience)
-    if consecutive >= 8:
+    # 3. EXCESSIVE: 5+ consecutive real_space_refine
+    if consecutive >= 5:
         result["should_stop"] = True
         result["reason"] = "EXCESSIVE: %d consecutive refinement cycles" % consecutive
         result["recommendation"] = "stop"

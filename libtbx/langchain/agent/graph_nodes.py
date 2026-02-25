@@ -845,9 +845,9 @@ def perceive(state):
     consecutive_rsr = metrics_trend.get("consecutive_rsr", 0)
     consecutive_refines = metrics_trend.get("consecutive_refines", 0)
     if consecutive_rsr > 0:
-        state = _log(state, "PERCEIVE: Consecutive RSR cycles: %d (stop at 8)" % consecutive_rsr)
+        state = _log(state, "PERCEIVE: Consecutive RSR cycles: %d (stop at 5)" % consecutive_rsr)
     if consecutive_refines > 0:
-        state = _log(state, "PERCEIVE: Consecutive refine cycles: %d (stop at 8)" % consecutive_refines)
+        state = _log(state, "PERCEIVE: Consecutive refine cycles: %d (stop at 5)" % consecutive_refines)
 
     trend_summary = metrics_trend.get("trend_summary", "")
     if trend_summary:
@@ -1232,6 +1232,33 @@ def plan(state):
 
             if not after_program_done:
                 # Suppress AUTO-STOP — user wants a specific program to run first.
+                # BUT: do NOT suppress if the reason is EXCESSIVE consecutive
+                # refinement — this means the agent is stuck in a loop (e.g.,
+                # fallback keeps picking refine because ligandfit can't be built).
+                # Indefinite suppression would burn cycles without progress.
+                if "EXCESSIVE" in reason:
+                    state = _log(state,
+                        "PLAN: AUTO-STOP triggered despite after_program=%s — "
+                        "reason is EXCESSIVE refinement: %s" % (after_program, reason))
+                    state = _emit(state, EventType.STOP_DECISION,
+                        stop=True, reason=reason)
+                    return {
+                        **state,
+                        "intent": {
+                            "program": None,
+                            "stop": True,
+                            "stop_reason": reason,
+                            "reasoning": (
+                                "Automatically stopping: %s. %s. "
+                                "Target program %s could not be run."
+                            ) % (reason, metrics_trend.get("trend_summary", ""),
+                                 after_program),
+                            "files": {},
+                            "strategy": {},
+                        },
+                        "stop": True,
+                        "stop_reason": reason,
+                    }
                 # phenix.ligandfit can run with just a residue code (ligand_type=ATP)
                 # or a ligand PDB, so we do NOT block on has_ligand_file here.
                 state = _log(state, "PLAN: Suppressing AUTO-STOP because after_program=%s hasn't run yet" % after_program)

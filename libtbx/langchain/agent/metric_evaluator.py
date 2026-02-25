@@ -418,7 +418,7 @@ class MetricEvaluator:
             return result
 
         # EXCESSIVE refinement check
-        max_cycles = 8
+        max_cycles = 5
         if consecutive >= max_cycles:
             result["should_stop"] = True
             result["reason"] = "EXCESSIVE: %d consecutive refinement cycles" % consecutive
@@ -495,7 +495,7 @@ class MetricEvaluator:
             return result
 
         # EXCESSIVE refinement
-        if consecutive >= 8:
+        if consecutive >= 5:
             result["should_stop"] = True
             result["reason"] = "EXCESSIVE: %d consecutive RSR cycles" % consecutive
             result["recommendation"] = "stop"

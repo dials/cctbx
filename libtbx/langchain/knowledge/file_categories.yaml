@@ -77,7 +77,6 @@ ligand:
 intermediate:
   description: "Intermediate processing files - never use as input"
   extensions: [".pdb"]
-  is_semantic_parent: true
   patterns:
     - "*reference*"       # Reference/template files used during building
     - "*EDITED*"          # Edited intermediate files
@@ -289,6 +288,7 @@ rsr_output:
 phaser_output:
   description: "Models from molecular replacement (Phaser)"
   parent_category: model
+  extensions: [".pdb"]
   patterns:
     - "PHASER*"
     - "phaser*"
@@ -444,10 +444,13 @@ unclassified_pdb:
     - "*_ligand.*"    # my_model_ligand.pdb (ligand as suffix)
     - "*_ligand_*"    # foo_ligand_bar.pdb
     - "EDITED*"          # Intermediate files from ligandfit processing
+    - "*EDITED*"         # Intermediate files (anywhere in name)
     - "TEMP*"            # Temporary files
     - "path_[0-9]*.pdb"    # trace-and-build fragments (intermediate)
     - "*TEMP*"              # Temporary files (intermediate)
     - "*reference*"         # Reference models (intermediate)
+    - "*_cycle_*"           # Intermediate cycle files
+    - "*intermediate*"      # Intermediate processing files
     - "unrefined_model*"    # map_to_model intermediate
     - "*box_au_map*"        # map_to_model intermediate
     - "*map_shifted*"       # map_to_model intermediate
@@ -467,6 +470,8 @@ ligand_pdb:
     - "ligand_*.pdb"
     - "*_ligand.pdb"
     - "*_lig.pdb"
+    - "*-ligand.pdb"
+    - "*-lig.pdb"
     - "LIG.pdb"
     - "LIG_*.pdb"
   excludes:
@@ -491,6 +496,12 @@ ligand_cif:
     - "lig_*.cif"
     - "ligand.cif"
     - "ligand_*.cif"
+    - "*_ligand.cif"
+    - "*-ligand.cif"
+    - "*_ligand_*.cif"
+    - "*-ligand-*.cif"
+    - "*_lig.cif"
+    - "*-lig.cif"
     - "LIG.cif"
     - "LIG_*.cif"
   excludes:

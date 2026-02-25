@@ -321,6 +321,13 @@ Do NOT set after_program stop conditions if the user indicates they want additio
 - If user mentions a downstream task (ligand fitting, validation, additional refinement), do NOT set early stop
 - Put downstream tasks in "constraints" instead so the agent knows to do them
 
+**CRITICAL: predict_and_build is ALWAYS INTERMEDIATE**:
+When a user says "solve the structure using predict_and_build" or "use PredictAndBuild workflow",
+they want the FULL pipeline: prediction → molecular replacement → building → refinement.
+Do NOT set after_program="phenix.predict_and_build" for structure solution requests.
+Only set after_program="phenix.predict_and_build" if the user EXPLICITLY says "just run the prediction"
+or "only predict the model, nothing else".
+
 **CRITICAL: LIGAND FITTING WORKFLOWS**:
 When user mentions ligand fitting as part of the workflow:
 - "refine, fit ligand, then refine again" → Do NOT set after_program, let workflow complete naturally
@@ -330,6 +337,7 @@ When user mentions ligand fitting as part of the workflow:
 - Put "Fit ligand after first refinement" or similar in constraints, NOT in stop_conditions
 
 Examples of what NOT to do:
+- User says "solve structure using PredictAndBuild" → Do NOT set after_program="phenix.predict_and_build" (this is a full workflow, not a single step!)
 - User says "run predict_and_build and fit ligand later" → Do NOT set after_program="phenix.predict_and_build"
 - User says "try MR then refine" → Do NOT set after_program="phenix.phaser"
 - User says "refine, fit ligand, refine again" → Do NOT set after_program="phenix.refine" (this would stop before ligandfit!)
@@ -1217,6 +1225,20 @@ def _fix_multi_step_workflow_conflict(directives, log):
     # Define which programs are "intermediate" and what downstream keywords indicate
     # the workflow should continue past them
     intermediate_programs = {
+        "phenix.predict_and_build": [
+            # predict_and_build is almost always intermediate — the user wants
+            # MR + building + refinement after prediction.  Only stop here if the
+            # user explicitly asks "just predict" or "only prediction".
+            r'solv',            # "solve the structure"
+            r'refine',
+            r'build',
+            r'molecular\s+replacement',
+            r'phaser',
+            r'MR\b',
+            r'model\s+building',
+            r'ligand',
+            r'structure\s+(?:determination|solution)',
+        ],
         "phenix.map_symmetry": [
             r'build\s+(?:a\s+)?model',
             r'model\s+building',
@@ -1693,6 +1715,12 @@ def check_stop_conditions(directives, cycle_number, last_program, metrics=None):
         last_normalized = last_program.replace("phenix.", "") if last_program else ""
 
         if last_normalized == target_normalized or last_program == target_program:
+            # SPECIAL CASE: predict_and_build with stop_after_predict is only
+            # the prediction step.  The user wants the full workflow (MR + build
+            # + refine), so do NOT treat the prediction-only run as completion.
+            # The caller (Session.check_directive_stop_conditions) handles this
+            # by inspecting the actual command; here we can only match by name,
+            # so we let the caller override if needed.
             return True, "Completed %s (directive: after_program)" % target_program
 
     # Check max_refine_cycles

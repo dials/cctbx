@@ -517,10 +517,31 @@ def _categorize_files_yaml(available_files, rules):
             if matched and f not in files[cat_name]:
                 files[cat_name].append(f)
 
+                # Bubble up to semantic parent category
+                # e.g. refined -> model, ligand_cif -> ligand,
+                #      original_data_mtz -> data_mtz, refine_map_coeffs -> map_coeffs_mtz
+                parent = cat_def.get("parent_category")
+                if parent and parent in files and f not in files[parent]:
+                    files[parent].append(f)
+
                 # Also add to "also_in" categories
                 for also_cat in cat_def.get("also_in", []):
                     if also_cat in files and f not in files[also_cat]:
                         files[also_cat].append(f)
+
+    # ── POST-PROCESSING ─────────────────────────────────────────────────────
+    # Remove intermediate files from model and search_model categories.
+    # A file may match BOTH an intermediate subcategory (e.g. *EDITED*) and
+    # the unclassified_pdb catch-all (*), which bubbles up to model.  The
+    # intermediate classification should always take priority — these files
+    # must never be used as program inputs.
+    intermediate_files = set(files.get("intermediate", []))
+    if intermediate_files:
+        for safe_cat in ("model", "search_model", "pdb", "unclassified_pdb"):
+            if safe_cat in files:
+                before = len(files[safe_cat])
+                files[safe_cat] = [f for f in files[safe_cat]
+                                   if f not in intermediate_files]
 
     return files
 

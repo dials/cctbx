@@ -868,7 +868,7 @@ class CommandBuilder:
         # Subcategories that are more specific than generic best_files
         # These indicate the program needs a specific type of file, not just any "best" file
         specific_subcategories = {"original_data_mtz", "phased_data_mtz", "half_map", "full_map",
-                                  "optimized_full_map", "intermediate_map",
+                                  "optimized_full_map",
                                   "ligand_fit_output", "with_ligand", "processed_predicted",
                                   "refine_map_coeffs", "denmod_map_coeffs", "predict_build_map_coeffs"}
         uses_specific_subcategory = any(cat in specific_subcategories for cat in priority_categories)
