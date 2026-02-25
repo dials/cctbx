@@ -15,6 +15,7 @@ from libtbx.str_utils import make_sub_header
 import mmtbx.maps.polder
 import mmtbx.maps.correlation
 import mmtbx.ligands.rdkit_utils as rdkit_utils
+from iotbx import mrcfile
 
 master_params_str = """
 validate_ligands {
@@ -174,7 +175,7 @@ class manager(list):
        )},
 
       {'headers': ['% bad', 'map values', 'Fo-Fc'], 'width': 12,
-       'data_fn': lambda lr: f"{round((lr.get_map_values().fofc_map_values <= -3).count(True) / lr._atoms_ligand_noH.size(), 2)}" if lr.get_map_values() else 'NA'},
+       'data_fn': lambda lr: f"{lr.get_map_values().percent_bad_at_atom_centers}" if lr.get_map_values() else 'NA'},
       {'headers': ['', '', 'clashes'], 'width': 9,
        'data_fn': lambda lr: f"{lr.get_overlaps().n_clashes}" if lr.get_overlaps() and lr.get_overlaps().n_clashes != 0 else '-'},
       {'headers': ['', '', 'H-bonds'], 'width': 9,
@@ -308,7 +309,10 @@ class manager(list):
 
   def show_fragmentation(self):
     make_sub_header(' Fragments', out=self.log)
+    resnames = []
     for lr in self:
+      if lr.resname in resnames: continue
+      resnames.append(lr.resname)
       frag_isels = lr.ligand_rigid_components_isels
       print('\n', file=self.log)
       print(lr.id_str, file=self.log)
@@ -384,9 +388,9 @@ class ligand_result(object):
     ccs = None
     map_vals = None
 
-    if self.fmodel is not None:
-      ccs = self.get_ccs()
-      map_vals = self.get_map_values()
+    #if self.fmodel is not None:
+    #  ccs = self.get_ccs()
+    #  map_vals = self.get_map_values()
     # apply criteria for metrics
     if ccs is not None:
       if ccs.rscc < 0.8:
@@ -399,9 +403,9 @@ class ligand_result(object):
     if clashes is not None:
       if clashes.n_clashes > 0.5 * n_atoms:
         self._is_suspicious = True
-    if map_vals is not None:
-      if (map_vals.fofc_map_values<-3).count(True) >= 0.5 * n_atoms:
-        self._is_suspicious = True
+    #if map_vals is not None:
+    #  if (map_vals.fofc_map_values<-3).count(True) >= 0.5 * n_atoms:
+    #    self._is_suspicious = True
     #
     return self._is_suspicious
 
@@ -589,6 +593,10 @@ class ligand_result(object):
     #self._xrs_ligand_noH = \
     #  self.model.select(self.ligand_isel_noH).get_xray_structure()
     self._atoms_ligand_noH = self._ph.select(self.ligand_isel_noH).atoms()
+
+    new_s = re.sub(r"\band\b", "", self.sel_str)
+    self.fn_string = re.sub(r"\s+", "_", new_s.strip())  # strip + collapse spaces
+
 
   # ----------------------------------------------------------------------------
 
@@ -885,7 +893,7 @@ class ligand_result(object):
       crystal_gridding = crystal_gridding,
       map_type         = "mFo-DFc")
 
-    # compute mFo-DFc map values at atom centers
+    # 1. compute mFo-DFc map values at atom centers
     unit_cell = self.model.crystal_symmetry().unit_cell()
     fofc_map_values = flex.double()
     for site_cart, _a in zip(self._atoms_ligand_noH.extract_xyz(),
@@ -895,9 +903,58 @@ class ligand_result(object):
       #print(_a.id_str(), map_val)
       fofc_map_values.append(map_val)
 
+    percent_bad = 0
+    n_neg = (fofc_map_values <= -3).count(True)
+    n_pos = (fofc_map_values >= 3).count(True)
+    percent_bad = round((n_neg + n_pos)/ self._atoms_ligand_noH.size(), 2)*100
+
+    # 2. count grid points in blobs
+    sites_cart = self._atoms_ligand_noH.extract_xyz()
+    sel = maptbx.grid_indices_around_sites(
+      unit_cell  = cs.unit_cell(),
+      fft_n_real = m_fofc.focus(),
+      fft_m_real = m_fofc.all(),
+      sites_cart = sites_cart,
+      site_radii = flex.double(sites_cart.size(), 2.0))
+    _m = m_fofc.deep_copy()
+    _m = _m.as_1d()
+    _m.set_selected(sel, 999999)
+    _m.reshape(m_fofc.accessor())
+    _m1 = m_fofc.set_selected(_m!=999999, 0)
+
+    #print('len sel', len(list(sel)))
+    #print(_m1.size())
+
+#    mrcfile.write_ccp4_map(
+#      file_name   = "%s.ccp4" % self.fn_string,
+#      unit_cell   = cs.unit_cell(),
+#      space_group = cs.space_group(),
+#      map_data    = _m1,
+#      labels      = flex.std_string([""]))
+
+    co_pos = maptbx.connectivity(map_data=_m1, threshold=3.)
+    co_neg = maptbx.connectivity(map_data=-1*_m1, threshold=3.)
+    map_result_pos = co_pos.result()
+    peaks_pos = list(co_pos.regions())[1:]
+    peaks_neg = list(co_neg.regions())[1:]
+    n_peaks_pos = len(peaks_pos)
+    n_peaks_neg = len(peaks_neg)
+    percent_bad_blobs = 0
+    if sel.size() != 0:
+      percent_bad_blobs = (sum(peaks_pos)+sum(peaks_neg))/sel.size()
+
+    #print('percent bad blobs', round(percent_bad_blobs, 3)*100.0)
+    #print('number of bad peaks pos, neg', n_peaks_pos, n_peaks_neg)
+    #print('regions pos', list(co_pos.regions()))
+    #print('regions neg', list(co_neg.regions()))
+    #print('size first pos region', (map_result_pos==1).count(True))
+
     self._map_values = group_args(
       fofc_map_values = fofc_map_values,
-       )
+      percent_bad_at_atom_centers     = percent_bad,
+      n_bad_blobs = n_peaks_pos+ n_peaks_neg,
+      percent_bad_blobs = percent_bad_blobs
+      )
 
     return self._map_values
 
