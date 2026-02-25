@@ -358,14 +358,32 @@ class AgentSession:
             print(f"Warning: Could not save session file: {e}")
 
     def set_project_info(self, project_advice=None, original_files=None):
-        """Set project-level information."""
+        """Set project-level information.
+
+        On resume (session already has original_files), new files are MERGED
+        into the existing list rather than replacing it.  This preserves files
+        from the first run (e.g. a ligand CIF) that the user may not re-supply
+        when resuming with only the refinement outputs.
+        """
         if project_advice:
             self.data["project_advice"] = project_advice
         if original_files:
             if isinstance(original_files, str):
-                self.data["original_files"] = original_files.split()
+                new_files = original_files.split()
             else:
-                self.data["original_files"] = list(original_files)
+                new_files = list(original_files)
+
+            existing = self.data.get("original_files", [])
+            if existing:
+                # MERGE: add new files not already present (by basename)
+                existing_bns = {os.path.basename(f).lower() for f in existing}
+                for f in new_files:
+                    if os.path.basename(f).lower() not in existing_bns:
+                        existing.append(f)
+                        existing_bns.add(os.path.basename(f).lower())
+                self.data["original_files"] = existing
+            else:
+                self.data["original_files"] = new_files
 
         # Store run_name if not already set (compute it once on the client)
         if not self.data.get("run_name"):

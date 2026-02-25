@@ -158,20 +158,46 @@ User advice (`project_advice`) was displayed at `verbose` level in
 
 **Fix:** Changed to `normal` level so users always see their advice in the log.
 
+### Bug 11 — `set_project_info` replaces `original_files` on resume
+
+When resuming a session, `set_project_info(original_files=...)` **replaced** the
+existing `original_files` list with whatever files the user supplied on this run.
+If the user initially provided `data.mtz model.pdb atp.pdb` but resumed with only
+`refine_001_data.mtz refine_001_001.pdb`, the ligand file (`atp.pdb`) was lost.
+This caused ligandfit to fail because no ligand file was available.
+
+**Fix:** `set_project_info` now **merges** new files into the existing list on
+resume (deduplicating by basename). Original files from the first run are preserved
+even if the user doesn't re-supply them.
+
+### Bug 12 — BUILD failure message lacks missing-slot detail
+
+When `CommandBuilder.build()` returned None (missing required inputs), the BUILD
+node's `validation_error` was just `"Failed to build command"`. This became the
+fallback reasoning shown to the user: `"Fallback: phenix.ligandfit could not be
+built (Failed to build command; Failed to build command)"` — no indication of
+*which* files were missing.
+
+**Fix:** BUILD node now checks `builder._last_missing_slots` and includes slot
+names in the error message: `"Failed to build command (missing: ligand,
+map_coeffs_mtz)"`. The fallback reasoning also includes its own `build_failures`
+diagnostics (from Bug 7's per-program tracking) when they differ from the BUILD
+node errors.
+
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result`; duplicate detection respects different input files |
+| `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result`; duplicate detection respects different input files; `set_project_info` merges original_files on resume |
 | `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` |
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
 | `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots |
 | `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
 | `agent/workflow_state.py` | New `_pdb_is_protein_model()` for positive protein detection |
-| `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons |
+| `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons; BUILD error includes missing slot names |
 | `knowledge/programs.yaml` | Added `refine` to ligandfit ligand slot exclude_patterns |
 | `programs/ai_agent.py` | Content guards for model and ligand slots in safety net; advice display at normal level |
-| `tests/tst_audit_fixes.py` | 9 new tests: regex, word-boundary, content guards, CIF exclusion, session rebuild, supplemental discovery (load + live), duplicate detection, best_files fallback (231 total) |
+| `tests/tst_audit_fixes.py` | 11 new tests (233 total) |
 
 ---
 

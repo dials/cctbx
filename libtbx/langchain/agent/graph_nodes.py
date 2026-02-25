@@ -2186,8 +2186,15 @@ def _build_with_new_builder(state):
                     state = _log(state, "BUILD: Failed to build prerequisite %s" % prereq_program)
 
         state = _log(state, "BUILD: Failed to build command for %s" % program)
-        state = _emit(state, EventType.ERROR, message="Failed to build command", details=program)
-        return {**state, "command": "", "validation_error": "Failed to build command"}
+        # Include which required slots couldn't be filled, so the user
+        # understands what files are needed (e.g., "missing: ligand, map_coeffs_mtz")
+        missing_slots = getattr(builder, '_last_missing_slots', None) if builder else None
+        if missing_slots:
+            error_msg = "Failed to build command (missing: %s)" % ", ".join(missing_slots)
+        else:
+            error_msg = "Failed to build command"
+        state = _emit(state, EventType.ERROR, message=error_msg, details=program)
+        return {**state, "command": "", "validation_error": error_msg}
 
     # Apply parameter fixes as safety net (catches model= in map_to_model, etc.)
     try:
@@ -3003,6 +3010,10 @@ def _fallback_with_new_builder(state):
                 prev_attempts = state.get("previous_attempts", [])
                 errors = [a.get("error", "") for a in prev_attempts if a.get("error")]
                 error_summary = "; ".join(errors[:2]) if errors else "build failed"
+                # Also check build_failures for the original program's diagnostics
+                orig_failure = build_failures.get(original_program, "")
+                if orig_failure and orig_failure not in error_summary:
+                    error_summary = "%s; %s" % (error_summary, orig_failure) if error_summary else orig_failure
                 fallback_reasoning = (
                     "Fallback: %s could not be built (%s). "
                     "Running %s instead as next available program."

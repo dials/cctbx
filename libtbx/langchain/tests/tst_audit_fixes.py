@@ -9159,6 +9159,91 @@ def test_s5k_best_files_fallback_for_specific_subcategory():
     print("  PASSED: best_files fallback works for specific subcategory slots")
 
 
+def test_s5l_set_project_info_merges_on_resume():
+    """set_project_info must MERGE original_files on resume, not replace.
+
+    When a user resumes a session with only refinement outputs, the original
+    ligand file from the first run must be preserved in original_files.
+    """
+    print("  Test: s5l_set_project_info_merges_on_resume")
+    import tempfile, shutil
+
+    test_dir = tempfile.mkdtemp(prefix="_test_merge_")
+    try:
+        from agent.session import AgentSession
+        session = AgentSession(session_dir=test_dir)
+
+        # First run: user supplies data + model + ligand
+        session.set_project_info(
+            project_advice="Solve the structure",
+            original_files=["/data/data.mtz", "/data/model.pdb", "/data/atp.pdb"]
+        )
+        assert_true(len(session.data["original_files"]) == 3,
+            "First call should set 3 files, got %d" % len(session.data["original_files"]))
+
+        # Resume: user supplies only refine outputs (different files)
+        session.set_project_info(
+            project_advice="fit ATP to the refined model",
+            original_files=["/refine/refine_001_data.mtz", "/refine/refine_001.pdb"]
+        )
+        files = session.data["original_files"]
+        basenames = [os.path.basename(f) for f in files]
+
+        # Must have ALL 5 files (3 original + 2 new)
+        assert_true("atp.pdb" in basenames,
+            "atp.pdb from first run must be preserved on resume, got: %s" % basenames)
+        assert_true("refine_001_data.mtz" in basenames,
+            "refine_001_data.mtz must be added on resume, got: %s" % basenames)
+        assert_true("refine_001.pdb" in basenames,
+            "refine_001.pdb must be added on resume, got: %s" % basenames)
+        assert_true(len(files) == 5,
+            "Should have 5 files total (3 original + 2 new), got %d: %s" % (len(files), basenames))
+
+        # Duplicate basenames must not be re-added
+        session.set_project_info(
+            original_files=["/other/atp.pdb", "/other/data.mtz"]
+        )
+        files2 = session.data["original_files"]
+        assert_true(len(files2) == 5,
+            "Duplicate basenames must not be re-added, got %d: %s" % (
+                len(files2), [os.path.basename(f) for f in files2]))
+
+        print("  PASSED: set_project_info merges original_files on resume")
+
+    finally:
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+
+def test_s5m_build_failure_includes_missing_slots():
+    """BUILD node validation_error must include missing slot names.
+
+    Without this, the user sees "Failed to build command" with no indication
+    of what file they need to supply.
+    """
+    print("  Test: s5m_build_failure_includes_missing_slots")
+
+    gn_path = os.path.join(_PROJECT_ROOT, "agent", "graph_nodes.py")
+    with open(gn_path) as f:
+        src = f.read()
+
+    # BUILD node must check _last_missing_slots and include them in error
+    assert_true("_last_missing_slots" in src,
+        "graph_nodes.py must reference _last_missing_slots")
+    assert_true('missing:' in src.lower() or 'missing_slots' in src,
+        "BUILD failure message must include missing slot names")
+
+    # The error message format should include the slot names
+    import re
+    # Look for pattern: "Failed to build command (missing: %s)"
+    pattern = r'Failed to build command \(missing.*?\)'
+    match = re.search(pattern, src)
+    assert_true(match is not None,
+        "BUILD node must format error as 'Failed to build command (missing: ...)' "
+        "so fallback reasoning shows which slots are unfilled")
+
+    print("  PASSED: BUILD failure includes missing slot names")
+
+
 def run_all_tests():
     """Run all audit fix tests."""
     run_tests_with_fail_fast()
