@@ -425,11 +425,13 @@ improved_agent_v2/
 │   ├── graph_nodes.py          # LangGraph node implementations
 │   ├── planner.py              # Agent planning and next-move generation
 │   ├── workflow_engine.py      # YAML workflow interpreter
-│   ├── workflow_state.py       # State detection from files and history
-│   ├── command_builder.py      # Unified command generation
+│   ├── workflow_state.py       # State detection, PDB content guards
+│   ├── command_builder.py      # Unified command generation (with content guards)
+│   ├── command_postprocessor.py # Server-safe command transforms (sanitize, inject)
 │   ├── template_builder.py     # YAML-driven command templates
-│   ├── file_utils.py           # Shared file classification (MTZ, etc.)
+│   ├── file_utils.py           # Shared file classification (MTZ type, exclude patterns)
 │   ├── best_files_tracker.py   # Track best files per type
+│   ├── placement_checker.py    # Unit cell comparison for model placement
 │   ├── error_analyzer.py       # Automatic error recovery
 │   ├── advice_preprocessor.py  # README discovery, advice processing
 │   ├── directive_extractor.py  # Parse user directives from advice
@@ -440,7 +442,7 @@ improved_agent_v2/
 │   ├── memory.py               # Persistent learned syntax tips
 │   ├── metrics_analyzer.py     # Metric trends and convergence
 │   ├── metric_evaluator.py     # Metric quality evaluation
-│   ├── session.py              # Persistent session tracking (AgentSession)
+│   ├── session.py              # Persistent session tracking (AgentSession, duplicate detection, supplemental file discovery)
 │   ├── api_client.py           # V2 API request/response building
 │   ├── phenix_utils.py         # REST encoding, standalone PHENIX utilities
 │   ├── transport.py            # Sanitization and encoding

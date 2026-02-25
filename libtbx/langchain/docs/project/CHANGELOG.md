@@ -120,20 +120,58 @@ duplication or inability to build (missing inputs). Misleading stop reason.
 includes per-program diagnostics showing which input slots couldn't be filled.
 `CommandBuilder.build()` now stores `_last_missing_slots` for diagnostics.
 
+### Bug 8 — Iterative refinement flagged as duplicate command
+
+When the user asked for additional refinement cycles, the duplicate detector
+flagged the new `phenix.refine` command as "similar to cycle 1" even though the
+input model file changed (e.g. `refine_002.pdb` vs `model.pdb`). The 80%
+token-overlap heuristic was comparing basenames of all command tokens, so commands
+with many shared params (nproc, macro_cycles, same data file) exceeded the 80%
+threshold even when the model file was different.
+
+**Fix:** Before applying the overlap heuristic, extract file tokens (basenames with
+crystallographic extensions like .pdb, .mtz, .cif, .sca) from both commands. If the
+file token sets differ, the commands are NOT duplicates regardless of overall overlap.
+Running `phenix.refine` with a different model is a fundamentally different
+computation.
+
+### Bug 9 — `best_files` skipped for slots with specific subcategories
+
+Even after Bugs 1+7 correctly populated `best_files["map_coeffs_mtz"]` from
+supplemental file discovery, ligandfit's `map_coeffs_mtz` slot still failed to
+build. The `_find_file_for_slot` method skips `best_files` entirely when a slot's
+`input_priorities.categories` contains a "specific subcategory" (like
+`refine_map_coeffs`). When the category-based lookup also failed (because
+`categorized_files` didn't have the file in `refine_map_coeffs`), the extension
+fallback was blocked by `require_best_files_only`, and the slot returned None.
+
+**Fix:** Added a `best_files_fallback` path: when both category-based lookup and
+extension fallback are exhausted for a specific-subcategory slot, try `best_files`
+as a last resort with `exclude_categories` validation. This ensures the
+supplemental-discovered map coefficients MTZ is used even when the PERCEIVE node's
+file categorizer didn't place it in the specific subcategory.
+
+### Bug 10 — Advice display at verbose level
+
+User advice (`project_advice`) was displayed at `verbose` level in
+`_print_iterate_agent_header`, invisible at the default `normal` verbosity.
+
+**Fix:** Changed to `normal` level so users always see their advice in the log.
+
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result` |
+| `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result`; duplicate detection respects different input files |
 | `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` |
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
-| `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots` |
+| `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots |
 | `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
 | `agent/workflow_state.py` | New `_pdb_is_protein_model()` for positive protein detection |
 | `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons |
 | `knowledge/programs.yaml` | Added `refine` to ligandfit ligand slot exclude_patterns |
-| `programs/ai_agent.py` | Content guards for model and ligand slots in safety net |
-| `tests/tst_audit_fixes.py` | 7 tests: regex, word-boundary, content guards, CIF exclusion, session rebuild, supplemental discovery (load + live) (229 total) |
+| `programs/ai_agent.py` | Content guards for model and ligand slots in safety net; advice display at normal level |
+| `tests/tst_audit_fixes.py` | 9 new tests: regex, word-boundary, content guards, CIF exclusion, session rebuild, supplemental discovery (load + live), duplicate detection, best_files fallback (231 total) |
 
 ---
 

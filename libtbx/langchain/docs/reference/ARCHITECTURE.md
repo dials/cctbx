@@ -137,7 +137,7 @@ Main entry point and execution loop:
 #### command_postprocessor.py
 Server-safe command transforms called by the BUILD node (new in v112.66):
 - `sanitize_command()` — Rules A–D: strip placeholders, blacklisted params, hallucinated cross-program params, bare unscoped params
-- `inject_user_params()` — append user key=value params missing from command (scope-matched)
+- `inject_user_params()` — append user key=value params missing from command (scope-matched for dotted keys, strategy_flags-validated for bare keys)
 - `inject_crystal_symmetry()` — append unit_cell/space_group from directives
 - `inject_program_defaults()` — append defaults from programs.yaml if missing (safety net)
 - `postprocess_command()` — single entry point calling all four in order
@@ -146,6 +146,12 @@ All functions take explicit data arguments (no `self`/class dependencies), makin
 them callable from both the graph (server-side) and `ai_agent.py` (client-side
 replay path).
 
+**Rule D consistency (v112.70):** `inject_user_params` now validates bare (undotted)
+keys against the program's `strategy_flags` allowlist before injection, mirroring
+Rule D in `sanitize_command`. Without this, `sanitize_command` would strip a
+hallucinated param like `d_min=2.5` and then `inject_user_params` would re-add it
+from the user advice text.
+
 #### Session Tracker (session.py)
 Persists workflow state across cycles:
 - Experiment type (X-ray/cryo-EM)
@@ -153,6 +159,16 @@ Persists workflow state across cycles:
 - R-free MTZ path
 - Cycle history
 - **User Directives** (extracted structured instructions)
+- **Supplemental file discovery** — `_rebuild_best_files_from_cycles` (session load)
+  and `record_result` (live path) call `_find_missing_outputs` to discover companion
+  output files (e.g., map coefficients MTZ) and evaluate them through the best_files
+  tracker. This ensures `best_files["map_coeffs_mtz"]` is populated even when the
+  client doesn't track all output files.
+- **Duplicate detection** — `is_duplicate_command()` uses a two-tier check: exact
+  match against all prior commands, then 80%-token-overlap against successful
+  commands. The overlap heuristic now compares file tokens (basenames with
+  crystallographic extensions) separately — different input files means a different
+  computation, regardless of parameter overlap.
 
 #### Directive System
 Extracts and enforces user instructions:
@@ -164,8 +180,27 @@ Extracts and enforces user instructions:
 #### BestFilesTracker (best_files_tracker.py)
 Tracks highest-quality files:
 - Scores files using YAML-based criteria
-- Maintains current best by category
+- Maintains current best by category (model, data_mtz, map_coeffs_mtz, etc.)
 - Provides files for server decisions
+- `STAGE_TO_PARENT` maps stage names to parent categories (e.g.,
+  `refine_map_coeffs` → `map_coeffs_mtz`, `original_data_mtz` → `data_mtz`)
+
+#### file_utils.py
+Shared file classification and pattern matching:
+- `classify_mtz_type()` — classifies MTZ files as `data_mtz` or `map_coeffs_mtz`
+  based on filename patterns
+- `matches_exclude_pattern()` — word-boundary-aware pattern matching for
+  `exclude_patterns` and `prefer_patterns` in slot definitions. Patterns match at
+  start-of-string or after separators (`_`, `-`, `.`), preventing false positives
+  like "noligand" matching "ligand"
+
+#### workflow_state.py
+File content analysis for slot guards:
+- `_pdb_is_small_molecule()` — reads first 8KB, returns True for HETATM-only PDB
+  files (ligands, cofactors). Used to reject small molecules from model slots.
+- `_pdb_is_protein_model()` — positive protein check, returns True for PDB files
+  with ATOM records. Used to reject protein models from ligand slots. Returns
+  False for non-existent files (safe for use as rejection filter).
 
 #### Agent Interface (LocalAgent/RemoteAgent)
 Both agents use identical interface, v2 JSON format, **and transport encoding**:
@@ -564,7 +599,7 @@ Key directories:
 - `analysis/` — Post-run log analysis and session evaluation
 - `core/` — LLM provider abstraction
 - `validation/` — Command validation framework
-- `tests/` — 34 test files with 800+ tests
+- `tests/` — 34 test files with 900+ tests
 
 ## Key Design Decisions
 
@@ -653,6 +688,10 @@ postprocess_command():
 | C | Program has zero strategy_flags | Any key=value not in `_UNIVERSAL_KEYS` |
 | D | Program HAS strategy_flags, key has no dots | Bare params not in program's allowlist |
 
+**Rule D consistency (v112.70):** `inject_user_params` mirrors Rule D's allowlist
+check for bare keys extracted from user advice. Without this, a param stripped by
+Rule D (e.g. `d_min=2.5` for autobuild) would be re-injected from the advice text.
+
 ### 6. Automation Modes
 
 **Rationale**: Different users need different levels of control over the workflow.
@@ -693,6 +732,18 @@ xtriage → predict_and_build(stop_after_predict) → process_predicted_model �
 - Fallback node now sets `state["program"]` when returning a command
 - Response builder uses `state["program"]` if available, falls back to `intent["program"]`
 - Prevents mismatch where PLAN shows one program but command is different
+
+**Fallback diagnostics (v112.70):**
+When the fallback cannot produce a command, it now provides specific stop reasons:
+
+| Stop Reason | Meaning |
+|------------|---------|
+| `cannot_build_any_program` | No program could be built (missing required inputs) |
+| `build_failures_and_duplicates` | Some programs can't build, rest are duplicates |
+| `all_commands_duplicate` | All built commands are actual duplicates of prior runs |
+
+The `abort_message` includes per-program diagnostics showing exactly which required
+input slots could not be filled (via `CommandBuilder._last_missing_slots`).
 
 ## Workflow States
 
@@ -991,14 +1042,17 @@ When building commands, files are selected in this order:
 
 | File | Role |
 |------|------|
-| `agent/best_files_tracker.py` | Core tracker class with scoring |
-| `agent/session.py` | Integration with session persistence |
+| `agent/best_files_tracker.py` | Core tracker class with scoring and STAGE_TO_PARENT mapping |
+| `agent/session.py` | Integration with session persistence; supplemental file discovery |
 | `agent/template_builder.py` | Uses best_files for command building |
+| `agent/file_utils.py` | `classify_mtz_type()` for MTZ classification; `matches_exclude_pattern()` for word-boundary pattern matching |
+| `agent/workflow_state.py` | `_pdb_is_small_molecule()` and `_pdb_is_protein_model()` for content-based PDB analysis |
+| `knowledge/metrics.yaml` | Scoring configuration (best_files_scoring section) |
 
 ### Companion File Discovery
 
 Some clients only track a subset of program output files. The agent discovers
-missing companion files in two layers:
+missing companion files in three layers:
 
 **Layer 1: `graph_nodes._discover_companion_files()`** — Runs in the perceive
 node before file categorization. Triggered by file patterns in available_files:
@@ -1013,6 +1067,14 @@ All discovered files are checked with `os.path.exists()` and deduplicated.
 
 **Layer 2: `session._find_missing_outputs()`** — Runs in `get_available_files()`
 to supplement cycle output_files from session data.
+
+**Layer 3: Best files evaluation (v112.70)** — Both `_rebuild_best_files_from_cycles`
+(session load) and `record_result` (live cycle completion) call
+`_find_missing_outputs` and evaluate supplemental files through the best_files
+tracker. This ensures `best_files["map_coeffs_mtz"]` is populated even when the
+client only tracked `refine_001_data.mtz` in `output_files`. Without this layer,
+programs with `require_best_files_only: true` (like ligandfit's map_coeffs_mtz
+slot) would fail to build because the map coefficients MTZ was never evaluated.
 
 ### Intermediate File Filtering
 
@@ -1038,7 +1100,67 @@ protein model for refinement.
 Applied in `command_builder.py` at two points: (1) pre-population of the model
 slot from best_files, and (2) LLM override where best_files would normally
 take precedence over the LLM's model choice.
-| `knowledge/metrics.yaml` | Scoring configuration (best_files_scoring section) |
+
+### Content-Based File Selection Guards (v112.70)
+
+Three layers of defense prevent files from being assigned to wrong slots:
+
+**Layer 1: `exclude_patterns` (YAML-driven, word-boundary matching)**
+Slot definitions in `programs.yaml` specify `exclude_patterns` to reject files
+by name. Uses `matches_exclude_pattern()` with word-boundary semantics: `ligand`
+matches `atp_ligand.pdb` but NOT `nsf-d2_noligand.pdb`. Applied to both
+auto-fill and LLM-selected files.
+
+**Layer 2: Content-based PDB analysis**
+After pattern matching, PDB files are checked by content:
+- **Model slots** (`model`, `protein`, `pdb_file`): `_pdb_is_small_molecule()`
+  rejects HETATM-only files (ligands like `atp.pdb`)
+- **Ligand slot**: `_pdb_is_protein_model()` rejects files with ATOM records
+  (protein models like `refine_001.pdb`)
+
+Uses `_pdb_is_protein_model()` for the ligand slot rather than
+`not _pdb_is_small_molecule()` because the latter returns False for unreadable
+files, which would incorrectly reject valid candidates.
+
+**Layer 3: LLM selection validation (v112.70)**
+LLM file hint assignments are now validated against the slot's `exclude_patterns`
+before acceptance. Previously, the LLM could bypass exclusion rules by explicitly
+assigning a file. Now the same guards apply to all file sources:
+
+```
+File selection pipeline (all three apply at each stage):
+  1. LLM hint → validate against exclude_patterns + content guards
+  2. Auto-fill → apply exclude_patterns + content guards + prefer_patterns
+  3. Safety net → apply exclude_patterns + content guards + prefer_patterns
+```
+
+Applied in:
+- `CommandBuilder._find_file_for_slot` (server-side auto-fill)
+- `CommandBuilder` LLM hint validation loop
+- `_inject_missing_required_files._find_candidate_for_slot` (client-side safety net)
+
+### Duplicate Command Detection
+
+`session.is_duplicate_command()` prevents the agent from repeating commands.
+Two-tier detection:
+
+**Tier 1 — Exact match:** Compares normalized commands against all prior
+commands (both successful and failed). Catches verbatim retries.
+
+**Tier 2 — Overlap heuristic:** For same-program commands, computes
+basename-level token overlap. >80% overlap flags as duplicate. However, file
+tokens (basenames with crystallographic extensions) are compared separately:
+if the input files differ, the commands are NOT duplicates regardless of overall
+token overlap. This prevents iterative refinement (same program, new model)
+from being blocked.
+
+When a duplicate is detected, the agent retries through the normal graph path
+with `duplicate_feedback` appended to guidelines (up to 3 attempts).
+
+| File | Role |
+|------|------|
+| `agent/session.py` | `is_duplicate_command()`, `get_all_commands()`, `get_all_failed_commands()` |
+| `programs/ai_agent.py` | `_handle_duplicate_check()`, `_build_duplicate_feedback()` |
 
 ## Metrics and Stop Conditions
 

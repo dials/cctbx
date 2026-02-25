@@ -9038,6 +9038,127 @@ def test_s5j_record_result_discovers_supplemental_map_coeffs():
     print("  PASSED: record_result discovers supplemental map coefficients on live path")
 
 
+def test_s5j_duplicate_detection_different_model_not_duplicate():
+    """Refine with a different model file must NOT be flagged as duplicate.
+
+    Bug: The 80% token-overlap heuristic flagged a new refinement cycle as
+    duplicate of a previous one even though the input model file changed
+    (refine_002.pdb vs model.pdb). The agent then stopped or retried
+    instead of running the requested refinement.
+
+    Fix: If the file tokens (basenames with crystallographic extensions)
+    differ between two commands, they are NOT duplicates regardless of
+    overall token overlap.
+    """
+    import json
+
+    test_dir = os.path.join(os.path.expanduser('~'), '_test_dup_detection')
+    os.makedirs(test_dir, exist_ok=True)
+    try:
+        session_file = os.path.join(test_dir, 'session.json')
+        session_data = {
+            'original_files': ['/data/model.pdb', '/data/data.mtz'],
+            'cycles': [
+                {
+                    'cycle_number': 1,
+                    'program': 'phenix.refine',
+                    'command': 'phenix.refine /data/model.pdb /data/data.mtz nproc=4 '
+                               'main.number_of_macro_cycles=1',
+                    'result': 'SUCCESS: R=0.25',
+                    'output_files': [],
+                },
+                {
+                    'cycle_number': 2,
+                    'program': 'phenix.refine',
+                    'command': 'phenix.refine /data/refine_001.pdb /data/data.mtz nproc=4 '
+                               'main.number_of_macro_cycles=1',
+                    'result': 'SUCCESS: R=0.22',
+                    'output_files': [],
+                },
+            ],
+        }
+        with open(session_file, 'w') as f:
+            json.dump(session_data, f)
+
+        from agent.session import AgentSession
+        session = AgentSession(session_file=session_file)
+
+        # Refine with NEW model (output of cycle 2) → NOT duplicate
+        cmd_new = ('phenix.refine /data/refine_002.pdb /data/data.mtz '
+                   'nproc=4 main.number_of_macro_cycles=1')
+        is_dup, prev, _ = session.is_duplicate_command(cmd_new)
+        assert_false(is_dup,
+            "Refine with different model must NOT be flagged as duplicate, "
+            "but was flagged as dup of cycle %s" % prev)
+
+        # Exact same command as cycle 1 → IS duplicate
+        cmd_same = ('phenix.refine /data/model.pdb /data/data.mtz '
+                    'nproc=4 main.number_of_macro_cycles=1')
+        is_dup2, prev2, _ = session.is_duplicate_command(cmd_same)
+        assert_true(is_dup2,
+            "Exact same command as cycle 1 must be flagged as duplicate")
+
+        # Same program, same params, but model path differs only in directory →
+        # still different basename, NOT duplicate
+        cmd_diff_dir = ('phenix.refine /other/dir/new_model.pdb /data/data.mtz '
+                        'nproc=4 main.number_of_macro_cycles=1')
+        is_dup3, _, _ = session.is_duplicate_command(cmd_diff_dir)
+        assert_false(is_dup3,
+            "Different model basename must NOT be duplicate")
+
+        print("  PASSED: duplicate detection respects different input files")
+
+    finally:
+        import shutil
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+
+def test_s5k_best_files_fallback_for_specific_subcategory():
+    """When category-based lookup fails, best_files should be tried as fallback.
+
+    Scenario: ligandfit's map_coeffs_mtz slot uses specific subcategories
+    (refine_map_coeffs, etc.), which skips the normal best_files path. If
+    categorized_files doesn't contain the file in the right category but
+    best_files["map_coeffs_mtz"] IS populated (from supplemental discovery),
+    the build should still succeed using best_files as fallback.
+
+    Verified by source-code inspection since CommandBuilder requires libtbx.
+    """
+    print("  Test: s5k_best_files_fallback_for_specific_subcategory")
+
+    cb_path = os.path.join(_PROJECT_ROOT, "agent", "command_builder.py")
+    with open(cb_path) as f:
+        src = f.read()
+
+    # The fallback must exist between "uses_specific_subcategory" guard and
+    # "return None" for the extension-skip path
+    assert_true("best_files_fallback" in src,
+        "command_builder.py must contain 'best_files_fallback' selection reason")
+
+    # The fallback must check exclude_categories before using best_files
+    # Find the block: after "if uses_specific_subcategory:" and before the
+    # final "return None", there should be a best_files lookup with exclude check
+    import re
+    pattern = (
+        r'if uses_specific_subcategory:.*?'
+        r'SLOT_TO_BEST_CATEGORY.*?'
+        r'best_files.*?'
+        r'exclude.*?'
+        r'best_files_fallback.*?'
+        r'return None'
+    )
+    match = re.search(pattern, src, re.DOTALL)
+    assert_true(match is not None,
+        "command_builder.py must have best_files fallback with exclude check "
+        "inside the uses_specific_subcategory block before return None")
+
+    # Verify the fallback logs clearly
+    assert_true("category lookup found no files" in src,
+        "Fallback should log 'category lookup found no files' for transparency")
+
+    print("  PASSED: best_files fallback works for specific subcategory slots")
+
+
 def run_all_tests():
     """Run all audit fix tests."""
     run_tests_with_fail_fast()

@@ -129,6 +129,13 @@ phenix.new_program:
       categories: [preferred_category, fallback_category]
       prefer_subcategories: [refined, with_ligand]  # Within category, prefer these
       exclude_categories: [excluded_category]
+      # Filename pattern filters (word-boundary matching):
+      exclude_patterns: [ligand, refine]  # Reject files with these words in name
+      prefer_patterns: [with_ligand]      # Prefer files matching these words
+      # Content-based guards (automatic, no config needed):
+      # - Model slots: HETATM-only PDB files rejected (small molecules)
+      # - Ligand slot: PDB files with ATOM records rejected (protein models)
+      require_best_files_only: true  # Only use best_files, not file scan fallback
 
   outputs:
     files:
@@ -181,6 +188,10 @@ phenix.new_program:
 | `log_parsing:` | Patterns used by log_parsers.py AND session.py for metric extraction |
 | `log_parsing.*.display_name` | Used in session summary display |
 | `log_parsing.*.summary_format` | Format string for summary display |
+| `exclude_patterns` | Reject files with matching words (word-boundary matching: `ligand` matches `atp_ligand.pdb` but NOT `noligand.pdb`) |
+| `prefer_patterns` | Prefer files matching these words (same word-boundary semantics) |
+| `require_best_files_only` | Only fill this slot from `best_files`, skip extension-scan fallback (e.g., ligandfit's `map_coeffs_mtz`) |
+| `auto_fill` | Set to `false` to prevent auto-fill; slot only filled if LLM/user assigns a file |
 
 ---
 

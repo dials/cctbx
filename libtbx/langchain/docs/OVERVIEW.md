@@ -109,6 +109,15 @@ Unified command generation that:
 - Selects appropriate input files using BestFilesTracker
 - Applies strategy flags and defaults
 - Tracks WHY each file was selected (for transparency)
+- **Content-based guards**: rejects small-molecule PDB files from model slots
+  (`_pdb_is_small_molecule`) and protein models from ligand slots
+  (`_pdb_is_protein_model`)
+- **Word-boundary exclude patterns**: `matches_exclude_pattern()` prevents
+  false positives (e.g., "noligand" no longer matches "ligand")
+- **LLM validation**: LLM file assignments checked against slot `exclude_patterns`
+  and content guards before acceptance
+- **Diagnostics**: `_last_missing_slots` records which required slots could not
+  be filled, enabling specific fallback error messages
 
 ### 4. Event System (`agent/event_log.py`, `agent/event_formatter.py`)
 
@@ -160,6 +169,14 @@ Tracks the best file of each type across cycles:
   - `data_mtz`: Locks after first R-free flags generated (consistency for refinement)
   - `map_coeffs_mtz`: Always prefers most recent (maps improve with refinement)
 - Provides `best_files["model"]`, `best_files["data_mtz"]`, `best_files["map_coeffs_mtz"]` to CommandBuilder
+- **Supplemental file discovery**: Session load (`_rebuild_best_files_from_cycles`)
+  and live cycle completion (`record_result`) both call `_find_missing_outputs` to
+  discover companion files (e.g., `refine_001.mtz` from `refine_001_data.mtz`) and
+  evaluate them through the tracker. This ensures `map_coeffs_mtz` is populated even
+  when the client only tracked a subset of output files.
+- **MTZ classification**: `file_utils.classify_mtz_type()` uses regex
+  `(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$` to correctly identify standard refinement
+  output as map coefficients (not raw data)
 
 ### 7. User Directives (`agent/directive_extractor.py`)
 
@@ -621,6 +638,7 @@ python3 tests/tst_event_system.py    # Single suite
 
 | Version | Key Changes |
 |---------|-------------|
+| v112.70 | **Ligandfit file selection**: fixed refine MTZ classification regex (3 locations); word-boundary `exclude_patterns`; content-based PDB guards for model/ligand slots; protein-in-ligand-slot rejection; refinement CIF exclusion; `inject_user_params` bare-key validation; supplemental file discovery on session load and live path; fallback diagnostics (per-program missing slots); duplicate detection respects different input files |
 | v112.31 | **Session management**: `display_and_stop` / `remove_last_n` populate `self.result`; `get_results()` safe before `run()`; `restart_mode` auto-set; **Q1**: resuming with new advice after workflow completion steps back from `complete` to `validate` phase, enabling follow-up programs (polder etc.) |
 | v112 | **Steps table metrics**: cycle metrics as primary source; benign warning metrics extraction; ligand typing fix; case-sensitive pattern fix; autobuild_denmod detection; YAML log_parsing for 8 programs |
 | v111 | **Summary output fixes**: predict_and_build R-free extraction; ligandfit output in final file list; fallback cycle status check fix |

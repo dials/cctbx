@@ -1877,6 +1877,22 @@ class AgentSession:
             new_parts = set(os.path.basename(p) for p in norm_new.split())
             old_parts = set(os.path.basename(p) for p in norm_cmd.split())
 
+            # Extract file tokens (basenames with crystallographic extensions)
+            _FILE_EXTS = {'.pdb', '.cif', '.mtz', '.sca', '.hkl', '.mrc',
+                          '.ccp4', '.map', '.fa', '.seq', '.dat'}
+            def _file_tokens(parts):
+                return {p for p in parts
+                        if os.path.splitext(p)[1].lower() in _FILE_EXTS}
+
+            new_files = _file_tokens(new_parts)
+            old_files = _file_tokens(old_parts)
+
+            # If the input file basenames differ, this is NOT a duplicate.
+            # Running refine with a different model is a different computation,
+            # even if all other params match.
+            if new_files != old_files:
+                continue
+
             # If >80% overlap in tokens, consider it a duplicate
             if len(new_parts) > 0 and len(old_parts) > 0:
                 overlap = len(new_parts & old_parts) / max(len(new_parts), len(old_parts))

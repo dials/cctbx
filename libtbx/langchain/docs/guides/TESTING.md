@@ -169,10 +169,10 @@ The `run_tests_with_fail_fast()` function automatically discovers tests:
 | `tst_phaser_multimodel.py` | 3 | Phaser multi-model handling |
 | `tst_utils.py` | 2 | Assert helpers |
 | `tst_v112_13_fixes.py` | — | Companion files, intermediate filtering, file categorisation (v112.13) |
-| `tst_audit_fixes.py` | 154 | Audit regressions: `_is_failed_result`, zombie state, xtriage resolution, RSR map_cc, max_refine_cycles landing (v112.14); session management keywords, `get_results()` safety, restart_mode auto-set (v112.31 P1/P3/P4); completed-workflow extension via `advice_changed` phase step-back (v112.31 Q1); S2L probe crash detection (v112.52); diagnosable terminal errors — detection, HTML report, no-Sorry UX (v112.55–56); HETATM-based ligand detection, noligand false-positive fix (v112.57–59); Results page working directory + failure diagnosis reference, fatal-diagnosis skip (v112.60–62); crystal symmetry regex fallback, scoped PHIL form (v112.64) |
+| `tst_audit_fixes.py` | 230 | Audit regressions: `_is_failed_result`, zombie state, xtriage resolution, RSR map_cc, max_refine_cycles landing (v112.14); session management keywords, `get_results()` safety, restart_mode auto-set (v112.31 P1/P3/P4); completed-workflow extension via `advice_changed` phase step-back (v112.31 Q1); S2L probe crash detection (v112.52); diagnosable terminal errors — detection, HTML report, no-Sorry UX (v112.55–56); HETATM-based ligand detection, noligand false-positive fix (v112.57–59); Results page working directory + failure diagnosis reference, fatal-diagnosis skip (v112.60–62); crystal symmetry regex fallback, scoped PHIL form (v112.64); ligandfit file selection: refine MTZ classification, word-boundary patterns, content-based PDB guards, supplemental file discovery, duplicate detection (v112.70) |
 | `tst_hardcoded_cleanup.py` | 36 | Hardcoded categorizer cleanup tests |
 
-Total: **1005+ tests across 38 files**
+Total: **1080+ tests across 38 files**
 
 ### Key Tests for Recent Fixes
 
@@ -237,6 +237,14 @@ Total: **1005+ tests across 38 files**
 | `test_q1_polder_reruns_allowed_when_already_done` | tst_audit_fixes.py | `polder_done=True` does NOT block polder re-run (no `run_once` strategy) |
 | `test_q1_advice_cleared_after_one_cycle` | tst_audit_fixes.py | `advice_changed` flag cleared after one successful cycle; next cycle terminates normally |
 | `test_q1_step_back_does_not_apply_outside_complete` | tst_audit_fixes.py | Guard fires only on `complete` phase; `refine`, `validate`, `obtain_model` untouched |
+| `test_s5j_refine_mtz_classified_as_map_coeffs` | tst_audit_fixes.py | `refine_001.mtz` classified as `map_coeffs_mtz` (not `data_mtz`); regex + `classify_mtz_type` |
+| `test_s5j_matches_exclude_pattern_word_boundary` | tst_audit_fixes.py | Word-boundary matching: `ligand` matches `atp_ligand.pdb` but NOT `nsf-d2_noligand.pdb` |
+| `test_s5j_content_guard_ligand_and_model_slots` | tst_audit_fixes.py | HETATM-only PDB rejected from model slot; ATOM-bearing PDB rejected from ligand slot |
+| `test_s5j_refine_cif_excluded_from_ligand_slot` | tst_audit_fixes.py | `refine_001.cif` (geometry restraints) excluded from ligandfit ligand slot |
+| `test_s5j_session_rebuild_map_coeffs` | tst_audit_fixes.py | `_rebuild_best_files_from_cycles` populates `map_coeffs_mtz` from `refine_001.mtz` |
+| `test_s5j_session_rebuild_supplemental_map_coeffs` | tst_audit_fixes.py | Supplemental file discovery on session load finds `refine_001.mtz` from `refine_001_data.mtz` |
+| `test_s5j_record_result_discovers_supplemental_map_coeffs` | tst_audit_fixes.py | `record_result` discovers supplemental map coefficients on live path |
+| `test_s5j_duplicate_detection_different_model_not_duplicate` | tst_audit_fixes.py | `phenix.refine` with different model file NOT flagged as duplicate despite high param overlap |
 
 ## Writing New Tests
 

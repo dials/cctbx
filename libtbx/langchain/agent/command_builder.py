@@ -1066,6 +1066,26 @@ class CommandBuilder:
         # don't fall back to generic extension matching.
         # This prevents ligandfit from using input MTZ when it needs refined MTZ with map coefficients.
         if uses_specific_subcategory:
+            # FALLBACK: try best_files even for specific-subcategory slots.
+            # When category-based lookup fails (categorized_files doesn't contain
+            # the file), best_files may still have the correct file — e.g. after
+            # our supplemental file discovery populates best_files["map_coeffs_mtz"]
+            # from record_result/_rebuild_best_files_from_cycles.
+            best_category = self.SLOT_TO_BEST_CATEGORY.get(input_name, input_name)
+            best_path = self._best_path(context.best_files.get(best_category))
+            if best_path and os.path.exists(best_path):
+                if any(best_path.lower().endswith(ext) for ext in extensions):
+                    exclude_categories_check = priorities.get("exclude_categories", [])
+                    excluded = any(best_path in context.categorized_files.get(exc, [])
+                                   for exc in exclude_categories_check)
+                    if not excluded:
+                        self._log(context, "BUILD: Using best_%s as fallback for %s "
+                                 "(category lookup found no files)" % (best_category, input_name))
+                        self._record_selection(input_name, best_path, "best_files_fallback")
+                        return best_path
+                    else:
+                        self._log(context, "BUILD: best_%s is in excluded category, skipping" % best_category)
+
             self._log(context, "BUILD: No files found for required subcategory %s, skipping extension fallback" %
                      priority_categories)
             return None
