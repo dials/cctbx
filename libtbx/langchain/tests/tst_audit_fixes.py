@@ -9310,6 +9310,77 @@ def test_s5n_protein_guard_ratio_based():
     print("  PASSED: size-based protein guard works correctly")
 
 
+def test_s5o_ligandfit_prereq_refine_first():
+    """Bug 17 extended: when user wants ligandfit but refine_count==0,
+    refine must run first (produces map_coeffs_mtz for ligandfit).
+    - Cycle 3 (after xtriage+model_vs_data): valid=[phenix.refine] only
+    - Cycle 4 (after refine): valid includes phenix.ligandfit
+    """
+    print("  Test: ligandfit_prereq_refine_first")
+
+    import types
+    if 'libtbx' not in sys.modules:
+        libtbx = types.ModuleType('libtbx')
+        libtbx.langchain = types.ModuleType('libtbx.langchain')
+        libtbx.langchain.__path__ = [os.path.join(os.path.dirname(__file__), '..')]
+        sys.modules['libtbx'] = libtbx
+        sys.modules['libtbx.langchain'] = libtbx.langchain
+
+    from agent.workflow_engine import WorkflowEngine
+    from agent.workflow_state import _categorize_files, _analyze_history
+
+    engine = WorkflowEngine()
+    files_list = ['/tmp/7qz0.fa', '/tmp/7qz0.mtz', '/tmp/7qz0_ligand.pdb', '/tmp/7qz0.pdb']
+    directives = {"workflow_preferences": {"prefer_programs": ["phenix.ligandfit"]}}
+
+    # After xtriage + model_vs_data with good R-free (pre-refined model)
+    history_pre = [
+        {"program": "phenix.xtriage", "command": "phenix.xtriage 7qz0.mtz",
+         "result": "SUCCESS", "analysis": {"resolution": 2.10}},
+        {"program": "phenix.model_vs_data",
+         "command": "phenix.model_vs_data 7qz0.pdb 7qz0.mtz",
+         "result": "SUCCESS",
+         "analysis": {"r_free": 0.204, "r_work": 0.177, "resolution": 2.10}},
+    ]
+    files = _categorize_files(files_list)
+    hi_pre = _analyze_history(history_pre)
+    analysis_pre = {"r_free": 0.204, "resolution": 2.10}
+
+    state_pre = engine.get_workflow_state("xray", files, hi_pre, analysis_pre, directives)
+    valid_pre = state_pre["valid_programs"]
+
+    # Before refine: only phenix.refine should be available, NOT ligandfit
+    assert_true("phenix.refine" in valid_pre,
+        "phenix.refine should be in valid_programs when refine_count==0 "
+        "(needed as ligandfit prerequisite), got: %s" % valid_pre)
+    assert_true("phenix.ligandfit" not in valid_pre,
+        "phenix.ligandfit should NOT be in valid_programs when refine_count==0 "
+        "(can't build without map_coeffs_mtz), got: %s" % valid_pre)
+    assert_true("STOP" not in valid_pre,
+        "STOP should NOT be in valid_programs when refine is a ligandfit "
+        "prerequisite, got: %s" % valid_pre)
+
+    # After refine runs
+    history_post = history_pre + [
+        {"program": "phenix.refine",
+         "command": "phenix.refine 7qz0.pdb 7qz0.mtz",
+         "result": "SUCCESS",
+         "analysis": {"r_free": 0.198, "resolution": 2.10}},
+    ]
+    hi_post = _analyze_history(history_post)
+    analysis_post = {"r_free": 0.198, "resolution": 2.10}
+
+    state_post = engine.get_workflow_state("xray", files, hi_post, analysis_post, directives)
+    valid_post = state_post["valid_programs"]
+
+    # After refine: ligandfit should be available
+    assert_true("phenix.ligandfit" in valid_post,
+        "phenix.ligandfit should be in valid_programs after refine runs "
+        "(refine_count > 0, YAML conditions pass), got: %s" % valid_post)
+
+    print("  PASSED")
+
+
 def run_all_tests():
     """Run all audit fix tests."""
     run_tests_with_fail_fast()

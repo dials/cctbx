@@ -260,12 +260,26 @@ stops, even though ligand fitting was explicitly requested.
    — it couldn't add ligandfit since it wasn't in the list
 
 **Fixes:**
-- Workflow engine: `user_wants_ligandfit` check no longer requires `refine_count > 0`
-  when the model is already at target quality (pre-refined models)
-- `_apply_directives`: When `phenix.ligandfit` is in `prefer_programs` but not in
-  valid programs, and user explicitly wants it, inject it into the list
+- **`_is_at_target` returns False when refinement is a ligandfit prerequisite**:
+  When `user_wants_ligandfit=True`, `ligandfit_done=False`, and `refine_count==0`,
+  `_is_at_target()` returns False even if R-free is below target. This is the
+  primary mechanism: it keeps `phenix.refine` in valid_programs so the YAML
+  workflow naturally flows: refine (produces map_coeffs) → ligandfit (YAML
+  conditions pass once refine_count > 0).
+- **`_apply_directives` defers ligandfit injection until refine runs**: Previously,
+  `_apply_directives` injected `phenix.ligandfit` into valid_programs even when
+  `refine_count==0`, bypassing YAML conditions. This caused the LLM to pick
+  ligandfit prematurely (which would fail in BUILD due to missing map_coeffs_mtz).
+  Now, injection is deferred until `refine_count > 0`, letting the YAML conditions
+  gate ligandfit correctly.
+- **`_get_valid_programs_for_phase` safety net**: Defense-in-depth check that keeps
+  refine when ligandfit needs it, in case `_is_at_target` logic changes.
 - `_analyze_history`: When `model_vs_data` ran as a placement probe (before any
   refinement), unset `validation_done` to prevent premature workflow completion
+- **`require_best_files_only` implemented**: Ligandfit's `map_coeffs_mtz` slot
+  has `require_best_files_only: true` in YAML to prevent the raw Fobs MTZ from
+  being used. This flag was defined but not honored. Now, slots with this flag
+  skip extension-based fallback and only accept files from `best_files`.
 
 ### Files changed
 
@@ -274,10 +288,10 @@ stops, even though ligand fitting was explicitly requested.
 | `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result`; duplicate detection respects different input files; `set_project_info` merges original_files on resume; working directory uses `client_working_directory` from session data |
 | `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` |
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
-| `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots; detailed ligand guard logging |
+| `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots; detailed ligand guard logging; `require_best_files_only` guard |
 | `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
 | `agent/workflow_state.py` | New `_pdb_is_protein_model()` — size-based protein detection (≤150 atoms = ligand, >150 + majority ATOM = protein); increased read buffer to 32 KB; placement probe no longer sets `validation_done` |
-| `agent/workflow_engine.py` | Ligandfit allowed with pre-refined models (no refine_count required when model at target); `_apply_directives` injects ligandfit when user explicitly requests it |
+| `agent/workflow_engine.py` | Ligandfit allowed with pre-refined models; `_apply_directives` injects ligandfit; refine kept as ligandfit prerequisite when `refine_count==0` |
 | `agent/advice_preprocessor.py` | Removed instruction leakage from PHIL translation section header |
 | `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons; BUILD error includes missing slot names; fallback build log capture |
 | `agent/planner.py` | `fix_program_parameters` now removes wrong param when target already exists (instead of skipping) |

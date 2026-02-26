@@ -1257,6 +1257,7 @@ def plan(state):
 
     # 1. Check for auto-stop from metrics trend
     metrics_trend = state.get("metrics_trend", {})
+    _ws_context = state.get("workflow_state", {}).get("context", {})
 
     if metrics_trend.get("should_stop"):
         reason = metrics_trend.get("reason", "Metrics indicate completion")
@@ -1339,8 +1340,28 @@ def plan(state):
                     "stop": True,
                     "stop_reason": reason,
                 }
+
+        # Suppress AUTO-STOP when user wants ligandfit but it hasn't run yet.
+        # The advice preprocessor may extract prefer_programs=['phenix.ligandfit']
+        # without setting after_program, so the check above doesn't fire.
+        # Ligandfit requires refinement first (to produce map coefficients), so
+        # we must allow refinement to run even if the model is already "at target".
+        elif _ws_context.get("user_wants_ligandfit") and not _ws_context.get("ligandfit_done") and not _ws_context.get("has_ligand_fit"):
+            state = _log(state,
+                "PLAN: Suppressing AUTO-STOP — user wants ligandfit but it hasn't run yet "
+                "(prefer_programs includes ligandfit)")
+            # CRITICAL: Clear should_stop in the state's metrics_trend so that
+            # downstream code (rules_selector, LLM prompt) doesn't re-trigger
+            # the stop.  Without this, _mock_plan → rules_selector._should_stop
+            # sees should_stop=True and returns STOP again, defeating the
+            # suppression.
+            metrics_trend = dict(metrics_trend)
+            metrics_trend["should_stop"] = False
+            metrics_trend["reason"] = "Suppressed: ligandfit prerequisite (refinement needed first)"
+            state = {**state, "metrics_trend": metrics_trend}
+
         else:
-            # No after_program directive, allow auto-stop
+            # No after_program directive and no pending ligandfit, allow auto-stop
             state = _log(state, "PLAN: AUTO-STOP triggered: %s" % reason)
             # Emit STOP_DECISION event
             state = _emit(state, EventType.STOP_DECISION,

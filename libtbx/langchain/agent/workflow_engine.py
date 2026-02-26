@@ -1094,7 +1094,22 @@ class WorkflowEngine:
         return False
 
     def _is_at_target(self, context, experiment_type):
-        """Check if we've reached quality targets."""
+        """Check if we've reached quality targets.
+
+        Returns False when ligandfit is wanted but refinement hasn't run yet,
+        because refinement is a *prerequisite* for ligandfit (it produces the
+        map coefficients that ligandfit needs).  Without this, the workflow
+        stops prematurely for pre-refined models whose R-free is already good.
+        """
+        # Ligandfit prerequisite: refinement must run first to produce map
+        # coefficients, regardless of current R-free quality.
+        if (context.get("user_wants_ligandfit") and
+                not context.get("ligandfit_done") and
+                not context.get("has_ligand_fit")):
+            refine_key = "rsr_count" if experiment_type == "cryoem" else "refine_count"
+            if context.get(refine_key, 0) == 0:
+                return False
+
         if experiment_type == "xray":
             r_free = context.get("r_free")
             resolution = context.get("resolution")
@@ -1277,6 +1292,9 @@ class WorkflowEngine:
 
         # Refinement phase: remove refinement when at target or max cycles reached
         # Exception: post-ligandfit refinement is always allowed (model changed)
+        # Safety net: _is_at_target() already returns False when ligandfit needs
+        # refine as a prerequisite, so at_target should be False in that case.
+        # The refine_is_ligandfit_prereq check below is defense-in-depth.
         if phase_name == "refine":
             needs_post_ligandfit = context.get("needs_post_ligandfit_refine", False)
             max_refine = directives.get("stop_conditions", {}).get("max_refine_cycles") if directives else None
@@ -1288,14 +1306,26 @@ class WorkflowEngine:
             refine_allowed = (max_refine is None) or (refine_count < max_refine)
             at_target = self._is_at_target(context, experiment_type)
 
-            if (not refine_allowed or at_target) and not needs_post_ligandfit:
+            # Refinement is a prerequisite for ligandfit: it produces the
+            # map_coeffs_mtz that ligandfit needs.  Keep refine available when:
+            #   - user wants ligandfit AND it hasn't been done yet
+            #   - no refinement has run in this session (refine_count == 0)
+            refine_is_ligandfit_prereq = (
+                context.get("user_wants_ligandfit", False) and
+                not context.get("ligandfit_done") and
+                not context.get("has_ligand_fit") and
+                refine_count == 0
+            )
+
+            if (not refine_allowed or at_target) and not needs_post_ligandfit and not refine_is_ligandfit_prereq:
                 # Remove refinement programs from the phase's own list
                 for prog in ["phenix.refine", "phenix.real_space_refine"]:
                     if prog in valid:
                         valid.remove(prog)
 
             # Add STOP if at target AND not in post-ligandfit refinement
-            if at_target and not needs_post_ligandfit:
+            # AND not keeping refine as a prerequisite for ligandfit
+            if at_target and not needs_post_ligandfit and not refine_is_ligandfit_prereq:
                 if "STOP" not in valid:
                     valid.append("STOP")
 
@@ -1540,20 +1570,29 @@ class WorkflowEngine:
         prefer_programs = workflow_prefs.get("prefer_programs", [])
         if prefer_programs:
             # Special case: when user explicitly wants ligandfit but it was
-            # excluded by YAML conditions (e.g. refine_count > 0 fails because
-            # the user provided an already-refined model), inject it if the
-            # model quality is sufficient for ligand fitting.
+            # excluded by YAML conditions, inject it — BUT only if refinement
+            # has already run (refine_count > 0).  When refine_count==0,
+            # refinement is a prerequisite for ligandfit (produces the map
+            # coefficients MTZ).  _is_at_target() already keeps refine
+            # available in this case, so the YAML workflow naturally flows:
+            #   refine (produces map_coeffs) → ligandfit (YAML conditions pass)
             if ("phenix.ligandfit" in prefer_programs and
                 "phenix.ligandfit" not in result and
                 context and
                 context.get("user_wants_ligandfit") and
                 not context.get("ligandfit_done") and
                 phase_name in ("refine", "ready_to_refine")):
+                refine_key = "rsr_count" if experiment_type == "cryoem" else "refine_count"
+                has_refined = (context.get(refine_key, 0) > 0)
                 r_free = context.get("r_free")
-                if r_free is None or r_free < 0.50:
+                if has_refined and (r_free is None or r_free < 0.50):
                     result.insert(0, "phenix.ligandfit")
                     modifications.append(
                         "Injected phenix.ligandfit (user requested, model quality sufficient)")
+                elif not has_refined:
+                    modifications.append(
+                        "Deferred phenix.ligandfit injection (refine_count=0, "
+                        "refinement must run first to produce map coefficients)")
 
             preferred = [p for p in prefer_programs if p in result]
             others = [p for p in result if p not in prefer_programs]

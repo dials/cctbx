@@ -1051,6 +1051,26 @@ class CommandBuilder:
                     return result
 
         # PRIORITY 4: Extension-based fallback with recency preference
+        #
+        # GUARD: require_best_files_only — some slots (like ligandfit's
+        # map_coeffs_mtz) should ONLY be filled from best_files, never from
+        # extension matching.  This prevents the raw Fobs MTZ from being used
+        # where map coefficients are required.
+        if input_def.get("require_best_files_only"):
+            # Try best_files one more time (may have been skipped due to
+            # uses_specific_subcategory logic above)
+            best_category = self.SLOT_TO_BEST_CATEGORY.get(input_name, input_name)
+            best_path = self._best_path(context.best_files.get(best_category))
+            if best_path and os.path.exists(best_path):
+                if any(best_path.lower().endswith(ext) for ext in extensions):
+                    self._log(context, "BUILD: require_best_files_only: using best_%s for %s" %
+                             (best_category, input_name))
+                    self._record_selection(input_name, best_path, "best_files_required")
+                    return best_path
+            self._log(context, "BUILD: require_best_files_only: no best_%s available for %s, "
+                     "skipping extension fallback" % (best_category, input_name))
+            return None
+
         # SPECIAL: For half_map slot, only use files explicitly categorized as half-maps
         # Don't fall back to extension matching - this prevents the same file from being
         # used as both full_map and half_map
