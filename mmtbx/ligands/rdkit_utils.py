@@ -358,13 +358,14 @@ def _filter_isolated_linkers(candidate_cut_bonds, mol, fragment_size_map):
 
 # ------------------------------------------------------------------------------
 
-def draw_colored_fragments(mol, rdkit_frags, filename):
+def draw_colored_fragments(mol, rdkit_frags, filename, use_atom_names=False):
   """
   1. Removes all H atoms.
   2. Strips all charges and implicit H properties (forces clean drawing).
   3. Maps colors from the original fragmented indices to the new clean molecule.
   """
   if filename is None: return
+
   # 1. Work on a copy
   mol_viz = Chem.Mol(mol)
 
@@ -387,6 +388,12 @@ def draw_colored_fragments(mol, rdkit_frags, filename):
     atom.SetFormalCharge(0)
     # Update property cache to accept these "weird" valences
     atom.UpdatePropertyCache(strict=False)
+
+    # --- Labeling Logic ---
+    if use_atom_names and atom.HasProp("_Name"):
+      # RDKit looks for "atomLabel" to override the symbol
+      name = atom.GetProp("_Name").strip()
+      atom.SetProp("atomLabel", name)
 
   # 5. Coordinate Generation
   AllChem.Compute2DCoords(mol_viz)

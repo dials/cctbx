@@ -31,6 +31,7 @@ def run():
   run_test_07()
   run_test_08()
   run_test_09()
+  run_test_10()
 
 # ------------------------------------------------------------------------------
 
@@ -139,6 +140,34 @@ def run_test_08():
 def run_test_09():
   print('test09...')
   rigid_comps_isels = compute_fragments(pdb_str_09, 'resname HP6', 3)
+
+# ------------------------------------------------------------------------------
+
+def run_test_10():
+  print('test10...')
+  pdb_inp = iotbx.pdb.input(lines=pdb_str_10.split("\n"), source_info=None)
+  cif_object = iotbx.cif.reader(input_string = cif_restraints_10).model()
+  cif_objects = [('bla.cif', cif_object)]
+  model = mmtbx.model.manager(
+    model_input=pdb_inp,
+    restraint_objects = cif_objects,
+    log = null_out())
+  model.process(make_restraints=True)
+  ligand_isel = model.iselection('resname I9A')
+  ph =  model.get_hierarchy()
+  atoms_ligand = ph.select(ligand_isel).atoms()
+  atom_group = atoms_ligand[0].parent()
+
+  mon_lib_srv = model.get_mon_lib_srv()
+  cif_object, ani = mon_lib_srv.get_comp_comp_id_and_atom_name_interpretation(
+    residue_name=atom_group.resname, atom_names=atom_group.atoms().extract_name())
+
+  cctbx_rigid_components = rdkit_utils.get_cctbx_isel_for_rigid_components(
+    atom_group = atom_group,
+    cif_object = cif_object)
+
+  #print(len(cctbx_rigid_components))
+  assert len(cctbx_rigid_components) == 1
 
 # ------------------------------------------------------------------------------
 
@@ -768,6 +797,182 @@ HETATM   21 H261 HP6 A   1      11.632   6.606  11.386  1.00 20.00           H
 HETATM   22 H262 HP6 A   1      11.335   5.261  10.596  1.00 20.00           H
 HETATM   23 H263 HP6 A   1      10.816   5.438  12.086  1.00 20.00           H
 END
+'''
+
+pdb_str_10 = '''
+CRYST1   14.075   13.797   13.929  90.00  90.00  90.00 P 1
+HETATM    1  C26 I9A A   1       7.492   6.768   8.057  1.00 20.00      A    C
+HETATM    2  C27 I9A A   1       6.636   6.023   7.282  1.00 20.00      A    C
+HETATM    3  C28 I9A A   1       7.582   6.201   5.893  1.00 20.00      A    C
+HETATM    4  C29 I9A A   1       5.611   6.760   6.791  1.00 20.00      A    C
+HETATM    5  C30 I9A A   1       6.108   7.877   6.058  1.00 20.00      A    C
+HETATM    6  C31 I9A A   1       7.482   7.877   6.058  1.00 20.00      A    C
+HETATM    7  C32 I9A A   1       7.995   7.877   7.315  1.00 20.00      A    C
+HETATM    8  H1  I9A A   1       5.750   8.792   6.514  1.00 20.00      A    H
+HETATM    9  H2  I9A A   1       5.750   7.823   5.037  1.00 20.00      A    H
+HETATM   10  H3  I9A A   1       8.320   6.146   8.375  1.00 20.00      A    H
+HETATM   11  H10 I9A A   1       8.590   5.825   6.021  1.00 20.00      A    H
+HETATM   12  H11 I9A A   1       5.008   6.143   6.137  1.00 20.00      A    H
+HETATM   13  H12 I9A A   1       5.000   7.115   7.613  1.00 20.00      A    H
+HETATM   14  H4  I9A A   1       6.962   7.131   8.929  1.00 20.00      A    H
+HETATM   15  H5  I9A A   1       6.436   5.000   7.579  1.00 20.00      A    H
+HETATM   16  H6  I9A A   1       7.995   8.450   5.294  1.00 20.00      A    H
+HETATM   17  H7  I9A A   1       9.075   7.812   7.261  1.00 20.00      A    H
+HETATM   18  H8  I9A A   1       7.716   8.797   7.815  1.00 20.00      A    H
+HETATM   19  H9  I9A A   1       7.089   5.836   5.000  1.00 20.00      A    H
+END
+'''
+
+cif_restraints_10 = '''
+data_comp_list
+loop_
+_chem_comp.id
+_chem_comp.three_letter_code
+_chem_comp.name
+_chem_comp.group
+_chem_comp.number_atoms_all
+_chem_comp.number_atoms_nh
+_chem_comp.desc_level
+I9A        I9A '(1s,4s)-bicyclo[2.2.1]heptane' non-polymer 19 7 .
+#
+data_comp_I9A
+#
+loop_
+_chem_comp_atom.comp_id
+_chem_comp_atom.atom_id
+_chem_comp_atom.type_symbol
+_chem_comp_atom.type_energy
+_chem_comp_atom.charge
+_chem_comp_atom.partial_charge
+_chem_comp_atom.x
+_chem_comp_atom.y
+_chem_comp_atom.z
+I9A         C30    C   CH2    0    .      -0.8708    0.8113   -0.7331
+I9A         C26    C   CH2    0    .       0.5134   -0.2979    1.2657
+I9A         C27    C   CH1    0    .      -0.3427   -1.0434    0.4914
+I9A         C31    C   CH1    0    .       0.5034    0.8113   -0.7331
+I9A         C32    C   CH2    0    .       1.0157    0.8113    0.5242
+I9A         C28    C   CH2    0    .       0.6030   -0.8653   -0.8975
+I9A         C29    C   CH2    0    .      -1.3676   -0.3058    0.0003
+I9A         H1     H   HCH2   0    .      -1.2286    1.7265   -0.2772
+I9A         H2     H   HCH2   0    .      -1.2286    0.7566   -1.7542
+I9A         H3     H   HCH2   0    .       1.3413   -0.9199    1.5841
+I9A         H4     H   HCH2   0    .      -0.0171    0.0653    2.1376
+I9A         H5     H   HCH1   0    .      -0.5425   -2.0661    0.7877
+I9A         H6     H   HCH1   0    .       1.0162    1.3837   -1.4966
+I9A         H7     H   HCH2   0    .       2.0957    0.7460    0.4704
+I9A         H8     H   HCH2   0    .       0.7374    1.7312    1.0239
+I9A         H9     H   HCH2   0    .       0.1104   -1.2298   -1.7908
+I9A         H10    H   HCH2   0    .       1.6112   -1.2407   -0.7704
+I9A         H11    H   HCH2   0    .      -1.9712   -0.9232   -0.6539
+I9A         H12    H   HCH2   0    .      -1.9786    0.0489    0.8215
+#
+loop_
+_chem_comp_bond.comp_id
+_chem_comp_bond.atom_id_1
+_chem_comp_bond.atom_id_2
+_chem_comp_bond.type
+_chem_comp_bond.value_dist
+_chem_comp_bond.value_dist_esd
+I9A   C28     C31   single        1.687 0.020
+I9A   C28     C27   single        1.690 0.020
+I9A   C31     C30   single        1.374 0.020
+I9A   C31     C32   single        1.358 0.020
+I9A   C30     C29   single        1.426 0.020
+I9A   C29     C27   single        1.355 0.020
+I9A   C27     C26   single        1.374 0.020
+I9A   C32     C26   single        1.426 0.020
+I9A   C30     H1    single        1.083 0.020
+I9A   C30     H2    single        1.083 0.020
+I9A   C26     H3    single        1.083 0.020
+I9A   C26     H4    single        1.083 0.020
+I9A   C27     H5    single        1.083 0.020
+I9A   C31     H6    single        1.083 0.020
+I9A   C32     H7    single        1.083 0.020
+I9A   C32     H8    single        1.083 0.020
+I9A   C28     H9    single        1.083 0.020
+I9A   C28     H10   single        1.083 0.020
+I9A   C29     H11   single        1.083 0.020
+I9A   C29     H12   single        1.083 0.020
+#
+loop_
+_chem_comp_angle.comp_id
+_chem_comp_angle.atom_id_1
+_chem_comp_angle.atom_id_2
+_chem_comp_angle.atom_id_3
+_chem_comp_angle.value_angle
+_chem_comp_angle.value_angle_esd
+I9A   H2      C30     H1          109.28 3.000
+I9A   H2      C30     C29         109.29 3.000
+I9A   H1      C30     C29         109.29 3.000
+I9A   H2      C30     C31         109.29 3.000
+I9A   H1      C30     C31         109.29 3.000
+I9A   C29     C30     C31         110.39 3.000
+I9A   H4      C26     H3          109.28 3.000
+I9A   H4      C26     C32         109.29 3.000
+I9A   H3      C26     C32         109.29 3.000
+I9A   H4      C26     C27         109.29 3.000
+I9A   H3      C26     C27         109.29 3.000
+I9A   C32     C26     C27         110.39 3.000
+I9A   H5      C27     C29         118.27 3.000
+I9A   H5      C27     C28         115.31 3.000
+I9A   C29     C27     C28          93.90 3.000
+I9A   H5      C27     C26         118.22 3.000
+I9A   C29     C27     C26         112.35 3.000
+I9A   C28     C27     C26          93.28 3.000
+I9A   H6      C31     C28         115.37 3.000
+I9A   H6      C31     C32         118.29 3.000
+I9A   C28     C31     C32          93.90 3.000
+I9A   H6      C31     C30         118.25 3.000
+I9A   C32     C31     C30         112.17 3.000
+I9A   C28     C31     C30          93.38 3.000
+I9A   H8      C32     H7          109.28 3.000
+I9A   H8      C32     C31         109.28 3.000
+I9A   H7      C32     C31         109.28 3.000
+I9A   H8      C32     C26         109.28 3.000
+I9A   H7      C32     C26         109.28 3.000
+I9A   C31     C32     C26         110.41 3.000
+I9A   H10     C28     H9          113.79 3.000
+I9A   H10     C28     C31         112.82 3.000
+I9A   H9      C28     C31         112.82 3.000
+I9A   H10     C28     C27         112.82 3.000
+I9A   H9      C28     C27         112.82 3.000
+I9A   C31     C28     C27          89.52 3.000
+I9A   H12     C29     H11         109.27 3.000
+I9A   H12     C29     C27         109.27 3.000
+I9A   H11     C29     C27         109.27 3.000
+I9A   H12     C29     C30         109.27 3.000
+I9A   H11     C29     C30         109.27 3.000
+I9A   C27     C29     C30         110.45 3.000
+#
+loop_
+_chem_comp_tor.comp_id
+_chem_comp_tor.id
+_chem_comp_tor.atom_id_1
+_chem_comp_tor.atom_id_2
+_chem_comp_tor.atom_id_3
+_chem_comp_tor.atom_id_4
+_chem_comp_tor.value_angle
+_chem_comp_tor.value_angle_esd
+_chem_comp_tor.period
+I9A Var_01         C27     C28     C31     C30         -55.93  30.0 3
+I9A Var_02         C26     C32     C31     C30          56.11  30.0 1
+I9A Var_03         C28     C27     C29     C30         -39.21  30.0 1
+I9A Var_04         C31     C28     C27     C26         -56.11  30.0 3
+I9A Var_05         C31     C30     C29     C27           0.26  30.0 1
+I9A Var_06         C31     C32     C26     C27          -0.00  30.0 1
+I9A Var_07         C29     C30     C31     C32         -56.71  30.0 1
+#
+loop_
+_chem_comp_chir.comp_id
+_chem_comp_chir.id
+_chem_comp_chir.atom_id_centre
+_chem_comp_chir.atom_id_1
+_chem_comp_chir.atom_id_2
+_chem_comp_chir.atom_id_3
+_chem_comp_chir.volume_sign
+I9A chir_01   C27     C28     C29     C26   positiv
+I9A chir_02   C31     C28     C30     C32   negativ
 '''
 
 # ------------------------------------------------------------------------------
