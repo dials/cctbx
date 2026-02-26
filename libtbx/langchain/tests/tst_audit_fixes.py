@@ -4545,18 +4545,29 @@ def test_s3a_finalize_runs_after_diagnosis():
 def test_pdb_is_small_molecule_helper():
     """
     _pdb_is_small_molecule must correctly distinguish polymer models from
-    small-molecule coordinate files based on ATOM vs HETATM record content.
+    small-molecule coordinate files based on file size (atom count) and
+    record types.
+
+    Detection strategy:
+    - ≤150 atoms total → small molecule (ligands have 10-100 atoms)
+    - >150 atoms, HETATM-only → small molecule
+    - >150 atoms, has ATOM records → NOT small molecule (protein)
 
     This is the foundational function for the atp.pdb ligand-detection fix.
     """
     print("  Test: pdb_is_small_molecule_helper")
     from agent.workflow_state import _pdb_is_small_molecule
 
-    protein_pdb = (
-        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
-        "ATOM      2  CA  ALA A   2       4.000   5.000   6.000  1.00  0.00           C\n"
-        "END\n"
-    )
+    # Realistic protein: >150 ATOM records (real proteins have 500+ atoms)
+    protein_lines = []
+    for i in range(200):
+        protein_lines.append(
+            "ATOM  %5d  CA  ALA A %3d       %6.1f   0.000   0.000  1.00  0.00           C"
+            % (i+1, i+1, float(i)))
+    protein_lines.append("END")
+    protein_pdb = "\n".join(protein_lines) + "\n"
+
+    # Small ligand: HETATM-only (classic case)
     ligand_pdb = (
         "REMARK  ATP - adenosine triphosphate\n"
         "HETATM    1  PA  ATP     1       1.000   2.000   3.000  1.00  0.00           P\n"
@@ -4564,11 +4575,23 @@ def test_pdb_is_small_molecule_helper():
         "HETATM    3  C5  ATP     1       7.000   8.000   9.000  1.00  0.00           C\n"
         "END\n"
     )
-    mixed_pdb = (
-        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
-        "HETATM    2  PA  ATP     1       4.000   5.000   6.000  1.00  0.00           P\n"
-        "END\n"
-    )
+
+    # Small ligand with ATOM records (the bug case: atp.pdb using ATOM instead of HETATM)
+    atom_ligand_pdb_lines = []
+    for i in range(31):  # ATP has ~31 atoms
+        atom_ligand_pdb_lines.append(
+            "ATOM  %5d  C%d  ATP A   1       %6.1f   0.000   0.000  1.00  0.00           C"
+            % (i+1, i % 10, float(i)))
+    atom_ligand_pdb_lines.append("END")
+    atom_ligand_pdb = "\n".join(atom_ligand_pdb_lines) + "\n"
+
+    # Mixed: realistic protein (>150 ATOM) plus bound ligand HETATM
+    mixed_lines = list(protein_lines[:-1])  # 200 ATOM lines without END
+    mixed_lines.append(
+        "HETATM  201  PA  ATP A   1       4.000   5.000   6.000  1.00  0.00           P")
+    mixed_lines.append("END")
+    mixed_pdb = "\n".join(mixed_lines) + "\n"
+
     empty_pdb = "REMARK  empty file\nEND\n"
 
     with tempfile.TemporaryDirectory() as d:
@@ -4577,17 +4600,22 @@ def test_pdb_is_small_molecule_helper():
             with open(p, 'w') as f: f.write(content)
             return p
 
-        # Protein: has ATOM → NOT a small molecule
+        # Protein (200 ATOM, >150) → NOT a small molecule
         assert_false(_pdb_is_small_molecule(write('protein.pdb', protein_pdb)),
-                     "Protein (has ATOM records) must not be small molecule")
+                     "Protein (200 ATOM records) must not be small molecule")
 
-        # Ligand: HETATM only → IS a small molecule
+        # HETATM-only ligand → IS a small molecule
         assert_true(_pdb_is_small_molecule(write('atp.pdb', ligand_pdb)),
                     "HETATM-only file must be detected as small molecule")
 
-        # Mixed: has ATOM → NOT a small molecule (protein + bound ligand in one file)
+        # ATOM-only ligand (31 atoms, ≤150) → IS a small molecule
+        # This is the key bug fix: atp.pdb may use ATOM records
+        assert_true(_pdb_is_small_molecule(write('atp_atom.pdb', atom_ligand_pdb)),
+                    "Small ATOM-only file (31 atoms) must be detected as small molecule")
+
+        # Mixed (200 ATOM + 1 HETATM, >150) → NOT a small molecule
         assert_false(_pdb_is_small_molecule(write('complex.pdb', mixed_pdb)),
-                     "File with ATOM records must not be small molecule even if HETATM present")
+                     "Large file with ATOM records must not be small molecule")
 
         # Empty/REMARK-only: no ATOM or HETATM → returns False (conservative)
         assert_false(_pdb_is_small_molecule(write('empty.pdb', empty_pdb)),
@@ -4637,21 +4665,28 @@ def test_hetcode_ligand_not_used_as_refine_model():
         print("  SKIPPED: could not load YAML rules:", e)
         return
 
-    protein_pdb = (
-        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
-        "ATOM      2  CA  ALA A   2       4.000   5.000   6.000  1.00  0.00           C\n"
-        "END\n"
-    )
+    # Protein model must have enough atoms to be distinguishable from a ligand.
+    # Real proteins have 500+ atoms; we use 200 to be well above the 150-atom
+    # threshold that separates ligands from proteins in _pdb_is_small_molecule.
+    protein_lines = []
+    for i in range(200):
+        protein_lines.append(
+            "ATOM  %5d  CA  ALA A %3d       %6.1f   %6.1f   %6.1f  1.00  0.00           C"
+            % (i+1, i+1, float(i), 0.0, 0.0))
+    protein_lines.append("END")
+    protein_pdb = "\n".join(protein_lines) + "\n"
+
     hetatm_pdb = (
         "HETATM    1  PA  ATP     1       1.000   2.000   3.000  1.00  0.00           P\n"
         "HETATM    2  O1A ATP     1       4.000   5.000   6.000  1.00  0.00           O\n"
         "END\n"
     )
-    mixed_pdb = (
-        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00  0.00           C\n"
-        "HETATM    2  PA  ATP     1       4.000   5.000   6.000  1.00  0.00           P\n"
-        "END\n"
-    )
+    # Mixed file: mostly protein (200 ATOM) plus a few HETATM ligand atoms
+    mixed_lines = list(protein_lines[:-1])  # all ATOM lines, without END
+    mixed_lines.append(
+        "HETATM  201  PA  ATP     1       4.000   5.000   6.000  1.00  0.00           P")
+    mixed_lines.append("END")
+    mixed_pdb = "\n".join(mixed_lines) + "\n"
 
     # Hetcode names that have no 'lig' substring — these are the problem files
     ligand_names = ['atp.pdb', 'gdp.pdb', 'hem.pdb', 'fmn.pdb', 'NAD.pdb']
@@ -4772,16 +4807,16 @@ def test_is_ligand_file_noligand_false_positive():
         "HETATM    2  N1  ATP A   1       4.000   5.000   6.000  1.00 10.00           N\n"
         "END\n"
     )
-    protein_pdb = (
-        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00           C\n"
-        "ATOM      2  CB  ALA A   1       2.000   3.000   4.000  1.00 10.00           C\n"
-        "END\n"
-    )
-    noligand_pdb = (
-        "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00           C\n"
-        "ATOM      2  CB  ALA A   2       2.000   3.000   4.000  1.00 10.00           C\n"
-        "END\n"
-    )
+    # Protein PDBs need >150 ATOM records to be realistically distinguishable
+    # from small molecules.  Real proteins have 500+ atoms.
+    protein_lines = []
+    for i in range(200):
+        protein_lines.append(
+            "ATOM  %5d  CA  ALA A %3d       %6.1f   0.000   0.000  1.00 10.00           C"
+            % (i+1, i+1, float(i)))
+    protein_lines.append("END")
+    protein_pdb = "\n".join(protein_lines) + "\n"
+    noligand_pdb = protein_pdb  # Same content, different name
     with tempfile.TemporaryDirectory() as d:
         def write(name, content):
             p = os.path.join(d, name)

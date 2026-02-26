@@ -80,6 +80,11 @@ class CommandContext:
     # User directives (program_settings, constraints, etc.)
     directives: Dict[str, Any] = field(default_factory=dict)
 
+    # Pre-extracted HETATM residues from best model (for polder selection
+    # on server where client PDB files are not on disk).
+    # Format: [[chain, resseq, resname], ...]
+    model_hetatm_residues: Optional[List] = None
+
     # Logging callback
     log: Any = None  # Callable for logging, or None
 
@@ -126,6 +131,7 @@ class CommandContext:
             llm_strategy=state.get("strategy"),  # From LLM
             recovery_strategies=session_info.get("recovery_strategies", {}),
             directives=state.get("directives", {}),
+            model_hetatm_residues=session_info.get("model_hetatm_residues"),
         )
 
     def _log(self, msg: str):
@@ -175,6 +181,34 @@ class CommandBuilder:
         if isinstance(value, list):
             return value[0] if value else None
         return value
+
+    def _file_is_available(self, path):
+        """
+        Check if a file path is known to be available.
+
+        Replaces os.path.exists() for file-availability guards throughout
+        the command builder.  This is critical for server execution where
+        client file paths are not on the local filesystem, causing
+        os.path.exists() to always return False and silently skipping
+        best_files, rfree_mtz, and other validated file selections.
+
+        The check uses basename membership in available_files (set at the
+        start of build()) plus a fallback to os.path.exists() for paths
+        not in the set (e.g., companion files discovered on the client).
+
+        Args:
+            path: File path to check
+
+        Returns:
+            bool: True if the file is known to be available
+        """
+        if not path:
+            return False
+        bn = os.path.basename(str(path))
+        if bn in self._available_basenames:
+            return True
+        # Fallback: disk check (works on client, no-op on server)
+        return os.path.exists(str(path))
 
     # Map input slot names to best_files categories
     SLOT_TO_BEST_CATEGORY = {
@@ -257,6 +291,8 @@ class CommandBuilder:
         # Track prerequisite program needed (set when build blocked by missing input)
         self._prerequisite_program = None
         self._prerequisite_reason = None
+        # Basename lookup for _file_is_available() — populated at start of build()
+        self._available_basenames = set()
 
     def get_prerequisite(self):
         """
@@ -313,6 +349,19 @@ class CommandBuilder:
         self._selection_details = {}
         self._prerequisite_program = None
         self._prerequisite_reason = None
+
+        # Build basename lookup for _file_is_available() — enables server
+        # execution where os.path.exists() would always return False.
+        self._available_basenames = {os.path.basename(f) for f in available_files if f}
+        # Also include best_files and rfree_mtz — these are client-validated
+        # paths that may not appear verbatim in available_files.
+        if context.best_files:
+            for v in context.best_files.values():
+                p = self._best_path(v)
+                if p:
+                    self._available_basenames.add(os.path.basename(str(p)))
+        if context.rfree_mtz:
+            self._available_basenames.add(os.path.basename(str(context.rfree_mtz)))
 
         self._log(context, "BUILD: Starting command generation for %s" % program)
 
@@ -484,7 +533,7 @@ class CommandBuilder:
         if is_refinement_program and context.best_files:
             # Model slot - verify best_model isn't in an excluded category
             best_model_path = self._best_path(context.best_files.get("model"))
-            if best_model_path and os.path.exists(best_model_path):
+            if best_model_path and self._file_is_available(best_model_path):
                 best_model_excluded = False
                 # Check against program's exclude_categories for model slot
                 priorities = self._registry.get_input_priorities(program, "model")
@@ -573,7 +622,7 @@ class CommandBuilder:
                     # For refinement, check if LLM is trying to use a non-best model
                     if is_refinement_program and canonical_slot in ("model", "pdb", "pdb_file"):
                         best_model = self._best_path(context.best_files.get("model"))
-                        if best_model and corrected_str != best_model and os.path.exists(best_model):
+                        if best_model and corrected_str != best_model and self._file_is_available(best_model):
                             # If the LLM chose a with_ligand file, trust it — it's the
                             # model-with-ligand that should be refined after ligandfit.
                             # The tracker may still point to the old ligand-free model
@@ -910,7 +959,7 @@ class CommandBuilder:
         priorities = self._registry.get_input_priorities(program, input_name)
         skip_rfree = priorities.get("skip_rfree_lock", False)
         if not skip_rfree and input_name in ("data_mtz", "hkl_file", "data") and context.rfree_mtz:
-            if os.path.exists(context.rfree_mtz):
+            if self._file_is_available(context.rfree_mtz):
                 self._log(context, "BUILD: Using LOCKED R-free data_mtz for %s" % input_name)
                 self._record_selection(input_name, context.rfree_mtz, "rfree_locked")
                 return context.rfree_mtz
@@ -931,7 +980,7 @@ class CommandBuilder:
         if not uses_specific_subcategory:
             best_category = self.SLOT_TO_BEST_CATEGORY.get(input_name, input_name)
             best_path = self._best_path(context.best_files.get(best_category))
-            if best_path and os.path.exists(best_path):
+            if best_path and self._file_is_available(best_path):
                 # Verify extension matches
                 if any(best_path.lower().endswith(ext) for ext in extensions):
                     # Check if best file is in an excluded category
@@ -1061,7 +1110,7 @@ class CommandBuilder:
             # uses_specific_subcategory logic above)
             best_category = self.SLOT_TO_BEST_CATEGORY.get(input_name, input_name)
             best_path = self._best_path(context.best_files.get(best_category))
-            if best_path and os.path.exists(best_path):
+            if best_path and self._file_is_available(best_path):
                 if any(best_path.lower().endswith(ext) for ext in extensions):
                     self._log(context, "BUILD: require_best_files_only: using best_%s for %s" %
                              (best_category, input_name))
@@ -1093,7 +1142,7 @@ class CommandBuilder:
             # from record_result/_rebuild_best_files_from_cycles.
             best_category = self.SLOT_TO_BEST_CATEGORY.get(input_name, input_name)
             best_path = self._best_path(context.best_files.get(best_category))
-            if best_path and os.path.exists(best_path):
+            if best_path and self._file_is_available(best_path):
                 if any(best_path.lower().endswith(ext) for ext in extensions):
                     exclude_categories_check = priorities.get("exclude_categories", [])
                     excluded = any(best_path in context.categorized_files.get(exc, [])
@@ -1242,11 +1291,9 @@ class CommandBuilder:
             cycle = extract_cycle_number(path, default=0)
             # Secondary: all numbers as tuple (for within-cycle comparison)
             all_nums = extract_all_numbers(path)
-            try:
-                mtime = os.path.getmtime(path) if os.path.exists(path) else 0
-            except OSError:
-                mtime = 0
-            return (cycle, all_nums, mtime)
+            # Tertiary: path string (deterministic tiebreaker that works
+            # on both client and server — server cannot stat client files)
+            return (cycle, all_nums, path)
 
         sorted_files = sorted(file_list, key=sort_key, reverse=True)
         return sorted_files[0]
@@ -1724,6 +1771,10 @@ class CommandBuilder:
           "chain B and resseq 100:105"     (residue range in one chain)
           "hetero"                          (fallback when model unreadable or complex)
 
+        On the server (where client files are not on disk), uses pre-extracted
+        HETATM data from context.model_hetatm_residues (populated by the client
+        in session_info).
+
         Args:
             files: Selected files dict (expects "model" key)
             context: CommandContext for logging
@@ -1735,35 +1786,43 @@ class CommandBuilder:
         if isinstance(model_path, list):
             model_path = model_path[0] if model_path else None
 
-        if not model_path or not os.path.exists(str(model_path)):
-            return "hetero"
-
         # Collect unique (chain, resname, resseq) tuples from HETATM records,
         # excluding water (HOH, WAT, DOD, H2O).
         WATER_RESNAMES = frozenset(["HOH", "WAT", "DOD", "H2O", "SOL"])
         hetatm_residues = {}  # (chain, resseq) -> resname (ordered by first seen)
 
-        try:
-            with open(str(model_path), 'r', errors='replace') as fh:
-                for line in fh:
-                    if not line.startswith("HETATM"):
-                        continue
-                    if len(line) < 26:
-                        continue
-                    resname = line[17:20].strip()
-                    chain   = line[21:22].strip()
-                    resseq  = line[22:26].strip()
-                    if resname in WATER_RESNAMES:
-                        continue
+        # Primary: read from file (works on client where files are on disk)
+        if model_path and self._file_is_available(model_path):
+            try:
+                with open(str(model_path), 'r', errors='replace') as fh:
+                    for line in fh:
+                        if not line.startswith("HETATM"):
+                            continue
+                        if len(line) < 26:
+                            continue
+                        resname = line[17:20].strip()
+                        chain   = line[21:22].strip()
+                        resseq  = line[22:26].strip()
+                        if resname in WATER_RESNAMES:
+                            continue
+                        key = (chain, resseq)
+                        if key not in hetatm_residues:
+                            hetatm_residues[key] = resname
+            except Exception as e:
+                self._log(context, "BUILD: Could not read model for polder selection (%s)" % e)
+
+        # Fallback: use pre-extracted HETATM data from client (works on server)
+        if not hetatm_residues and context.model_hetatm_residues:
+            for entry in context.model_hetatm_residues:
+                if len(entry) >= 3:
+                    chain, resseq, resname = entry[0], entry[1], entry[2]
                     key = (chain, resseq)
                     if key not in hetatm_residues:
                         hetatm_residues[key] = resname
-        except Exception as e:
-            self._log(context, "BUILD: Could not read model for polder selection (%s)" % e)
-            return "hetero"
+            if hetatm_residues:
+                self._log(context, "BUILD: Using pre-extracted HETATM data for polder selection")
 
         if not hetatm_residues:
-            # No non-water HETATM — fall back to hetero
             return "hetero"
 
         # Group by chain

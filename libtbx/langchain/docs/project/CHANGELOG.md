@@ -281,6 +281,39 @@ stops, even though ligand fitting was explicitly requested.
   being used. This flag was defined but not honored. Now, slots with this flag
   skip extension-based fallback and only accept files from `best_files`.
 
+### Bug 18 — String metric crash in YAML condition evaluation
+
+Metric values from log analysis can arrive as strings (e.g., `"0.204"` instead of
+`0.204`). This caused `'<' not supported between instances of 'str' and 'float'`
+in `_check_metric_condition` when evaluating YAML workflow conditions.
+
+**Fixes:**
+- `_get_metric()` now casts return values to `float()` — this is the source of all
+  metric values in the context, so all downstream comparisons are safe
+- `_check_metric_condition()` also casts the value (defense-in-depth for metrics
+  that bypass `_get_metric`)
+
+### Bug 19 — `atp.pdb` miscategorized as model instead of ligand
+
+When the user provides a hetcode-named ligand file (e.g., `atp.pdb`) that uses
+ATOM records instead of HETATM, the file categorizer classified it as a protein
+model. This caused three cascading problems: `has_ligand_file=False`, ligandfit
+reported as unavailable ("missing required file: ligand_file"), and `best_files`
+selected `atp.pdb` as the model for refinement/validation.
+
+**Root cause:** `_pdb_is_small_molecule()` used a strict HETATM-only test. Some
+ligand PDB files (especially those exported from crystal structures) use ATOM
+records for all atoms instead of HETATM.
+
+**Fix:** `_pdb_is_small_molecule()` now uses size-based detection aligned with
+`_pdb_is_protein_model()`:
+- ≤150 total coordinate records → small molecule (regardless of ATOM vs HETATM)
+- >150 and HETATM-only → small molecule
+- >150 with ATOM records → NOT small molecule (protein)
+
+Both `_categorize_files()` (workflow_state) and `best_files_tracker._is_ligand_file()`
+call `_pdb_is_small_molecule()`, so the fix cascades through both code paths.
+
 ### Files changed
 
 | File | Change |
@@ -290,8 +323,8 @@ stops, even though ligand fitting was explicitly requested.
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
 | `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots; detailed ligand guard logging; `require_best_files_only` guard |
 | `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
-| `agent/workflow_state.py` | New `_pdb_is_protein_model()` — size-based protein detection (≤150 atoms = ligand, >150 + majority ATOM = protein); increased read buffer to 32 KB; placement probe no longer sets `validation_done` |
-| `agent/workflow_engine.py` | Ligandfit allowed with pre-refined models; `_apply_directives` injects ligandfit; refine kept as ligandfit prerequisite when `refine_count==0` |
+| `agent/workflow_state.py` | `_pdb_is_small_molecule()` size-based detection (≤150 atoms = ligand); `_pdb_is_protein_model()` size-based (≤150 atoms = not protein); increased read buffer to 32 KB; placement probe no longer sets `validation_done` |
+| `agent/workflow_engine.py` | Ligandfit allowed with pre-refined models; `_apply_directives` defers ligandfit injection until refine runs; refine kept as ligandfit prerequisite; `_get_metric()` casts to float; `_check_metric_condition()` casts to float |
 | `agent/advice_preprocessor.py` | Removed instruction leakage from PHIL translation section header |
 | `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons; BUILD error includes missing slot names; fallback build log capture |
 | `agent/planner.py` | `fix_program_parameters` now removes wrong param when target already exists (instead of skipping) |

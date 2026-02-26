@@ -172,18 +172,19 @@ def _match_pattern(filename, pattern):
     return fnmatch.fnmatch(filename.lower(), pattern.lower())
 
 
-def _pdb_is_small_molecule(path, max_bytes=8192):
+def _pdb_is_small_molecule(path, max_bytes=32768):
     """
-    Return True if the PDB file contains only HETATM records and no ATOM
-    chain records — the reliable signature of a small-molecule coordinate file
-    (ligand, cofactor, ion, etc.).
+    Return True if the PDB file is a small-molecule coordinate file
+    (ligand, cofactor, ion, etc.) rather than a macromolecular model.
 
-    Rationale
-    ---------
-    Polymer chains (protein, DNA, RNA) MUST use ATOM records.  Only HET-group
-    atoms (ligands, cofactors, metals, water) use HETATM.  Therefore a PDB
-    file with HETATM but no ATOM is definitively a small molecule, regardless
-    of what its filename says.
+    Detection strategy (applied to the first ``max_bytes``):
+      1. Count total coordinate records (ATOM + HETATM).
+      2. Very small files (≤ 150 coordinate records) → small molecule.
+         Real proteins have hundreds to thousands of atoms; ligands
+         typically have 10–100.  Some ligand files (e.g. atp.pdb) use
+         ATOM records instead of HETATM, so record type alone is not
+         reliable for small files.
+      3. Larger files → small molecule only if HETATM-only (no ATOM chains).
 
     This catches ligand files named after their PDB hetcode, e.g. atp.pdb,
     gdp.pdb, hem.pdb — names that have no 'lig' or 'ligand' substring and so
@@ -191,28 +192,37 @@ def _pdb_is_small_molecule(path, max_bytes=8192):
 
     Args:
         path:      Full path to the PDB file.
-        max_bytes: How much of the file to read (default 8 KB — enough to see
-                   all records in a typical ligand file, plus headers of any
-                   larger file).
+        max_bytes: How much of the file to read (default 32 KB — enough to
+                   see ~400 lines and reliably distinguish small ligands
+                   from protein models).
 
     Returns:
-        True  → file is a small molecule (HETATM only, no ATOM)
-        False → file has ATOM records (polymer), or is unreadable, or empty
+        True  → file is a small molecule
+        False → file has enough ATOM records to be a polymer, or is
+                unreadable, or empty
     """
-    has_atom   = False
-    has_hetatm = False
     try:
+        atom_count = 0
+        hetatm_count = 0
         with open(path, 'r', errors='replace') as fh:
-            content = fh.read(max_bytes)
-        for line in content.splitlines():
-            if line.startswith('ATOM  ') or line.startswith('ATOM '):
-                has_atom = True
-                break               # Definitive: it's a polymer file
-            if line.startswith('HETATM'):
-                has_hetatm = True
-        return has_hetatm and not has_atom
+            for line in fh.read(max_bytes).splitlines():
+                if line.startswith('ATOM  ') or line.startswith('ATOM '):
+                    atom_count += 1
+                elif line.startswith('HETATM'):
+                    hetatm_count += 1
+        total = atom_count + hetatm_count
+        if total == 0:
+            return False              # No coordinates — can't tell
+
+        # Small files are ligands regardless of record type.
+        # ATP has ~31 atoms; smallest crystallographic protein ~500+ atoms.
+        if total <= 150:
+            return True
+
+        # Larger files: small molecule only if HETATM-only
+        return hetatm_count > 0 and atom_count == 0
     except Exception:
-        return False                # Be conservative on read errors
+        return False                  # Be conservative on read errors
 
 
 def _pdb_is_protein_model(path, max_bytes=32768):
@@ -268,11 +278,18 @@ def _pdb_is_protein_model(path, max_bytes=32768):
 
 
 
-def _categorize_files(available_files):
+def _categorize_files(available_files, ligand_hints=None):
     """
     Categorize files by type and purpose.
 
     Uses rules from knowledge/file_categories.yaml.
+
+    Args:
+        available_files: List of file paths
+        ligand_hints: Optional set of basenames known to be ligands
+            (from client-side best_files tracker).  Used as a fallback
+            when _pdb_is_small_molecule() cannot read file content
+            (e.g., on a remote server where client files are not on disk).
 
     Returns dict with keys for BOTH:
     - Subcategories: refined, phaser_output, predicted, etc.
@@ -297,7 +314,7 @@ def _categorize_files(available_files):
         files = _categorize_files_yaml(available_files, category_rules)
     else:
         # Fallback to hardcoded rules if YAML not available
-        files = _categorize_files_hardcoded(available_files)
+        files = _categorize_files_hardcoded(available_files, ligand_hints=ligand_hints)
 
     # Bubble up subcategories to their parent semantic categories
     files = _bubble_up_to_parents(files, category_rules)
@@ -322,7 +339,12 @@ def _categorize_files(available_files):
         # Skip if already in a specific model subcategory (content check not needed)
         if any(f in files.get(sc, []) for sc in _model_subcats):
             continue
-        if _pdb_is_small_molecule(f):
+        # Primary: content inspection (works on client where files are on disk)
+        is_small = _pdb_is_small_molecule(f)
+        # Fallback: client-side hints (works on server where files are NOT on disk)
+        if not is_small and ligand_hints:
+            is_small = os.path.basename(f) in ligand_hints
+        if is_small:
             # Move: unclassified_pdb → ligand_pdb, model → ligand
             files["unclassified_pdb"].remove(f)
             if f in files.get("model", []):
@@ -598,9 +620,13 @@ def _categorize_files_yaml(available_files, rules):
     return files
 
 
-def _categorize_files_hardcoded(available_files):
+def _categorize_files_hardcoded(available_files, ligand_hints=None):
     """
     Categorize files by type and purpose.
+
+    Args:
+        available_files: List of file paths
+        ligand_hints: Optional set of basenames known to be ligands
 
     Returns dict with keys:
         data_mtz, map_coeffs_mtz, pdb, sequence, map, ligand_cif, ligand_pdb,
@@ -720,12 +746,18 @@ def _categorize_files_hardcoded(available_files):
             if _is_ligand_name:
                 if not any(x in basename for x in ['ligand_fit', 'ligandfit', 'with_ligand']):
                     files["ligand_pdb"].append(f)
-            elif _pdb_is_small_molecule(f):
+            else:
                 # Content-based detection: HETATM-only files whose names don't
                 # contain 'lig' or 'ligand' (e.g. atp.pdb, gdp.pdb, hem.pdb).
-                # Remove from generic 'pdb' and add to ligand_pdb instead.
-                files["pdb"].remove(f)
-                files["ligand_pdb"].append(f)
+                # Primary: read PDB content (works on client where files are on disk).
+                # Fallback: client-side ligand_hints (works on server).
+                is_small = _pdb_is_small_molecule(f)
+                if not is_small and ligand_hints:
+                    is_small = os.path.basename(f) in ligand_hints
+                if is_small:
+                    # Remove from generic 'pdb' and add to ligand_pdb instead.
+                    files["pdb"].remove(f)
+                    files["ligand_pdb"].append(f)
 
         elif f_lower.endswith(('.fa', '.fasta', '.seq', '.dat')):
             files["sequence"].append(f)
@@ -1421,7 +1453,26 @@ def detect_workflow_state(history, available_files, analysis=None, maximum_autom
         }
     """
     # Categorize files
-    files = _categorize_files(available_files)
+    # Extract ligand hints from client-side best_files so the server can
+    # correctly classify small-molecule PDBs even without disk access.
+    # On the client, _pdb_is_small_molecule() reads file content directly.
+    # On the server, it cannot read client files, so we use best_files
+    # (computed on the client) as an authoritative hint.
+    ligand_hints = None
+    if session_info:
+        best_files = session_info.get("best_files", {})
+        if best_files:
+            ligand_hints = set()
+            for key in ("ligand", "ligand_cif", "ligand_pdb"):
+                val = best_files.get(key)
+                if val:
+                    if isinstance(val, list):
+                        for v in val:
+                            if v:
+                                ligand_hints.add(os.path.basename(v))
+                    else:
+                        ligand_hints.add(os.path.basename(val))
+    files = _categorize_files(available_files, ligand_hints=ligand_hints)
 
     # Analyze history
     history_info = _analyze_history(history)

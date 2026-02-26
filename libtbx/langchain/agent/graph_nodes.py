@@ -76,17 +76,18 @@ def _get_most_recent_file(file_list):
     if len(file_list) == 1:
         return file_list[0]
 
-    # Sort by cycle number (descending), then all numbers, then mtime
+    # Sort by cycle number (descending), then all numbers, then path string.
+    # NOTE: path is used as a deterministic tiebreaker instead of mtime so that
+    # local and server execution produce identical results (server cannot stat
+    # client files).  For numbered outputs like refine_001_001.pdb the cycle
+    # number and embedded numbers already cover real ordering; path only
+    # matters when those are tied, which is essentially identical files.
     def sort_key(path):
         # Primary: cycle number (for cross-cycle comparison)
         cycle = extract_cycle_number(path, default=0)
         # Secondary: all numbers as tuple (for within-cycle comparison)
         all_nums = extract_all_numbers(path)
-        try:
-            mtime = os.path.getmtime(path) if os.path.exists(path) else 0
-        except OSError:
-            mtime = 0
-        return (cycle, all_nums, mtime)
+        return (cycle, all_nums, path)
 
     sorted_files = sorted(file_list, key=sort_key, reverse=True)
     return sorted_files[0]
@@ -528,6 +529,29 @@ def perceive(state):
 
     # Get available_files first (needed for both experiment type detection and workflow state)
     available_files = state.get("available_files", [])
+
+    # Supplement: inject output files from history entries.
+    # Some clients only send original user files in available_files but track
+    # program outputs in the history's output_files lists.  Without this,
+    # downstream programs (e.g. ligandfit needing map_coeffs_mtz from refine)
+    # cannot find the files they need.
+    history = state.get("history", [])
+    if history:
+        seen_basenames = {os.path.basename(f) for f in available_files if f}
+        history_additions = []
+        for hist_entry in history:
+            if isinstance(hist_entry, dict):
+                for f in hist_entry.get("output_files", []):
+                    if f:
+                        bn = os.path.basename(f)
+                        if bn not in seen_basenames:
+                            history_additions.append(f)
+                            seen_basenames.add(bn)
+        if history_additions:
+            available_files = list(available_files) + history_additions
+            state = _log(state, "PERCEIVE: Injected %d output file(s) from history: %s" % (
+                len(history_additions),
+                ", ".join(os.path.basename(f) for f in history_additions)))
 
     # Supplement: discover expected companion files that the client may have missed.
     # E.g., if refine_001_data.mtz is tracked but refine_001.mtz (map coefficients)
@@ -2686,9 +2710,13 @@ def build(state):
                 if input_name not in corrected_files:
                     file_found = None
 
+                    # Helper: check file availability by basename (works on server
+                    # where os.path.exists returns False for client paths)
+                    _avail_basenames = {os.path.basename(f) for f in available_files if f}
+
                     # PRIORITY 0: Locked R-free data_mtz
                     if input_name in ("data_mtz", "hkl_file") and rfree_mtz:
-                        if os.path.exists(rfree_mtz):
+                        if os.path.basename(rfree_mtz) in _avail_basenames or os.path.exists(rfree_mtz):
                             file_found = rfree_mtz
                             state = _log(state, "BUILD: Using LOCKED R-free data_mtz for %s: %s" % (
                                 input_name, os.path.basename(rfree_mtz)))
@@ -2697,7 +2725,7 @@ def build(state):
                     if not file_found:
                         best_category = input_to_best_category.get(input_name, input_name)
                         best_path = best_files.get(best_category)
-                        if best_path and os.path.exists(best_path):
+                        if best_path and (os.path.basename(best_path) in _avail_basenames or os.path.exists(best_path)):
                             file_found = best_path
                             state = _log(state, "BUILD: Using best_%s for %s: %s" % (
                                 best_category, input_name, os.path.basename(best_path)))
@@ -3276,19 +3304,15 @@ def fallback(state):
 
     # Try each valid program until one works without duplicating
     for program in runnable:
-        # For refine, try with prioritized files (recent outputs first)
-        if "refine" in program.lower():
-            cmd = builder.build_command_for_program(program, prioritized_files,
-                                                    categorized_files=categorized_files,
-                                                    context=fallback_context,
-                                                    best_files=best_files,
-                                                    rfree_mtz=rfree_mtz)
-        else:
-            cmd = builder.build_command_for_program(program, available_files,
-                                                    categorized_files=categorized_files,
-                                                    context=fallback_context,
-                                                    best_files=best_files,
-                                                    rfree_mtz=rfree_mtz)
+        # Use prioritized files (which include history outputs) for ALL programs.
+        # Previously this was only done for "refine" programs, but other programs
+        # like ligandfit also need output files from earlier cycles (e.g.,
+        # map_coeffs_mtz produced by refinement).
+        cmd = builder.build_command_for_program(program, prioritized_files,
+                                                categorized_files=categorized_files,
+                                                context=fallback_context,
+                                                best_files=best_files,
+                                                rfree_mtz=rfree_mtz)
 
         if cmd and cmd not in previous_commands:
             state = _log(state, "FALLBACK: Built command for %s" % program)

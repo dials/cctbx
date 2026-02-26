@@ -2496,6 +2496,71 @@ FINAL REPORT:"""
                     files.append(abs_path)
                     seen.add(basename)
 
+        # 3. Scan agent sub-directories for output files that may not have been
+        #    tracked in any cycle's output_files.  This mirrors the disk scanning
+        #    that _discover_companion_files() does in graph_nodes.py, but runs
+        #    HERE on the client so the server receives a complete file list.
+        #    Without this, local execution discovers companions that remote misses.
+        import glob
+        agent_dirs = set()
+        for f in files:
+            abs_f = os.path.abspath(f)
+            parts = abs_f.replace("\\", "/").split("/")
+            for i, part in enumerate(parts):
+                if part.startswith("sub_") and "_" in part[4:]:
+                    candidate = os.sep.join(parts[:i])
+                    if os.path.isdir(candidate):
+                        agent_dirs.add(candidate)
+                    break
+        for agent_dir in agent_dirs:
+            # Refine outputs: map coefficients MTZ and refined models
+            for entry in sorted(glob.glob(os.path.join(agent_dir, "sub_*_refine*"))):
+                if not os.path.isdir(entry):
+                    continue
+                for mtz in glob.glob(os.path.join(entry, "refine_*.mtz")):
+                    bn = os.path.basename(mtz)
+                    if bn not in seen and not bn.endswith("_data.mtz"):
+                        files.append(mtz)
+                        seen.add(bn)
+                for pdb in glob.glob(os.path.join(entry, "refine_*.pdb")):
+                    bn = os.path.basename(pdb)
+                    if bn not in seen:
+                        files.append(pdb)
+                        seen.add(bn)
+            # Pdbtools outputs: *_with_ligand.pdb
+            for entry in glob.glob(os.path.join(agent_dir, "sub_*_pdbtools")):
+                if not os.path.isdir(entry):
+                    continue
+                for pdb in glob.glob(os.path.join(entry, "*_with_ligand.pdb")):
+                    bn = os.path.basename(pdb)
+                    if bn not in seen:
+                        files.append(pdb)
+                        seen.add(bn)
+            # Autobuild outputs: overall_best files
+            for entry in glob.glob(os.path.join(agent_dir, "sub_*_autobuild*")):
+                if not os.path.isdir(entry):
+                    continue
+                for pattern in ["overall_best*.pdb", "overall_best*.mtz"]:
+                    for match in glob.glob(os.path.join(entry, pattern)):
+                        bn = os.path.basename(match)
+                        if bn not in seen:
+                            files.append(match)
+                            seen.add(bn)
+
+        # 4. Filter out corrupt / zero-byte / invalid files.
+        #    _is_valid_file() checks CCP4 magic bytes, PDB structural validity,
+        #    etc.  Applying it here (client-side, where files are on disk) ensures
+        #    the server receives only validated files, so its pass-through behavior
+        #    (returning True for non-existent paths) never matters.
+        try:
+            try:
+                from libtbx.langchain.agent.workflow_state import _is_valid_file
+            except ImportError:
+                from agent.workflow_state import _is_valid_file
+            files = [f for f in files if _is_valid_file(f)]
+        except Exception:
+            pass  # Non-critical — if import fails, skip validation
+
         return files
 
     def _find_missing_outputs(self, cycle, already_seen):
@@ -2520,18 +2585,20 @@ FINAL REPORT:"""
         result = cycle.get("result", "")
 
         # Only supplement successful cycles
-        if not output_files or "FAILED" in result.upper():
+        if "FAILED" in result.upper():
             return []
 
         found = []
 
         # --- phenix.refine: look for map coefficients and refined model ---
         if "refine" in program.lower() and "real_space" not in program.lower():
-            # Derive output prefix from _data.mtz file
+            # Strategy 1: Derive output prefix from _data.mtz file
             # e.g., refine_001_data.mtz -> prefix = refine_001
+            data_mtz_found = False
             for f in output_files:
                 basename = os.path.basename(f)
                 if basename.endswith("_data.mtz"):
+                    data_mtz_found = True
                     prefix = basename[:-9]  # Strip "_data.mtz"
                     output_dir = os.path.dirname(os.path.abspath(f))
 
@@ -2570,6 +2637,40 @@ FINAL REPORT:"""
                             found.append(mtz)
 
                     break  # Only process one _data.mtz
+
+            # Strategy 2: If no _data.mtz in output_files, try to derive the
+            # output directory from ANY output file, or from the command itself.
+            # This handles the case where the client tracked a PDB or .cif but
+            # not the _data.mtz, or where output_files is empty entirely.
+            if not data_mtz_found:
+                output_dir = None
+                # Try to get output dir from any output file
+                for f in output_files:
+                    if f and os.path.exists(f):
+                        output_dir = os.path.dirname(os.path.abspath(f))
+                        break
+                # Try to derive from command's output_prefix
+                if not output_dir:
+                    import re
+                    command = cycle.get("command", "")
+                    prefix_match = re.search(r'output\.prefix\s*=\s*(\S+)', command)
+                    if not prefix_match:
+                        prefix_match = re.search(r'output_prefix\s*=\s*(\S+)', command)
+                    if prefix_match:
+                        prefix_path = prefix_match.group(1)
+                        candidate_dir = os.path.dirname(os.path.abspath(prefix_path))
+                        if os.path.isdir(candidate_dir):
+                            output_dir = candidate_dir
+                if output_dir and os.path.isdir(output_dir):
+                    # Scan for refine output files
+                    for mtz in glob.glob(os.path.join(output_dir, "refine_*.mtz")):
+                        bn = os.path.basename(mtz)
+                        if bn not in already_seen and not bn.endswith("_data.mtz"):
+                            found.append(mtz)
+                    for pdb in glob.glob(os.path.join(output_dir, "refine_*.pdb")):
+                        bn = os.path.basename(pdb)
+                        if bn not in already_seen:
+                            found.append(pdb)
 
         # --- phenix.autobuild: look for overall_best model and map ---
         elif "autobuild" in program.lower() and "denmod" not in program.lower():
