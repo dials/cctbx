@@ -18,6 +18,9 @@ from __future__ import absolute_import, division, print_function
 import os
 import re
 import fnmatch
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -319,6 +322,45 @@ def _categorize_files(available_files, ligand_hints=None):
     # Bubble up subcategories to their parent semantic categories
     files = _bubble_up_to_parents(files, category_rules)
 
+    # Post-processing: Cross-check MTZ categorization against file_utils.
+    #
+    # The YAML pattern-based categorizer can misclassify refine output MTZ files
+    # (e.g. refine_001_001.mtz) as data_mtz if the patterns are stale or
+    # incomplete.  The regex in file_utils.classify_mtz_type() is the canonical
+    # authority — it handles all known refine output naming variants.
+    #
+    # When a file is in data_mtz but classify_mtz_type says map_coeffs_mtz,
+    # move it: data_mtz → map_coeffs_mtz + refine_map_coeffs.  Without this,
+    # ligandfit's exclude_categories=[data_mtz] guard blocks the file even
+    # from the best_files fallback path.
+    try:
+        try:
+            from libtbx.langchain.agent.file_utils import classify_mtz_type, get_mtz_stage
+        except ImportError:
+            from agent.file_utils import classify_mtz_type, get_mtz_stage
+
+        for f in list(files.get("data_mtz", [])):
+            if not f.lower().endswith('.mtz'):
+                continue
+            canonical = classify_mtz_type(f)
+            if canonical == "map_coeffs_mtz":
+                # Mis-categorized: move from data_mtz to map_coeffs_mtz
+                files["data_mtz"].remove(f)
+                # Add to parent category
+                if "map_coeffs_mtz" not in files:
+                    files["map_coeffs_mtz"] = []
+                if f not in files["map_coeffs_mtz"]:
+                    files["map_coeffs_mtz"].append(f)
+                # Add to appropriate subcategory
+                stage = get_mtz_stage(f, "map_coeffs_mtz")
+                if stage and stage not in ("map_coeffs_mtz",):
+                    if stage not in files:
+                        files[stage] = []
+                    if f not in files[stage]:
+                        files[stage].append(f)
+    except Exception:
+        pass  # Non-fatal: worst case is the old behaviour
+
     # Post-processing: Reclassify HETATM-only PDB files that pattern matching
     # placed in 'unclassified_pdb' (and therefore 'model').
     #
@@ -364,6 +406,88 @@ def _categorize_files(available_files, ligand_hints=None):
         if len(files["half_map"]) == 1 and len(files["full_map"]) == 0:
             files["full_map"].append(files["half_map"][0])
             files["half_map"] = []
+
+    # Post-processing: MTZ classification safety net.
+    #
+    # The authoritative MTZ classifier (file_utils.classify_mtz_type) uses
+    # well-tested regexes to distinguish data_mtz from map_coeffs_mtz.
+    # YAML pattern matching and the hardcoded categorizer may disagree if
+    # file_categories.yaml has stale/missing patterns on the production server.
+    #
+    # This safety net cross-checks every MTZ file against classify_mtz_type().
+    # If a file is misclassified (e.g. refine_001_001.mtz ends up in data_mtz
+    # but NOT in map_coeffs_mtz), it is moved to the correct category.
+    # Without this, ligandfit cannot find map coefficients after refinement.
+    try:
+        try:
+            from libtbx.langchain.agent.file_utils import classify_mtz_type, get_mtz_stage
+        except ImportError:
+            from agent.file_utils import classify_mtz_type, get_mtz_stage
+
+        # Ensure subcategory and parent category lists exist
+        for cat in ["map_coeffs_mtz", "data_mtz", "refine_map_coeffs",
+                     "denmod_map_coeffs", "predict_build_map_coeffs"]:
+            if cat not in files:
+                files[cat] = []
+
+        # Collect all MTZ files from all categories
+        all_mtz = set()
+        for cat_list in files.values():
+            if isinstance(cat_list, list):
+                for f in cat_list:
+                    if isinstance(f, str) and f.lower().endswith('.mtz'):
+                        all_mtz.add(f)
+
+        for f in all_mtz:
+            correct_type = classify_mtz_type(f)
+            in_data = f in files.get("data_mtz", [])
+            in_map_coeffs = f in files.get("map_coeffs_mtz", [])
+
+            if correct_type == "map_coeffs_mtz" and not in_map_coeffs:
+                # File should be in map_coeffs_mtz but isn't — fix it
+                # Determine the correct subcategory
+                stage = get_mtz_stage(f, "map_coeffs_mtz")
+                if stage and stage in files:
+                    if f not in files[stage]:
+                        files[stage].append(f)
+                # Add to parent category
+                if f not in files["map_coeffs_mtz"]:
+                    files["map_coeffs_mtz"].append(f)
+                # Remove from data_mtz if it was misplaced there
+                if in_data:
+                    files["data_mtz"].remove(f)
+                logger.warning(
+                    "MTZ safety net: moved %s from data_mtz to %s/%s",
+                    os.path.basename(f), stage or "map_coeffs_mtz", "map_coeffs_mtz")
+
+            elif correct_type == "map_coeffs_mtz" and in_map_coeffs and in_data:
+                # File is correctly in map_coeffs_mtz but ALSO in data_mtz.
+                # This happens when the YAML categorizer's Step 1 extension
+                # match puts it in data_mtz (exclude patterns didn't fire)
+                # AND Step 2 pattern match puts it in a map_coeffs subcategory
+                # that bubbles up to map_coeffs_mtz.
+                # The command builder's exclude_categories: [data_mtz] check
+                # will REJECT the file if it's in both.  Remove from data_mtz.
+                files["data_mtz"].remove(f)
+                logger.warning(
+                    "MTZ safety net: removed %s from data_mtz (was in both "
+                    "data_mtz and map_coeffs_mtz)", os.path.basename(f))
+
+            elif correct_type == "data_mtz" and not in_data:
+                # File should be in data_mtz but isn't — fix it
+                if f not in files["data_mtz"]:
+                    files["data_mtz"].append(f)
+                # Remove from map_coeffs_mtz if it was misplaced there
+                if in_map_coeffs:
+                    files["map_coeffs_mtz"].remove(f)
+                    # Also remove from any map_coeffs subcategories
+                    for subcat in ["refine_map_coeffs", "denmod_map_coeffs",
+                                   "predict_build_map_coeffs"]:
+                        if f in files.get(subcat, []):
+                            files[subcat].remove(f)
+
+    except Exception:
+        pass  # Safety net must not break categorization
 
     return files
 
@@ -674,9 +798,9 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None):
 
     # Import shared MTZ classification
     try:
-        from libtbx.langchain.agent.file_utils import classify_mtz_type
+        from libtbx.langchain.agent.file_utils import classify_mtz_type, get_mtz_stage
     except ImportError:
-        from agent.file_utils import classify_mtz_type
+        from agent.file_utils import classify_mtz_type, get_mtz_stage
 
     for f in available_files:
         f_lower = f.lower()
@@ -687,6 +811,15 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None):
             # Classify into data_mtz or map_coeffs_mtz
             mtz_type = classify_mtz_type(f)  # Pass full path
             files[mtz_type].append(f)
+            # Also populate the specific subcategory (refine_map_coeffs, etc.)
+            # so that programs requesting subcategories can find the file.
+            if mtz_type == "map_coeffs_mtz":
+                stage = get_mtz_stage(f, "map_coeffs_mtz")
+                if stage and stage != "map_coeffs_mtz":
+                    if stage not in files:
+                        files[stage] = []
+                    if f not in files[stage]:
+                        files[stage].append(f)
         elif f_lower.endswith('.pdb'):
             files["pdb"].append(f)
 

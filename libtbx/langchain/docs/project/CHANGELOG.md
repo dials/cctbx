@@ -1,5 +1,65 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.71 (MTZ categorization safety net + dual-categorization fix)
+
+After running `phenix.refine`, the agent could not find `refine_001_001.mtz` as
+map coefficients for `phenix.ligandfit`, stopping with `missing inputs:
+map_coeffs_mtz`. Three independent categorization gaps caused the failure.
+
+### Bug 1 — Hardcoded categorizer skipped MTZ subcategories
+
+**Root cause:** `_categorize_files_hardcoded()` called `classify_mtz_type()` to
+place `refine_001_001.mtz` in the parent `map_coeffs_mtz` category but never
+populated the `refine_map_coeffs` subcategory. When the command builder searched
+subcategories first via `priority_categories` (denmod → predict_build → refine →
+parent), it found nothing in the subcategories and sometimes missed the parent.
+
+**Fix:** After `classify_mtz_type()` returns `map_coeffs_mtz`, now also calls
+`get_mtz_stage()` to populate the correct subcategory (`refine_map_coeffs`,
+`denmod_map_coeffs`, or `predict_build_map_coeffs`).
+
+### Bug 2 — Dual-categorization caused exclude_categories rejection
+
+**Root cause:** The YAML categorizer's two-step process could place a file in
+BOTH `data_mtz` (Step 1: extension match when exclude patterns didn't fire) AND
+`map_coeffs_mtz` (Step 2: pattern match → subcategory → bubble-up to parent).
+The command builder's `exclude_categories: [data_mtz]` for ligandfit then
+rejected the file even though it was correctly in `map_coeffs_mtz`.
+
+**Fix:** Post-categorization safety net now detects files in both `data_mtz` and
+`map_coeffs_mtz` and removes them from `data_mtz`.
+
+### Bug 3 — No post-categorization cross-check
+
+**Root cause:** There was no safety net after categorization to catch cases where
+YAML patterns and the authoritative regex classifier disagreed. If the server's
+`file_categories.yaml` had stale patterns, files could be silently misclassified.
+
+**Fix:** Added a post-categorization safety net at the end of `_categorize_files()`
+that cross-checks ALL MTZ files against the authoritative `classify_mtz_type()`
+regex. If any file is in the wrong category, it is moved to the correct one with
+appropriate subcategory assignment. Logs `WARNING` when corrections are made.
+
+### Diagnostic logging improvements
+
+Added two levels of diagnostic logging to make future occurrences immediately
+identifiable:
+
+1. **perceive() node** (`graph_nodes.py`): Logs all MTZ category contents after
+   categorization. Emits a WARNING when refinement is in history but
+   `map_coeffs_mtz` is empty.
+
+2. **Safety net** (`workflow_state.py`): Logs `WARNING` via Python logger when it
+   corrects a misclassification, e.g.:
+   `MTZ safety net: moved refine_001_001.mtz from data_mtz to refine_map_coeffs/map_coeffs_mtz`
+
+### Files Changed
+- `agent/workflow_state.py` — Added `import logging`, MTZ safety net post-processing
+  in `_categorize_files()`, subcategory population in `_categorize_files_hardcoded()`
+- `agent/graph_nodes.py` — Added MTZ category diagnostic logging in `perceive()`
+
+---
+
 ## Version 112.70 (Ligandfit missing data file + model/ligand swap)
 
 After running `phenix.refine`, the agent tried to run `phenix.ligandfit` with

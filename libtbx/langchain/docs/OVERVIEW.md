@@ -177,6 +177,13 @@ Tracks the best file of each type across cycles:
 - **MTZ classification**: `file_utils.classify_mtz_type()` uses regex
   `(?:.*_)?refine_\d{3}(?:_\d{3})?\.mtz$` to correctly identify standard refinement
   output as map coefficients (not raw data)
+- **MTZ categorization safety net** (v112.71): After both YAML and hardcoded
+  categorization, `_categorize_files()` cross-checks every MTZ file against the
+  authoritative `classify_mtz_type()` regex. Catches three failure modes:
+  misclassified files (moved to correct category), dual-categorized files
+  (removed from `data_mtz` when also in `map_coeffs_mtz`), and missing
+  subcategories (added to `refine_map_coeffs` etc.). Logs `WARNING` when
+  corrections are made, making future occurrences immediately diagnosable.
 
 ### 7. User Directives (`agent/directive_extractor.py`)
 

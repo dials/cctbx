@@ -1046,7 +1046,7 @@ When building commands, files are selected in this order:
 | `agent/session.py` | Integration with session persistence; supplemental file discovery |
 | `agent/template_builder.py` | Uses best_files for command building |
 | `agent/file_utils.py` | `classify_mtz_type()` for MTZ classification; `matches_exclude_pattern()` for word-boundary pattern matching |
-| `agent/workflow_state.py` | `_pdb_is_small_molecule()` and `_pdb_is_protein_model()` for content-based PDB analysis |
+| `agent/workflow_state.py` | `_pdb_is_small_molecule()` and `_pdb_is_protein_model()` for content-based PDB analysis; MTZ categorization safety net in `_categorize_files()` |
 | `knowledge/metrics.yaml` | Scoring configuration (best_files_scoring section) |
 
 ### Companion File Discovery
@@ -1075,6 +1075,31 @@ tracker. This ensures `best_files["map_coeffs_mtz"]` is populated even when the
 client only tracked `refine_001_data.mtz` in `output_files`. Without this layer,
 programs with `require_best_files_only: true` (like ligandfit's map_coeffs_mtz
 slot) would fail to build because the map coefficients MTZ was never evaluated.
+
+**Layer 4: MTZ categorization safety net (v112.71)** — Runs at the end of
+`_categorize_files()` after both YAML and hardcoded categorization paths.
+Cross-checks every MTZ file against the authoritative `classify_mtz_type()` regex
+and corrects three types of misclassification:
+
+| Failure Mode | Detection | Correction |
+|---|---|---|
+| File in `data_mtz`, should be `map_coeffs_mtz` | `classify_mtz_type()` returns `map_coeffs_mtz` but file not in that category | Move to `map_coeffs_mtz` + subcategory, remove from `data_mtz` |
+| File in BOTH `data_mtz` and `map_coeffs_mtz` | YAML Step 1 extension match + Step 2 pattern match create dual membership | Remove from `data_mtz` (prevents `exclude_categories` rejection) |
+| File in `map_coeffs_mtz`, should be `data_mtz` | `classify_mtz_type()` returns `data_mtz` but file in `map_coeffs_mtz` | Move to `data_mtz`, remove from `map_coeffs_mtz` and subcategories |
+
+All corrections are logged at `WARNING` level via Python's logging module.
+
+### MTZ Categorization Diagnostics
+
+Two logging points help diagnose map_coeffs_mtz failures:
+
+1. **`perceive()` node**: After file categorization, logs all MTZ category
+   contents: `PERCEIVE: MTZ categories: data_mtz=[...]; map_coeffs_mtz=[...]`.
+   Warns if refinement is in history but `map_coeffs_mtz` is empty.
+
+2. **`_categorize_files()` safety net**: Logs `WARNING` when it corrects a
+   misclassification (e.g., `MTZ safety net: moved refine_001_001.mtz from
+   data_mtz to refine_map_coeffs/map_coeffs_mtz`).
 
 ### Intermediate File Filtering
 

@@ -752,6 +752,28 @@ def perceive(state):
         for f in search_model_files[:3]:
             state = _log(state, "PERCEIVE:   search_model: %s" % os.path.basename(f))
 
+    # Debug MTZ categorization (helps diagnose map_coeffs_mtz missing issues)
+    # This recurring bug causes ligandfit to fail after refinement.
+    mtz_categories = ["data_mtz", "map_coeffs_mtz", "refine_map_coeffs",
+                      "denmod_map_coeffs", "predict_build_map_coeffs"]
+    mtz_summary = []
+    for cat in mtz_categories:
+        cat_files = categorized.get(cat, [])
+        if cat_files:
+            mtz_summary.append("%s=[%s]" % (cat,
+                ", ".join(os.path.basename(f) for f in cat_files)))
+    if mtz_summary:
+        state = _log(state, "PERCEIVE: MTZ categories: %s" % "; ".join(mtz_summary))
+    # Warn if we have MTZ files but no map_coeffs after refinement
+    has_refine_history = any(
+        isinstance(h, dict) and "refine" in h.get("program", "").lower()
+        for h in history
+    )
+    if has_refine_history and not categorized.get("map_coeffs_mtz"):
+        state = _log(state, "PERCEIVE: WARNING: Refinement in history but no map_coeffs_mtz! "
+                     "data_mtz=%s" % [os.path.basename(f)
+                                      for f in categorized.get("data_mtz", [])])
+
     # Override detected experiment_type with locked session experiment_type if available
     session_info = state.get("session_info", {})
     session_experiment_type = session_info.get("experiment_type", "")
