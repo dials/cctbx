@@ -15,27 +15,28 @@ lg.setLevel(RDLogger.CRITICAL) # Only show critical errors
 # ------------------------------------------------------------------------------
 
 def run():
-  run_test1()
-  run_test2()
-  run_test3()
-  #run_test4()
-  run_test5()
-  run_test6()
+  run_test01()
+  run_test02()
+  run_test03()
+  run_test04()
+  run_test05()
+  run_test06()
 
 # ------------------------------------------------------------------------------
 
-def run_test1():
+def run_test01():
   '''
   Several tests:
     - check if iselection for ligand PG5 (chain A resseq 201) is correct
     - count clashes involving ligand and calculate ligand clashscore
     - check geometry outliers
   '''
+  print('test01')
   pdb_fname = libtbx.env.find_in_repositories(
     relative_path="mmtbx/regression/pdbs/one_chain_ligand_water.pdb",
     test=os.path.isfile)
   args=[pdb_fname]
-  print("mmtbx.development.validate_ligands %s" %(" ".join(args)))
+  #print("mmtbx.development.validate_ligands %s" %(" ".join(args)))
   try:
     result = run_program(program_class=val_lig.Program,args=args,
      logger = null_out())
@@ -73,17 +74,18 @@ def run_test1():
 
 # ------------------------------------------------------------------------------
 
-def run_test2():
+def run_test02():
   '''
   Test
   - occupancy determination for ligands
   - adp determination for ligands and neighbors
   '''
+  print('test02')
   pdb_fname = libtbx.env.find_in_repositories(
     relative_path="mmtbx/regression/pdbs/two_chains_ligand_water.pdb",
     test=os.path.isfile)
   args=[pdb_fname]
-  print("mmtbx.development.validate_ligands %s" %(" ".join(args)))
+  #print("mmtbx.development.validate_ligands %s" %(" ".join(args)))
   try:
     result = run_program(program_class=val_lig.Program,args=args,
      logger = null_out())
@@ -178,13 +180,14 @@ def tst_adps(vl_manager):
 
 # ------------------------------------------------------------------------------
 
-def run_test3():
+def run_test03():
   '''
   Test
   - CC calculation for three ligands
   - ADP calculations for ligands
   - occupancy calculations for ligands
   '''
+  print('test03')
   mtz_fname = libtbx.env.find_in_repositories(
     relative_path="phenix_regression/reflection_files/1avd.mtz",
     test=os.path.isfile)
@@ -193,7 +196,7 @@ def run_test3():
     test=os.path.isfile)
   args=[pdb_fname, mtz_fname]
   #
-  print("mmtbx.development.validate_ligands %s" %(" ".join(args)))
+  #print("mmtbx.development.validate_ligands %s" %(" ".join(args)))
   try:
     result = run_program(program_class=val_lig.Program,args=args,
      logger = null_out())
@@ -207,7 +210,7 @@ def run_test3():
     id_str = lr.id_str
     adps = lr.get_adps()
     ccs = lr.get_ccs()
-    print(ccs.rscc)
+    #print(ccs.rscc)
     clashes_result = lr.get_overlaps()
     #
     if (id_str.strip() == 'NAG A 600'):
@@ -308,16 +311,17 @@ def run_test3():
 
 # ------------------------------------------------------------------------------
 
-def run_test4():
+def run_test04():
   '''
   Test if ligands with 5-letter ID are processed properly
   from PDB model 7has
   '''
+  print('test04')
   model_fn = "tst_4_fragment.cif"
   with open(model_fn, "w") as f:
     f.write(cif_str_tst_4)
   args = [model_fn]
-  print("mmtbx.development.validate_ligands %s run_reduce2=False" % model_fn)
+  #print("mmtbx.development.validate_ligands %s run_reduce2=False" % model_fn)
   try:
     result = run_program(program_class=val_lig.Program,args=args,
      logger = null_out())
@@ -347,16 +351,17 @@ def run_test4():
 
 # ------------------------------------------------------------------------------
 
-def run_test5():
+def run_test05():
   '''
   Test if ligand with two conformers with different names is processed correctly
   from PDB model 4d3w
   '''
+  print('test05')
   model_fn = "tst_5.pdb"
   with open(model_fn, "w") as f:
     f.write(pdb_str_tst_5)
   args = [model_fn]
-  print("mmtbx.development.validate_ligands %s" % model_fn)
+  #print("mmtbx.development.validate_ligands %s" % model_fn)
   try:
     result = run_program(program_class=val_lig.Program,args=args,
      logger = null_out())
@@ -374,7 +379,8 @@ def run_test5():
 
 # ------------------------------------------------------------------------------
 
-def run_test6():
+def run_test06():
+  print('test06')
   pdb_str = '''
 CRYST1   14.103   13.596   12.544  90.00  90.00  90.00 P 1
 SCALE1      0.070907  0.000000  0.000000        0.00000
