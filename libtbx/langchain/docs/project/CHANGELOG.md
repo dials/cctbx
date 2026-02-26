@@ -217,21 +217,73 @@ Also fixed `fix_program_parameters` logic: when the correct parameter already
 exists in the command, the wrong parameter is now **removed** (previously it
 was just skipped, leaving both in the command).
 
+### Bug 15 — Working directory shows server path in summary
+
+The final session summary displayed the server's temporary working directory
+(e.g., `/net/cci-gpu-01/.../rest/c65be5a5-...`) instead of the client's
+actual working directory. Both `generate_log_for_summary` and
+`_get_working_directory_path` fell back to `os.getcwd()` which is wrong
+on the server.
+
+**Fix:** The client now stores `client_working_directory` in session data at
+startup. `_get_working_directory_path()` checks this first (before
+`input_directory`, session file inference, or `os.getcwd()`).
+`generate_log_for_summary()` now calls `_get_working_directory_path()` instead
+of raw `os.getcwd()`. `_get_run_name()` also uses `client_working_directory`
+as fallback.
+
+### Bug 16 — Advice preprocessor leaks instructions into LLM output
+
+The `advice_preprocessor.py` prompt template contained section headers with
+system instructions like `(CRITICAL — translate natural language to PHIL
+key=value pairs)`. The LLM echoed these back verbatim in its output, making
+them appear in the summary analysis shown to users.
+
+**Fix:** Removed instruction language from section headers. The PHIL translation
+guidance remains in the body text but is no longer in a position where the LLM
+treats it as content to reproduce.
+
+### Bug 17 — Agent stops prematurely when user provides already-refined model
+
+When the user provides a pre-refined model (e.g., `7qz0.pdb` with R-free=0.204)
+and asks for ligand fitting, the agent runs `xtriage` → `model_vs_data` and then
+stops, even though ligand fitting was explicitly requested.
+
+**Root causes:**
+1. `model_vs_data` as a placement probe set `validation_done=True` (from YAML
+   done_tracking), tricking the workflow into thinking validation was complete
+2. The model was "at target" (good R-free), so `_is_at_target` returned True,
+   causing refinement programs to be removed and STOP to be added
+3. The ligandfit YAML condition `refine_count > 0` failed because no refinement
+   was done in this session (the model came pre-refined)
+4. `_apply_directives` `prefer_programs` only reorders existing valid programs
+   — it couldn't add ligandfit since it wasn't in the list
+
+**Fixes:**
+- Workflow engine: `user_wants_ligandfit` check no longer requires `refine_count > 0`
+  when the model is already at target quality (pre-refined models)
+- `_apply_directives`: When `phenix.ligandfit` is in `prefer_programs` but not in
+  valid programs, and user explicitly wants it, inject it into the list
+- `_analyze_history`: When `model_vs_data` ran as a placement probe (before any
+  refinement), unset `validation_done` to prevent premature workflow completion
+
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result`; duplicate detection respects different input files; `set_project_info` merges original_files on resume |
+| `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result`; duplicate detection respects different input files; `set_project_info` merges original_files on resume; working directory uses `client_working_directory` from session data |
 | `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` |
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
 | `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots; detailed ligand guard logging |
 | `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
-| `agent/workflow_state.py` | New `_pdb_is_protein_model()` — size-based protein detection (≤150 atoms = ligand, >150 + majority ATOM = protein); increased read buffer to 32 KB |
+| `agent/workflow_state.py` | New `_pdb_is_protein_model()` — size-based protein detection (≤150 atoms = ligand, >150 + majority ATOM = protein); increased read buffer to 32 KB; placement probe no longer sets `validation_done` |
+| `agent/workflow_engine.py` | Ligandfit allowed with pre-refined models (no refine_count required when model at target); `_apply_directives` injects ligandfit when user explicitly requests it |
+| `agent/advice_preprocessor.py` | Removed instruction leakage from PHIL translation section header |
 | `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons; BUILD error includes missing slot names; fallback build log capture |
 | `agent/planner.py` | `fix_program_parameters` now removes wrong param when target already exists (instead of skipping) |
 | `knowledge/parameter_fixes.json` | Added `wavelength → autosol.lambda` for autosol |
 | `knowledge/programs.yaml` | Added `refine` to ligandfit ligand slot exclude_patterns |
-| `programs/ai_agent.py` | Content guards for model and ligand slots in safety net; advice display at normal level; FALLBACK debug log display |
+| `programs/ai_agent.py` | Content guards for model and ligand slots in safety net; advice display at normal level; FALLBACK debug log display; stores `client_working_directory` in session |
 | `tests/tst_audit_fixes.py` | 12 new tests (234 total) |
 
 ---

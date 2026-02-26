@@ -924,16 +924,23 @@ class WorkflowEngine:
         # relax to < 0.50 — the user knows their model quality and is asserting
         # they want to proceed regardless.  This prevents the workflow from
         # falling to the "validate" phase and offering only validation programs.
+        #
+        # Special case: when the user provides an ALREADY-REFINED model (e.g.,
+        # 7qz0.pdb with R-free=0.20), refine_count is 0 because no refinement
+        # happened in this session.  If the model is already at target quality,
+        # allow ligandfit without requiring a refinement cycle first.
         _wants_ligandfit = context.get("user_wants_ligandfit", False)
         if (_wants_ligandfit and
             not context.get("ligandfit_done") and
-            not context.get("has_ligand_fit") and
-            context.get("refine_count", 0) > 0):
+            not context.get("has_ligand_fit")):
             r_free = context.get("r_free")
             _rfree_threshold = 0.50  # Relaxed because user explicitly requested it
-            if r_free is None or r_free < _rfree_threshold:
-                return self._make_phase_result(phases, "refine",
-                    "User requested ligand fitting — staying in refine phase")
+            refine_count = context.get("refine_count", 0)
+            model_at_target = self._is_at_target(context, "xray")
+            if refine_count > 0 or model_at_target:
+                if r_free is None or r_free < _rfree_threshold:
+                    return self._make_phase_result(phases, "refine",
+                        "User requested ligand fitting — staying in refine phase")
 
         # Also stay in refine for automatic ligandfit when a ligand file is present
         if (context.get("has_ligand_file") and
@@ -1532,6 +1539,22 @@ class WorkflowEngine:
         # Reorder to prefer certain programs (move to front)
         prefer_programs = workflow_prefs.get("prefer_programs", [])
         if prefer_programs:
+            # Special case: when user explicitly wants ligandfit but it was
+            # excluded by YAML conditions (e.g. refine_count > 0 fails because
+            # the user provided an already-refined model), inject it if the
+            # model quality is sufficient for ligand fitting.
+            if ("phenix.ligandfit" in prefer_programs and
+                "phenix.ligandfit" not in result and
+                context and
+                context.get("user_wants_ligandfit") and
+                not context.get("ligandfit_done") and
+                phase_name in ("refine", "ready_to_refine")):
+                r_free = context.get("r_free")
+                if r_free is None or r_free < 0.50:
+                    result.insert(0, "phenix.ligandfit")
+                    modifications.append(
+                        "Injected phenix.ligandfit (user requested, model quality sufficient)")
+
             preferred = [p for p in prefer_programs if p in result]
             others = [p for p in result if p not in prefer_programs]
             if preferred:

@@ -2094,7 +2094,7 @@ class AgentSession:
         experiment_type = self._detect_experiment_type_for_summary(original_files)
 
         lines = [
-            f"WORKING DIRECTORY:{os.getcwd()}",
+            f"WORKING DIRECTORY:{self._get_working_directory_path()}",
             "COMMAND THAT WAS RUN: phenix.run_agent",
             "PHENIX AGENT SESSION LOG",
             f"Experiment Type: {experiment_type}",
@@ -2948,7 +2948,10 @@ FINAL REPORT:"""
                     return os.path.basename(parent_dir)
             return dir_name
 
-        # Fall back to current working directory (use abspath to get actual name)
+        # Fall back to client_working_directory then current working directory
+        client_wd = self.data.get("client_working_directory")
+        if client_wd:
+            return os.path.basename(client_wd)
         return os.path.basename(os.path.abspath(os.getcwd()))
 
     def _determine_workflow_path(self, cycles, experiment_type):
@@ -3419,10 +3422,18 @@ FINAL REPORT:"""
         """
         Get the absolute path of the working directory where the agent was run.
 
-        Uses input_directory from session data, or infers from session file path.
-        Falls back to current working directory.
+        Priority:
+        1. client_working_directory (stored at client startup — reliable on server)
+        2. input_directory (from user param or README discovery)
+        3. Infer from session file path
+        4. Fall back to os.getcwd() (only correct on the client machine)
         """
-        # Try input_directory first (set when agent starts)
+        # Try client_working_directory first (set by client, survives server round-trip)
+        client_wd = self.data.get("client_working_directory")
+        if client_wd:
+            return client_wd
+
+        # Try input_directory (set when agent starts)
         input_dir = self.data.get("input_directory")
         if input_dir:
             abs_dir = os.path.abspath(input_dir)

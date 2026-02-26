@@ -377,9 +377,9 @@ Your response MUST include these sections:
    - Heavy atom type (Se, S, etc.)
    - Space group (if mentioned)
 
-5. **Program Parameters** (CRITICAL — translate natural language to PHIL key=value pairs):
-   Scan the instructions for any program settings expressed in plain English and emit them
-   as exact PHIL key=value pairs that can be appended to PHENIX commands.
+5. **Program Parameters**:
+   Translate any program settings expressed in plain English to exact PHIL key=value pairs
+   that can be appended to PHENIX commands.
    Common translations:
    - "one macro-cycle" / "1 macro-cycle" / "run only N macro-cycle(s)" → `main.number_of_macro_cycles=1` (or N)
    - "N macro-cycles of refinement" → `main.number_of_macro_cycles=N`

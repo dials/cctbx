@@ -1228,6 +1228,30 @@ def _analyze_history(history):
                     except (ValueError, TypeError):
                         pass
 
+    # ── Post-probe correction: unset validation_done if it was set by a ─────
+    # placement probe rather than actual post-refinement validation.
+    # model_vs_data has done_tracking.flag = "validation_done" in YAML,
+    # so _set_done_flags() always sets it.  But if model_vs_data ran BEFORE
+    # any refinement (i.e. as a placement probe), it's not real validation.
+    # Leaving it set causes the workflow to think validation is complete and
+    # skip to "complete" phase prematurely.
+    if info.get("placement_probed") and info.get("validation_done"):
+        # Check if any validation program ran AFTER refinement
+        _validation_after_refine = False
+        _seen_refine = False
+        for _entry in (history or []):
+            if not isinstance(_entry, dict):
+                continue
+            _ep = (_entry.get("program") or "").lower()
+            if "refine" in _ep and "model_vs_data" not in _ep:
+                _seen_refine = True
+            if _seen_refine and _ep in ("phenix.molprobity", "phenix.model_vs_data",
+                                         "phenix.map_correlations", "phenix.validation_cryoem"):
+                _validation_after_refine = True
+                break
+        if not _validation_after_refine:
+            info["validation_done"] = False
+
     return info
 
 
