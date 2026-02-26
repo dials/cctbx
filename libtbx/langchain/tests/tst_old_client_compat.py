@@ -20,14 +20,18 @@ import json
 import os
 import sys
 
-assert sys is not None
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from tests.tst_utils import assert_equal
 from tests.tst_utils import assert_true
 from tests.tst_utils import assert_false
 from tests.tst_utils import assert_in
 from tests.tst_utils import run_tests_with_fail_fast
+
+# =========================================================================
+# PHENIX/cctbx Linter "Silencer"
+# =========================================================================
+(assert_equal, assert_true, assert_false, assert_in, run_tests_with_fail_fast)
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _FIXTURES_DIR = os.path.join(_PROJECT_ROOT, "tests", "fixtures")

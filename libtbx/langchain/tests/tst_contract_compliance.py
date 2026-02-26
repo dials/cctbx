@@ -16,13 +16,17 @@ import os
 import re
 import sys
 
-assert sys is not None
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from tests.tst_utils import assert_equal
 from tests.tst_utils import assert_true
 from tests.tst_utils import assert_in
 from tests.tst_utils import run_tests_with_fail_fast
+
+# =========================================================================
+# PHENIX/cctbx Linter "Silencer"
+# =========================================================================
+(re, assert_equal, assert_true, assert_in, run_tests_with_fail_fast)
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ---------------------------------------------------------------------------
 # Configuration
