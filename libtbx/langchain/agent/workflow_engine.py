@@ -294,10 +294,22 @@ class WorkflowEngine:
         return context
 
     def _get_metric(self, analysis, history_info, analysis_key, history_key):
-        """Get metric from analysis or history."""
+        """Get metric from analysis or history, ensuring numeric type.
+
+        Values may arrive as strings from log parsing (e.g. "0.204").
+        Cast to float so downstream comparisons don't crash.
+        """
+        val = None
         if analysis and analysis.get(analysis_key):
-            return analysis[analysis_key]
-        return history_info.get(history_key)
+            val = analysis[analysis_key]
+        else:
+            val = history_info.get(history_key)
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return val  # Non-numeric (shouldn't happen but don't crash)
 
     def _get_bool(self, analysis, history_info, key):
         """Get boolean from analysis or history (True if either is True)."""
@@ -1909,6 +1921,12 @@ class WorkflowEngine:
         value = context.get(metric)
         if value is None:
             return True  # If we don't have the metric, don't block
+
+        # Ensure numeric type (values may arrive as strings from log analysis)
+        try:
+            value = float(value)
+        except (ValueError, TypeError):
+            return True  # Non-numeric value, don't block
 
         # Parse condition string
         match = re.match(r'([<>=!]+)\s*(\S+)', str(condition))
