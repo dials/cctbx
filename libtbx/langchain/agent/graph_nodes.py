@@ -476,6 +476,48 @@ def perceive(state):
     cycle_number = state.get("cycle_number", 1)
     state = _emit(state, EventType.CYCLE_START, cycle_number=cycle_number)
 
+    # ── Contract: normalize session_info & check protocol version ──────
+    # Fills in safe defaults for fields old clients don't send, then
+    # checks whether the client version is still supported.
+    session_info = state.get("session_info", {})
+    try:
+        from agent.contract import (
+            normalize_session_info, check_client_version,
+            get_deprecation_warnings,
+        )
+        session_info = normalize_session_info(session_info)
+        state = {**state, "session_info": session_info}
+
+        # Hard rejection: client too old
+        rejection = check_client_version(session_info)
+        if rejection:
+            stop_reason, message, next_move = rejection
+            state = _log(state, "PERCEIVE: Client version rejected — %s" % message)
+            return {
+                **state,
+                "stop": True,
+                "stop_reason": stop_reason,
+                "abort_message": message,
+                "next_move": next_move,
+                "intent": {
+                    "program": "STOP",
+                    "stop": True,
+                    "stop_reason": stop_reason,
+                    "reasoning": message,
+                    "files": {},
+                    "strategy": {},
+                },
+            }
+
+        # Soft warnings: deprecation notices
+        warnings = get_deprecation_warnings(session_info)
+        if warnings:
+            state = {**state, "warnings": state.get("warnings", []) + warnings}
+            state = _log(state, "PERCEIVE: Added %d deprecation warning(s)" % len(warnings))
+    except ImportError:
+        # contract.py not available (shouldn't happen, but safe fallback)
+        pass
+
     log_text = state.get("log_text", "")
     history = state.get("history", [])
 
@@ -579,7 +621,7 @@ def perceive(state):
     # Detect experiment type for proper trend analysis
     # PRIORITY: Use session's locked experiment_type first, then detect from files
     session_info = state.get("session_info", {})
-    session_experiment_type = session_info.get("experiment_type")
+    session_experiment_type = session_info.get("experiment_type", "")
 
     if session_experiment_type:
         # Use session's locked experiment type (already validated)
@@ -647,7 +689,7 @@ def perceive(state):
     # that "complete + user instructions" should never hard-STOP.
     _user_advice = (state.get("user_advice") or "").strip()
     if (workflow_state.get("phase_info", {}).get("phase") == "complete" and
-            (session_info.get("advice_changed") or _user_advice)):
+            (session_info.get("advice_changed", False) or _user_advice)):
         try:
             from libtbx.langchain.agent.workflow_engine import WorkflowEngine as _WE
             _eng = _WE()
@@ -662,7 +704,7 @@ def perceive(state):
                 "phase": "validate",
                 "reason": "advice_changed: stepped back from complete phase",
             }
-            _trigger = "advice_changed" if session_info.get("advice_changed") else "user_advice present"
+            _trigger = "advice_changed" if session_info.get("advice_changed", False) else "user_advice present"
             state = _log(state,
                 "PERCEIVE: %s — stepped back from 'complete' to 'validate' "
                 "phase. valid_programs: %s" % (_trigger, _new_valid))
@@ -712,7 +754,7 @@ def perceive(state):
 
     # Override detected experiment_type with locked session experiment_type if available
     session_info = state.get("session_info", {})
-    session_experiment_type = session_info.get("experiment_type")
+    session_experiment_type = session_info.get("experiment_type", "")
     if session_experiment_type:
         state = _log(state, "PERCEIVE: Using locked experiment_type from session: %s (detected was: %s)" % (
             session_experiment_type, workflow_state.get("experiment_type")))
@@ -911,7 +953,7 @@ def perceive(state):
     abort_on_warnings = state.get("abort_on_warnings", False)
 
     # Use session_info experiment_type (locked) first, then workflow_state, then detected
-    session_experiment_type = session_info.get("experiment_type")
+    session_experiment_type = session_info.get("experiment_type", "")
     effective_experiment_type = (
         session_experiment_type or
         workflow_state.get("experiment_type") or
@@ -987,7 +1029,7 @@ def perceive(state):
     # Debug: log key sanity context values
     state = _log(state, "PERCEIVE: Sanity context: exp_type=%s, session_exp_type=%s, has_data_mtz=%s, has_model=%s, has_search_model=%s, has_map=%s" % (
         sanity_context.get("experiment_type"),
-        session_info.get("experiment_type"),
+        session_info.get("experiment_type", ""),
         sanity_context.get("has_data_mtz"),
         sanity_context.get("has_model"),
         sanity_context.get("has_search_model"),
@@ -1247,6 +1289,11 @@ def plan(state):
     4. Calls LLM to decide next action
     5. Falls back to rules selector if LLM unavailable
     """
+    # Early exit: upstream node (perceive) already decided to stop
+    # (e.g. unsupported client version, fatal sanity check)
+    if state.get("stop"):
+        return state
+
     # 0. Check for forced retry (from error recovery)
     # This takes priority over everything else - when recovery is triggered,
     # we want to immediately retry the failed program with recovery flags
@@ -1254,8 +1301,8 @@ def plan(state):
     force_retry = session_info.get("force_retry_program")
 
     # Debug: log what we received
-    if session_info.get("recovery_strategies"):
-        state = _log(state, f"PLAN: Recovery strategies present for files: {list(session_info['recovery_strategies'].keys())}")
+    if session_info.get("recovery_strategies", {}):
+        state = _log(state, f"PLAN: Recovery strategies present for files: {list(session_info.get('recovery_strategies', {}).keys())}")
 
     if force_retry:
         state = _log(state, f"PLAN: Forced retry of {force_retry} (error recovery)")
@@ -1290,7 +1337,7 @@ def plan(state):
         # New advice may request additional work (e.g. polder after a completed
         # ligand-fit workflow) that the original completion check couldn't anticipate.
         # We let the LLM plan for one cycle; if nothing new is needed it will stop again.
-        if session_info.get("advice_changed"):
+        if session_info.get("advice_changed", False):
             state = _log(state, "PLAN: AUTO-STOP suppressed — new advice provided on resume (%s)" % reason)
             # Clear the flag so the next cycle isn't also force-continued.
             # The session-level flag is cleared after the cycle in iterate_agent.
@@ -2329,6 +2376,10 @@ def build(state):
 
     NEW: If USE_NEW_COMMAND_BUILDER is True, delegates to _build_with_new_builder.
     """
+    # Early exit: upstream node already decided to stop
+    if state.get("stop"):
+        return state
+
     # Optionally use new unified builder
     if USE_NEW_COMMAND_BUILDER:
         return _build_with_new_builder(state)
@@ -2848,6 +2899,10 @@ def validate(state):
     3. Referenced files exist in available_files
     4. Command is not a duplicate of previous cycle
     """
+    # Early exit: upstream node already decided to stop
+    if state.get("stop"):
+        return state
+
     command = state.get("command", "")
 
     if not command:
@@ -3205,6 +3260,10 @@ def fallback(state):
 
     NEW: If USE_NEW_COMMAND_BUILDER is True, delegates to _fallback_with_new_builder.
     """
+    # Early exit: upstream node already decided to stop
+    if state.get("stop"):
+        return state
+
     # Optionally use new unified builder
     if USE_NEW_COMMAND_BUILDER:
         return _fallback_with_new_builder(state)
@@ -3400,7 +3459,8 @@ def output_node(state):
     """
     Final node: Prepare response for client.
 
-    Adds final debug message and ensures state is clean.
+    Adds final debug message and ensures all RESPONSE_FIELDS exist
+    with safe defaults so the client never gets KeyError.
     """
     if state.get("stop"):
         state = _log(state, "OUTPUT: Workflow stopped - %s" % state.get("stop_reason", "unknown"))
@@ -3408,5 +3468,20 @@ def output_node(state):
         state = _log(state, "OUTPUT: Used fallback command")
     else:
         state = _log(state, "OUTPUT: Normal completion")
+
+    # Ensure all response fields exist with safe defaults.
+    # The client uses .get() / getattr() on all of these, so missing fields
+    # won't crash — but guaranteeing them makes the contract explicit.
+    _defaults = {
+        "warnings":        [],
+        "debug_log":       [],
+        "events":          [],
+        "stop_reason":     None,
+        "abort_message":   None,
+        "red_flag_issues": [],
+    }
+    for key, default in _defaults.items():
+        if key not in state:
+            state = {**state, key: default}
 
     return state

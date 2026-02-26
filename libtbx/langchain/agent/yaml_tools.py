@@ -301,7 +301,14 @@ def _validate_file_categories(data):
     # Valid fields for a category
     valid_category_fields = {
         'description', 'extensions', 'patterns', 'excludes',
-        'subcategory_of', 'also_in', 'notes', 'max_basename_length'
+        'subcategory_of', 'also_in', 'notes', 'max_basename_length',
+        # Hierarchy and lifecycle fields
+        'parent_category',      # Subcategory parent reference
+        'is_semantic_parent',   # Category is a grouping parent (not a leaf)
+        'valid_for',            # Experiment types this category applies to
+        'invalid_for',          # Experiment types this category does not apply to
+        'is_deprecated',        # Category is deprecated (use redirect_to)
+        'redirect_to',          # Replacement category for deprecated entries
     }
 
     # Track category names for cross-reference validation
@@ -391,13 +398,21 @@ def _validate_programs(data):
         'gui_app_id_cryoem',    # Cryo-EM variant app_id (if different from gui_app_id)
         'stop_directive_patterns',  # Regex patterns for stop-condition parsing
         'requires_full_map',    # Program needs full map, not half-maps
+        # Log detection and command builder fields
+        'log_detection',        # Markers for detecting program output in logs
+        'keep_half_maps_with_full_map',  # Keep half-maps when full map present (cryo-EM)
+        'multi_ensemble',       # Program supports multiple search ensembles (phaser)
+        'fixes',                # Program-specific fix definitions (pdbtools)
     }
 
     # Valid fields for input definitions
     valid_input_fields = {
         'extensions', 'flag', 'required', 'optional', 'type', 'description',
         'default', 'pattern', 'multiple', 'exclude_patterns', 'priority_patterns',
-        'prefer_patterns', 'from_session'
+        'prefer_patterns', 'from_session',
+        # Command builder fields
+        'auto_fill',              # False to skip automatic fuzzy-match filling
+        'require_best_files_only',  # Only use best_files for this input (no fallback)
     }
 
     # Valid fields for output definitions
@@ -411,18 +426,24 @@ def _validate_programs(data):
         # Display/formatting fields used by summary_display.py
         'display_name', 'summary_format',
         # No-match handling fields used by metric_patterns.py
-        'no_match_pattern', 'no_match_value'
+        'no_match_pattern', 'no_match_value',
+        # Value selection and range fields
+        'pick_min',     # Pick minimum value across all matching lines
+        'min_value',    # Floor: reject values below this threshold
+        'max_value',    # Ceiling: reject values above this threshold
     }
 
     # Valid fields for invariants (Step 1)
     valid_invariant_fields = {
-        'name', 'description', 'check', 'fix', 'message'
+        'name', 'description', 'check', 'fix', 'message',
+        'prerequisite',  # Program that must run before this one (triggers prerequisite flow)
     }
 
     # Valid fields for invariant checks
     valid_check_fields = {
         'has_file', 'has_strategy', 'strategy_equals', 'any_of', 'all_of',
-        'has_file_category', 'not_has_file_category_only'  # File category checks
+        'has_file_category', 'not_has_file_category_only',  # File category checks
+        'only_for_experiment_type',  # Restrict check to specific experiment type
     }
 
     # Valid fields for invariant fixes
@@ -433,7 +454,11 @@ def _validate_programs(data):
 
     # Valid fields for input_priorities (Step 2)
     valid_input_priority_fields = {
-        'categories', 'exclude_categories', 'reason'
+        'categories', 'exclude_categories', 'reason',
+        # Advanced file selection fields
+        'prefer_subcategories',  # Preferred subcategories within the priority categories
+        'fallback_categories',   # Fallback categories if primary ones have no match
+        'skip_rfree_lock',       # Skip R-free MTZ locking for this input (autosol)
     }
 
     for prog_name, prog_def in programs.items():
@@ -621,7 +646,8 @@ def _validate_workflows(data):
     # Valid fields for a phase
     valid_phase_fields = {
         'description', 'goal', 'programs', 'transitions', 'extracts',
-        'repeat', 'stop', 'stop_reasons', 'conditions', 'requires', 'optional'
+        'repeat', 'stop', 'stop_reasons', 'conditions', 'requires', 'optional',
+        'rules_priority',  # Priority order for rules-based program selection
     }
 
     # Valid fields for a program entry in a phase
