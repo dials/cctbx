@@ -2945,7 +2945,23 @@ def _fallback_with_new_builder(state):
     available_files = list(state.get("available_files", []))
     session_info = state.get("session_info", {})
 
+    # Diagnostic: log available files and best_files for debugging build failures
+    pdb_cif_files = [os.path.basename(f) for f in available_files
+                     if f.lower().endswith(('.pdb', '.cif'))]
+    state = _log(state, "FALLBACK: %d available files (%d .pdb/.cif: %s)" % (
+        len(available_files), len(pdb_cif_files), ", ".join(pdb_cif_files[:10])))
+    best = session_info.get("best_files", {})
+    if best:
+        best_summary = ", ".join("%s=%s" % (k, os.path.basename(v) if isinstance(v, str) else v)
+                                 for k, v in best.items() if v)
+        state = _log(state, "FALLBACK: best_files = {%s}" % best_summary)
+
     # Create CommandContext (no LLM hints - pure rule-based)
+    # Use a real log function that captures diagnostics, not lambda: None
+    fallback_build_logs = []
+    def _fallback_log(msg):
+        fallback_build_logs.append(msg)
+
     context = CommandContext(
         cycle_number=state.get("cycle_number", 1),
         experiment_type=session_info.get("experiment_type", ""),
@@ -2958,7 +2974,7 @@ def _fallback_with_new_builder(state):
         llm_files=None,  # No LLM hints
         llm_strategy=None,  # No LLM hints
         directives=state.get("directives", {}),
-        log=lambda msg: None,
+        log=_fallback_log,
     )
 
     builder = CommandBuilder()
@@ -2966,6 +2982,7 @@ def _fallback_with_new_builder(state):
     # Try each valid program until one works without duplicating
     build_failures = {}  # Track why each program failed to build
     for program in runnable:
+        fallback_build_logs.clear()
         cmd = builder.build(program, available_files, context)
 
         # Apply parameter fixes as safety net
@@ -3048,6 +3065,11 @@ def _fallback_with_new_builder(state):
                     program, ", ".join(missing_slots)))
             else:
                 build_failures[program] = "build failed"
+
+            # Propagate build logs to state debug_log for diagnostics
+            for blog in fallback_build_logs:
+                state = _log(state, "FALLBACK_BUILD[%s]: %s" % (
+                    program.replace("phenix.", ""), blog))
 
             if prereq_program:
                 state = _log(state, "FALLBACK: %s needs prerequisite %s (%s)" % (

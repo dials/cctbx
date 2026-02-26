@@ -184,6 +184,39 @@ map_coeffs_mtz)"`. The fallback reasoning also includes its own `build_failures`
 diagnostics (from Bug 7's per-program tracking) when they differ from the BUILD
 node errors.
 
+### Bug 13 — Protein guard too aggressive for ligand slot
+
+`_pdb_is_protein_model` returned True if ANY `ATOM` record existed, which
+rejected legitimate ligand files (e.g., `atp.pdb` — an ATP nucleotide file
+that may include a few ATOM records from extracted protein context). This was
+the **root cause** of the `missing inputs: ligand` failure: `atp.pdb` was
+present in available files but got excluded by the over-aggressive guard.
+
+**Fix:** `_pdb_is_protein_model` now uses size-based detection:
+- Counts total coordinate records (ATOM + HETATM) in first 32 KB
+- Small files (≤ 150 coordinate records) → **not protein**, regardless of
+  record type (ligands like ATP only have ~31 atoms; smallest crystallographic
+  protein has ~500+ atoms)
+- Larger files with majority ATOM → protein model (rejected from ligand slot)
+- Increased read buffer from 8 KB to 32 KB (~400 lines) for reliable counting
+- Also added detailed logging ("Ligand guard passed/excluded") for diagnostics
+
+Additional diagnostic improvements:
+- Fallback node logs available .pdb/.cif files and best_files for debugging
+- Fallback build logs per program are captured and forwarded to debug_log
+- FALLBACK debug logs displayed alongside BUILD/PLAN/PERCEIVE in client
+
+### Bug 14 — `wavelength=` instead of `autosol.lambda=` for autosol
+
+The LLM generated `wavelength=0.9792` (sometimes alongside the correct
+`autosol.lambda=0.9792`). Autosol requires `autosol.lambda=`, not bare
+`wavelength=`.
+
+**Fix:** Added `wavelength → autosol.lambda` rename in `parameter_fixes.json`.
+Also fixed `fix_program_parameters` logic: when the correct parameter already
+exists in the command, the wrong parameter is now **removed** (previously it
+was just skipped, leaving both in the command).
+
 ### Files changed
 
 | File | Change |
@@ -191,13 +224,15 @@ node errors.
 | `agent/session.py` | Fixed regex (2 locations); supplemental file evaluation in `_rebuild_best_files_from_cycles` and `record_result`; duplicate detection respects different input files; `set_project_info` merges original_files on resume |
 | `agent/file_utils.py` | Fixed `classify_mtz_type` regex; new `matches_exclude_pattern()` |
 | `agent/best_files_tracker.py` | Added MTZ/data stage mappings to `STAGE_TO_PARENT` |
-| `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots |
+| `agent/command_builder.py` | Content guards for model/ligand slots; exclude_patterns on LLM selections; `_last_missing_slots`; `best_files_fallback` for specific-subcategory slots; detailed ligand guard logging |
 | `agent/command_postprocessor.py` | `inject_user_params` validates bare keys against strategy_flags allowlist |
-| `agent/workflow_state.py` | New `_pdb_is_protein_model()` for positive protein detection |
-| `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons; BUILD error includes missing slot names |
+| `agent/workflow_state.py` | New `_pdb_is_protein_model()` — size-based protein detection (≤150 atoms = ligand, >150 + majority ATOM = protein); increased read buffer to 32 KB |
+| `agent/graph_nodes.py` | Fallback diagnostics: per-program build failure tracking, specific stop reasons; BUILD error includes missing slot names; fallback build log capture |
+| `agent/planner.py` | `fix_program_parameters` now removes wrong param when target already exists (instead of skipping) |
+| `knowledge/parameter_fixes.json` | Added `wavelength → autosol.lambda` for autosol |
 | `knowledge/programs.yaml` | Added `refine` to ligandfit ligand slot exclude_patterns |
-| `programs/ai_agent.py` | Content guards for model and ligand slots in safety net; advice display at normal level |
-| `tests/tst_audit_fixes.py` | 11 new tests (233 total) |
+| `programs/ai_agent.py` | Content guards for model and ligand slots in safety net; advice display at normal level; FALLBACK debug log display |
+| `tests/tst_audit_fixes.py` | 12 new tests (234 total) |
 
 ---
 

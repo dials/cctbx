@@ -1142,10 +1142,12 @@ class CommandBuilder:
             candidates = filtered
 
         # Inverse guard: reject protein PDB files from ligand slot.
-        # The ligand slot should only contain small-molecule files (HETATM-only).
+        # The ligand slot should only contain small-molecule files.
         # This prevents the refined model from being used as the ligand.
-        # Uses _pdb_is_protein_model (positive protein check) rather than
+        # Uses _pdb_is_protein_model (ratio-based protein check) rather than
         # "not _pdb_is_small_molecule" to avoid rejecting unreadable files.
+        # NOTE: ratio-based check allows small files with some ATOM records
+        # (e.g., nucleotide ligands like ATP, extracted binding-site fragments).
         if input_name == "ligand" and '.pdb' in extensions:
             filtered = []
             for f in candidates:
@@ -1159,8 +1161,12 @@ class CommandBuilder:
                             self._log(context, "BUILD: Excluded protein PDB from ligand slot: %s" %
                                      os.path.basename(f))
                             continue
-                    except Exception:
-                        pass
+                        else:
+                            self._log(context, "BUILD: Ligand guard passed for %s" %
+                                     os.path.basename(f))
+                    except Exception as e:
+                        self._log(context, "BUILD: Ligand guard skipped for %s (%s)" %
+                                 (os.path.basename(f), e))
                 filtered.append(f)
             candidates = filtered
 

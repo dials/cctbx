@@ -215,10 +215,19 @@ def _pdb_is_small_molecule(path, max_bytes=8192):
         return False                # Be conservative on read errors
 
 
-def _pdb_is_protein_model(path, max_bytes=8192):
+def _pdb_is_protein_model(path, max_bytes=32768):
     """
-    Return True if the PDB file contains ATOM records — the signature of a
-    polymer model (protein, DNA, RNA) as opposed to a small-molecule ligand.
+    Return True if the PDB file is predominantly a macromolecular model
+    (protein, DNA, RNA) as opposed to a small-molecule ligand.
+
+    Heuristics (applied to the first ``max_bytes``):
+      1. Count total coordinate records (ATOM + HETATM)
+      2. Very small files (≤ 150 coordinate records) → NOT protein.
+         Real proteins have hundreds to thousands of atoms; ligands
+         typically have 10–100.  Some ligand files (e.g. atp.pdb) use
+         ATOM records instead of HETATM, so record type alone is not
+         reliable for small files.
+      3. Larger files → protein if majority ATOM records.
 
     Unlike ``not _pdb_is_small_molecule()``, this function returns False for
     unreadable or non-existent files rather than True, making it safe for use
@@ -227,18 +236,33 @@ def _pdb_is_protein_model(path, max_bytes=8192):
 
     Args:
         path:      Full path to the PDB file.
-        max_bytes: How much of the file to read (default 8 KB).
+        max_bytes: How much of the file to read (default 32 KB — enough to
+                   see ~400 ATOM lines and reliably distinguish small ligands
+                   from protein models).
 
     Returns:
-        True  → file is positively identified as a protein model (has ATOM)
+        True  → file is positively identified as a protein model
         False → file is a small molecule, unreadable, or non-existent
     """
     try:
+        atom_count = 0
+        hetatm_count = 0
         with open(path, 'r', errors='replace') as fh:
             for line in fh.read(max_bytes).splitlines():
                 if line.startswith('ATOM  ') or line.startswith('ATOM '):
-                    return True
-        return False
+                    atom_count += 1
+                elif line.startswith('HETATM'):
+                    hetatm_count += 1
+        total = atom_count + hetatm_count
+        if total == 0:
+            return False          # No coordinates at all
+        # Small files are NEVER protein models.  Ligands (ATP, GDP, heme,
+        # etc.) typically have 10-100 atoms and may use ATOM records.
+        # The smallest protein domain used in crystallography has ~500 atoms.
+        if total <= 150:
+            return False
+        # Larger files: protein if majority ATOM records
+        return atom_count > hetatm_count
     except Exception:
         return False                # Can't read → don't reject
 

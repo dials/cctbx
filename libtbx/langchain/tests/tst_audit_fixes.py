@@ -8763,11 +8763,12 @@ def test_s5j_content_guard_ligand_and_model_slots():
     os.makedirs(test_dir, exist_ok=True)
 
     try:
-        # Create a protein PDB (has ATOM records)
+        # Create a protein PDB (has many ATOM records — realistic refined model)
         protein_pdb = os.path.join(test_dir, 'refine_001.pdb')
         with open(protein_pdb, 'w') as f:
-            f.write("ATOM      1  N   ALA A   1       1.000   2.000   3.000  1.00 10.00           N\n")
-            f.write("ATOM      2  CA  ALA A   1       2.000   3.000   4.000  1.00 10.00           C\n")
+            # Real protein models have hundreds to thousands of atoms
+            for i in range(200):
+                f.write("ATOM  %5d  CA  ALA A %3d       1.000   2.000   3.000  1.00 10.00           C\n" % (i+1, i+1))
             f.write("END\n")
 
         # Create a small-molecule PDB (HETATM only)
@@ -8785,9 +8786,9 @@ def test_s5j_content_guard_ligand_and_model_slots():
         assert_true(_pdb_is_small_molecule(ligand_pdb),
             "atp.pdb (HETATM-only) must be classified as small molecule")
 
-        # _pdb_is_protein_model: True for ATOM records, False otherwise
+        # _pdb_is_protein_model: True for large files with ATOM records, False for small/HETATM-only
         assert_true(_pdb_is_protein_model(protein_pdb),
-            "refine_001.pdb (has ATOM) must be identified as protein model")
+            "refine_001.pdb (200 ATOM records) must be identified as protein model")
         assert_false(_pdb_is_protein_model(ligand_pdb),
             "atp.pdb (HETATM-only) must NOT be identified as protein model")
 
@@ -9242,6 +9243,71 @@ def test_s5m_build_failure_includes_missing_slots():
         "so fallback reasoning shows which slots are unfilled")
 
     print("  PASSED: BUILD failure includes missing slot names")
+
+
+def test_s5n_protein_guard_ratio_based():
+    """_pdb_is_protein_model must use size-based check for small files.
+
+    A standalone ligand file like atp.pdb may use ATOM records (not HETATM).
+    The guard should only reject files that are large enough to be actual
+    protein models (> 150 coordinate records).
+    """
+    print("  Test: s5n_protein_guard_ratio_based")
+    import tempfile, os
+
+    from agent.workflow_state import _pdb_is_protein_model
+
+    # Pure HETATM ligand → NOT protein
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
+        for i in range(30):
+            f.write("HETATM%5d  C   ATP A   1       0.000   0.000   0.000  1.00  0.00\n" % (i+1))
+        f.flush()
+        assert_true(not _pdb_is_protein_model(f.name),
+            "Pure HETATM file should NOT be protein")
+        os.unlink(f.name)
+
+    # Small file with ALL ATOM records (like real atp.pdb) → NOT protein
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
+        for i in range(31):
+            f.write("ATOM  %5d  C   ATP A   1       0.000   0.000   0.000  1.00  0.00\n" % (i+1))
+        f.flush()
+        assert_true(not _pdb_is_protein_model(f.name),
+            "Small all-ATOM file (31 atoms, like ATP) should NOT be protein")
+        os.unlink(f.name)
+
+    # Medium file at boundary (150 ATOM records) → NOT protein
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
+        for i in range(150):
+            f.write("ATOM  %5d  CA  ALA A %3d       0.000   0.000   0.000  1.00  0.00\n" % (i+1, i+1))
+        f.flush()
+        assert_true(not _pdb_is_protein_model(f.name),
+            "150-atom file should NOT be protein (at boundary)")
+        os.unlink(f.name)
+
+    # Large protein model → IS protein
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
+        for i in range(500):
+            f.write("ATOM  %5d  CA  ALA A %3d       0.000   0.000   0.000  1.00  0.00\n" % (i+1, i+1))
+        for i in range(10):
+            f.write("HETATM%5d  C   ATP A 501       0.000   0.000   0.000  1.00  0.00\n" % (i+501))
+        f.flush()
+        assert_true(_pdb_is_protein_model(f.name),
+            "Large file with mostly ATOM records should be protein")
+        os.unlink(f.name)
+
+    # Empty file → NOT protein
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
+        f.write("REMARK  test\nEND\n")
+        f.flush()
+        assert_true(not _pdb_is_protein_model(f.name),
+            "Empty PDB (no coordinates) should NOT be protein")
+        os.unlink(f.name)
+
+    # Non-existent file → NOT protein
+    assert_true(not _pdb_is_protein_model("/nonexistent/file.pdb"),
+        "Non-existent file should NOT be protein")
+
+    print("  PASSED: size-based protein guard works correctly")
 
 
 def run_all_tests():
