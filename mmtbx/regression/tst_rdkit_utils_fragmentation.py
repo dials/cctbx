@@ -30,6 +30,7 @@ def run():
   run_test_06()
   run_test_07()
   run_test_08()
+  run_test_09()
 
 # ------------------------------------------------------------------------------
 
@@ -135,6 +136,12 @@ def run_test_08():
 
 # ------------------------------------------------------------------------------
 
+def run_test_09():
+  print('test09...')
+  rigid_comps_isels = compute_fragments(pdb_str_09, 'resname HP6', 3)
+
+# ------------------------------------------------------------------------------
+
 def compute_fragments(pdb_str, sel_str, expected, filter_lone_linkers=True):
   pdb_inp = iotbx.pdb.input(lines=pdb_str.split("\n"), source_info=None)
   model = mmtbx.model.manager(
@@ -150,15 +157,17 @@ def compute_fragments(pdb_str, sel_str, expected, filter_lone_linkers=True):
 
   mon_lib_srv = model.get_mon_lib_srv()
   cif_object, ani = mon_lib_srv.get_comp_comp_id_and_atom_name_interpretation(
-    residue_name=atom_group.resname, atom_names=atom_group.atoms().extract_name())
+    residue_name=atom_group.resname,
+    atom_names=atom_group.atoms().extract_name()
+    )
 
   cctbx_rigid_components = rdkit_utils.get_cctbx_isel_for_rigid_components(
     atom_group = atom_group,
     cif_object = cif_object,
     filter_lone_linkers = filter_lone_linkers)
 
-  #print(len(cctbx_rigid_components))
-
+#  print(len(cctbx_rigid_components))
+#
 #  ph =  model.get_hierarchy()
 #  atoms = ph.atoms()
 #  for rigid_comp in cctbx_rigid_components:
@@ -731,6 +740,34 @@ HETATM   26 H101 SPD A   1       5.000   5.325  10.251  1.00 20.00           H
 HETATM   27 H102 SPD A   1       5.298   5.909   8.981  1.00 20.00           H
 HETATM   28 HN11 SPD A   1      11.011  11.603   7.670  1.00 20.00           H
 HETATM   29 HN12 SPD A   1      11.499  10.329   8.097  1.00 20.00           H
+'''
+
+pdb_str_09 = '''
+CRYST1   16.632   12.620   17.086  90.00  90.00  90.00 P 1
+HETATM    1  C20 HP6 A   1       5.834   6.117   5.655  1.00 20.00           C
+HETATM    2  C21 HP6 A   1       6.249   6.645   7.007  1.00 20.00           C
+HETATM    3  C22 HP6 A   1       7.537   6.052   7.518  1.00 20.00           C
+HETATM    4  C23 HP6 A   1       7.966   6.570   8.869  1.00 20.00           C
+HETATM    5  C24 HP6 A   1       9.256   5.974   9.378  1.00 20.00           C
+HETATM    6  C25 HP6 A   1       9.689   6.491  10.728  1.00 20.00           C
+HETATM    7  C26 HP6 A   1      10.982   5.896  11.244  1.00 20.00           C
+HETATM    8 H201 HP6 A   1       5.000   6.537   5.383  1.00 20.00           H
+HETATM    9 H202 HP6 A   1       5.709   5.153   5.705  1.00 20.00           H
+HETATM   10 H203 HP6 A   1       6.526   6.319   5.000  1.00 20.00           H
+HETATM   11 H211 HP6 A   1       5.535   6.455   7.655  1.00 20.00           H
+HETATM   12 H212 HP6 A   1       6.350   7.620   6.951  1.00 20.00           H
+HETATM   13 H221 HP6 A   1       8.248   6.240   6.869  1.00 20.00           H
+HETATM   14 H222 HP6 A   1       7.434   5.078   7.573  1.00 20.00           H
+HETATM   15 H231 HP6 A   1       7.255   6.382   9.518  1.00 20.00           H
+HETATM   16 H232 HP6 A   1       8.070   7.544   8.815  1.00 20.00           H
+HETATM   17 H241 HP6 A   1       9.967   6.161   8.728  1.00 20.00           H
+HETATM   18 H242 HP6 A   1       9.153   5.000   9.434  1.00 20.00           H
+HETATM   19 H251 HP6 A   1       8.976   6.305  11.378  1.00 20.00           H
+HETATM   20 H252 HP6 A   1       9.792   7.466  10.672  1.00 20.00           H
+HETATM   21 H261 HP6 A   1      11.632   6.606  11.386  1.00 20.00           H
+HETATM   22 H262 HP6 A   1      11.335   5.261  10.596  1.00 20.00           H
+HETATM   23 H263 HP6 A   1      10.816   5.438  12.086  1.00 20.00           H
+END
 '''
 
 # ------------------------------------------------------------------------------
