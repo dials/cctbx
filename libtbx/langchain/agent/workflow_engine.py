@@ -51,7 +51,8 @@ class WorkflowEngine:
     # CONTEXT BUILDING
     # =========================================================================
 
-    def build_context(self, files, history_info, analysis=None, directives=None, session_info=None):
+    def build_context(self, files, history_info, analysis=None, directives=None,
+                      session_info=None, files_local=True):
         """
         Build a context dict from files, history, and analysis.
 
@@ -149,7 +150,8 @@ class WorkflowEngine:
             # possible inside the literal.
             "cell_mismatch": self._check_cell_mismatch(
                 files,
-                model_cell=(session_info or {}).get("unplaced_model_cell")),
+                model_cell=(session_info or {}).get("unplaced_model_cell"),
+                files_local=files_local),
 
             # Tier 3: diagnostic probe results (set by history after
             # phenix.model_vs_data / phenix.map_correlations ran as a probe).
@@ -326,7 +328,7 @@ class WorkflowEngine:
         """
         return bool(files.get("search_model"))
 
-    def _check_cell_mismatch(self, files, model_cell=None):
+    def _check_cell_mismatch(self, files, model_cell=None, files_local=True):
         """
         Tier 1 placement check: compare model and data unit cells.
 
@@ -379,23 +381,21 @@ class WorkflowEngine:
                 _mc = None
 
             if _mc is not None:
-                # X-ray: compare against MTZ (MTZ lives on the server in LocalAgent
-                # mode, or the comparison is run locally for RemoteAgent via the
-                # client-side CRYST1 cell here)
+                # X-ray: compare against MTZ
                 mtz_files = files.get("data_mtz", [])
-                if mtz_files:
+                if mtz_files and files_local:
                     mtz_cell = read_mtz_unit_cell(mtz_files[0])
                     if mtz_cell is not None:
                         return not cells_are_compatible(_mc, mtz_cell)
                     return False   # MTZ unreadable → fail-safe
+                elif mtz_files and not files_local:
+                    return False   # Server mode: can't read MTZ → fail-safe
 
-                # Cryo-EM: compare against map file (map is server-accessible
-                # because it was just created by resolve_cryo_em on the server,
-                # or transmitted as a path the server can reach)
+                # Cryo-EM: compare against map file
                 map_files = (files.get("full_map", []) or
                              files.get("optimized_full_map", []) or
                              files.get("map", []))
-                if map_files:
+                if map_files and files_local:
                     full_cell, present_cell = read_map_unit_cells(map_files[0])
                     if full_cell is None and present_cell is None:
                         return False   # Map unreadable → fail-safe
@@ -408,6 +408,10 @@ class WorkflowEngine:
                 return False
 
         # ── Fallback: read cell from file (works for LocalAgent / test mode) ─
+        # Skip entirely on the server where client files aren't on disk.
+        if not files_local:
+            return False
+
         # Get the first model file (generic PDB, not a positioned subcategory)
         model_files = files.get("model", [])
         pdb_path = model_files[0] if model_files else None
@@ -1996,7 +2000,8 @@ class WorkflowEngine:
     # =========================================================================
 
     def get_workflow_state(self, experiment_type, files, history_info, analysis=None,
-                           directives=None, maximum_automation=True, session_info=None):
+                           directives=None, maximum_automation=True, session_info=None,
+                           files_local=True):
         """
         Get complete workflow state (compatible with workflow_state.py output).
 
@@ -2014,7 +2019,8 @@ class WorkflowEngine:
         Returns:
             dict: Workflow state compatible with existing code
         """
-        context = self.build_context(files, history_info, analysis, directives, session_info)
+        context = self.build_context(files, history_info, analysis, directives,
+                                     session_info, files_local=files_local)
 
         # Add automation_path to context for program filtering
         context["automation_path"] = "automated" if maximum_automation else "stepwise"

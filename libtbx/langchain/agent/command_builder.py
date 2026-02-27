@@ -85,6 +85,11 @@ class CommandContext:
     # Format: [[chain, resseq, resname], ...]
     model_hetatm_residues: Optional[List] = None
 
+    # Whether files are on the local filesystem (False = server mode).
+    # When False, skip all disk I/O for client files (content guards,
+    # file reading, etc.) — they will always fail.
+    files_local: bool = True
+
     # Logging callback
     log: Any = None  # Callable for logging, or None
 
@@ -132,6 +137,7 @@ class CommandContext:
             recovery_strategies=session_info.get("recovery_strategies", {}),
             directives=state.get("directives", {}),
             model_hetatm_residues=session_info.get("model_hetatm_residues"),
+            files_local=state.get("files_local", True),
         )
 
     def _log(self, msg: str):
@@ -752,7 +758,8 @@ class CommandBuilder:
                             continue  # Skip intermediate file
 
                     # Content-based guard: validate PDB file suitability
-                    if corrected_str.lower().endswith('.pdb'):
+                    # Skip on server where client files aren't on disk.
+                    if corrected_str.lower().endswith('.pdb') and context.files_local:
                         try:
                             try:
                                 from libtbx.langchain.agent.workflow_state import _pdb_is_small_molecule
@@ -1236,7 +1243,10 @@ class CommandBuilder:
         # This catches files like atp.pdb or gdp.pdb that have no ligand-like
         # name pattern but are HETATM-only and should never be used as the
         # protein model.
-        if input_name in ("model", "protein", "pdb_file") and '.pdb' in extensions:
+        # Skip on server where client files aren't on disk (relies on
+        # categorization having classified them correctly via ligand_hints).
+        if (input_name in ("model", "protein", "pdb_file") and '.pdb' in extensions
+                and context.files_local):
             filtered = []
             for f in candidates:
                 if f.lower().endswith('.pdb'):
@@ -1261,7 +1271,8 @@ class CommandBuilder:
         # "not _pdb_is_small_molecule" to avoid rejecting unreadable files.
         # NOTE: ratio-based check allows small files with some ATOM records
         # (e.g., nucleotide ligands like ATP, extracted binding-site fragments).
-        if input_name == "ligand" and '.pdb' in extensions:
+        # Skip on server where client files aren't on disk.
+        if input_name == "ligand" and '.pdb' in extensions and context.files_local:
             filtered = []
             for f in candidates:
                 if f.lower().endswith('.pdb'):
@@ -1855,7 +1866,7 @@ class CommandBuilder:
         hetatm_residues = {}  # (chain, resseq) -> resname (ordered by first seen)
 
         # Primary: read from file (works on client where files are on disk)
-        if model_path and self._file_is_available(model_path):
+        if model_path and context.files_local and self._file_is_available(model_path):
             try:
                 with open(str(model_path), 'r', errors='replace') as fh:
                     for line in fh:

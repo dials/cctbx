@@ -369,7 +369,7 @@ def _pdb_is_protein_model(path, max_bytes=32768):
 
 
 
-def _categorize_files(available_files, ligand_hints=None):
+def _categorize_files(available_files, ligand_hints=None, files_local=True):
     """
     Categorize files by type and purpose.
 
@@ -396,7 +396,11 @@ def _categorize_files(available_files, ligand_hints=None):
     # Filter out zero-byte, corrupt, or structurally invalid files before categorizing.
     # This ensures has_full_map / has_model etc. only reflect genuinely usable files,
     # which in turn makes not_has conditions (Category A) reliable.
-    available_files = [f for f in available_files if _is_valid_file(f)]
+    # Filter out zero-byte, corrupt, or structurally invalid files before categorizing.
+    # Skip on server where client files aren't on disk (would pass everything through
+    # anyway since _is_valid_file returns True for non-existent files).
+    if files_local:
+        available_files = [f for f in available_files if _is_valid_file(f)]
 
     # Try to load YAML rules
     category_rules = _load_category_rules()
@@ -405,7 +409,8 @@ def _categorize_files(available_files, ligand_hints=None):
         files = _categorize_files_yaml(available_files, category_rules)
     else:
         # Fallback to hardcoded rules if YAML not available
-        files = _categorize_files_hardcoded(available_files, ligand_hints=ligand_hints)
+        files = _categorize_files_hardcoded(available_files, ligand_hints=ligand_hints,
+                                            files_local=files_local)
 
     # Bubble up subcategories to their parent semantic categories
     files = _bubble_up_to_parents(files, category_rules)
@@ -467,7 +472,7 @@ def _categorize_files(available_files, ligand_hints=None):
         if any(f in files.get(sc, []) for sc in _model_subcats):
             continue
         # Primary: content inspection (works on client where files are on disk)
-        is_small = _pdb_is_small_molecule(f)
+        is_small = _pdb_is_small_molecule(f) if files_local else False
         # Fallback: client-side hints (works on server where files are NOT on disk)
         if not is_small and ligand_hints:
             is_small = os.path.basename(f) in ligand_hints
@@ -826,7 +831,7 @@ def _categorize_files_yaml(available_files, rules):
     return files
 
 
-def _categorize_files_hardcoded(available_files, ligand_hints=None):
+def _categorize_files_hardcoded(available_files, ligand_hints=None, files_local=True):
     """
     Categorize files by type and purpose.
 
@@ -963,7 +968,7 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None):
                 # contain 'lig' or 'ligand' (e.g. atp.pdb, gdp.pdb, hem.pdb).
                 # Primary: read PDB content (works on client where files are on disk).
                 # Fallback: client-side ligand_hints (works on server).
-                is_small = _pdb_is_small_molecule(f)
+                is_small = _pdb_is_small_molecule(f) if files_local else False
                 if not is_small and ligand_hints:
                     is_small = os.path.basename(f) in ligand_hints
                 if is_small:
@@ -1639,7 +1644,8 @@ def _clear_zombie_done_flags(history_info, available_files, log_func=None):
 
 
 def detect_workflow_state(history, available_files, analysis=None, maximum_automation=True,
-                         use_yaml_engine=True, directives=None, session_info=None):
+                         use_yaml_engine=True, directives=None, session_info=None,
+                         files_local=True):
     """
     Determine current workflow state based on history and files.
 
@@ -1684,7 +1690,8 @@ def detect_workflow_state(history, available_files, analysis=None, maximum_autom
                                 ligand_hints.add(os.path.basename(v))
                     else:
                         ligand_hints.add(os.path.basename(val))
-    files = _categorize_files(available_files, ligand_hints=ligand_hints)
+    files = _categorize_files(available_files, ligand_hints=ligand_hints,
+                              files_local=files_local)
 
     # Analyze history
     history_info = _analyze_history(history)
@@ -1708,7 +1715,8 @@ def detect_workflow_state(history, available_files, analysis=None, maximum_autom
 
             engine = WorkflowEngine()
             state = engine.get_workflow_state(experiment_type, files, history_info, analysis,
-                                             directives, maximum_automation, session_info)
+                                             directives, maximum_automation, session_info,
+                                             files_local=files_local)
 
             state["categorized_files"] = state.get("categorized_files", files)  # S2c: respect promoted files
             # Set automation_path for both experiment types

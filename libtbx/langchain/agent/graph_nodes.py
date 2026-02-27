@@ -304,7 +304,30 @@ def _increment_attempt(state):
     }
 
 
-def _discover_companion_files(available_files):
+def _files_are_local(available_files, sample_size=3):
+    """
+    Check whether available_files are on the local filesystem.
+
+    Samples a few files and checks os.path.exists().  If none exist, the
+    files are on a remote client and disk I/O should be skipped.
+
+    Args:
+        available_files: List of file paths
+        sample_size: Number of files to sample (default 3)
+
+    Returns:
+        bool: True if at least one file exists on disk
+    """
+    if not available_files:
+        return False
+    # Sample a few files (don't check all — could be thousands)
+    for f in available_files[:sample_size]:
+        if f and os.path.exists(f):
+            return True
+    return False
+
+
+def _discover_companion_files(available_files, skip_disk=False):
     """
     Discover expected companion files that the client may not have tracked.
 
@@ -314,10 +337,15 @@ def _discover_companion_files(available_files):
 
     Args:
         available_files: List of file paths
+        skip_disk: If True, skip all disk I/O (server mode where client
+            files are not on the local filesystem)
 
     Returns:
         list: Updated file list with any discovered companions added
     """
+    if skip_disk:
+        return available_files
+
     import glob
 
     seen = {os.path.basename(f) for f in available_files if f}
@@ -595,11 +623,18 @@ def perceive(state):
                 len(history_additions),
                 ", ".join(os.path.basename(f) for f in history_additions)))
 
+    # Detect whether files are on the local filesystem.
+    # On a remote server, client file paths don't exist locally — all disk I/O
+    # (os.path.exists, glob, open) would fail silently.  Skip it entirely.
+    files_local = _files_are_local(available_files)
+    if not files_local:
+        state = _log(state, "PERCEIVE: Files not on local disk (server mode) — skipping disk I/O")
+
     # Supplement: discover expected companion files that the client may have missed.
     # E.g., if refine_001_data.mtz is tracked but refine_001.mtz (map coefficients)
     # and refine_001.pdb (refined model) are not, look for them on disk.
     original_count = len(available_files)
-    available_files = _discover_companion_files(available_files)
+    available_files = _discover_companion_files(available_files, skip_disk=not files_local)
     if len(available_files) > original_count:
         new_count = len(available_files) - original_count
         new_files = available_files[original_count:]
@@ -617,6 +652,9 @@ def perceive(state):
     # (build, validate) see the discovered/filtered files too.
     if available_files is not state.get("available_files"):
         state = {**state, "available_files": available_files}
+
+    # Store disk-access flag for downstream nodes (build, validate)
+    state = {**state, "files_local": files_local}
 
     # Detect experiment type for proper trend analysis
     # PRIORITY: Use session's locked experiment_type first, then detect from files
@@ -674,6 +712,7 @@ def perceive(state):
         use_yaml_engine=use_yaml_workflow,
         directives=state.get("directives", {}),
         session_info=state.get("session_info", {}),
+        files_local=files_local,
     )
 
     # Q1: When the user provides new advice on resume and the workflow is
@@ -2206,6 +2245,7 @@ def _build_with_new_builder(state):
         recovery_strategies=recovery_strategies,
         directives=state.get("directives", {}),
         log=log_wrapper,
+        files_local=state.get("files_local", True),
     )
 
     # Build command
