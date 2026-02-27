@@ -315,6 +315,11 @@ def sanitize_command(command, program_name=None, bad_inject_params=None,
         bad_inject_params = set()
 
     # ── 1. Probe-only programs: strip ALL key=value tokens ─────────────
+    # EXCEPT: file-path values (half_map=/path/to/file.mrc) and
+    # data-label selection parameters (obs_labels, labels, data_labels).
+    # The label params come from the error-recovery system when an MTZ
+    # has ambiguous data arrays — they MUST survive sanitization so the
+    # retry actually resolves the ambiguity.
     if program_name in _PROBE_ONLY_FILE_PROGRAMS:
         # Pre-pass: multi-word placeholder patterns
         _MULTIWORD_PLACEHOLDER_RE = re.compile(
@@ -345,9 +350,22 @@ def sanitize_command(command, program_name=None, bad_inject_params=None,
                 val_part = tok.split('=', 1)[1].strip("'\"").replace('\x00', ' ')
                 import os.path as _osp
                 _ext = _osp.splitext(val_part)[1].lower()
+                # Check if key is a data-label selection parameter
+                # (from error recovery for ambiguous MTZ arrays)
+                key_part = tok.split('=', 1)[0].split('.')[-1].lower()
+                _is_label_param = key_part in (
+                    'obs_labels', 'labels', 'data_labels',
+                    'anomalous_labels', 'r_free_flags_labels',
+                )
                 if '/' in val_part or _ext in _FILE_EXTS:
                     # Looks like a file path — keep it
                     stripped_tokens.append(tok_display)
+                elif _is_label_param:
+                    # Recovery-injected label selection — keep it
+                    stripped_tokens.append(tok_display)
+                    if log:
+                        log("  [sanitize_command] kept label param %r on %s "
+                            "(recovery-safe)" % (tok_display, program_name))
                 else:
                     if log:
                         log("  [sanitize_command] removed param %r from %s "
