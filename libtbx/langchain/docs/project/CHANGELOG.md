@@ -1,5 +1,42 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.73 (Safety net silently disabled by import failure)
+
+All MTZ categorization safety nets added in v112.71 were silently disabled on
+production because `get_mtz_stage` (added to `file_utils.py` in v112.71) was
+never deployed. The joint import `from file_utils import classify_mtz_type,
+get_mtz_stage` failed when `get_mtz_stage` didn't exist, and the outer
+`except Exception: pass` swallowed the error — disabling the entire safety net.
+
+### Root cause
+
+Three import sites in `workflow_state.py` used:
+```python
+from agent.file_utils import classify_mtz_type, get_mtz_stage
+```
+If either name is missing, Python raises `ImportError` for the entire statement.
+All three sites were wrapped in `try/except Exception: pass`, making the failure
+completely invisible — no log message, no error, just silent fallthrough to the
+old broken behavior.
+
+### Fix
+
+Added `_import_mtz_utils()` helper at module level in `workflow_state.py` that:
+1. Imports `classify_mtz_type` and `get_mtz_stage` **separately**
+2. If `get_mtz_stage` is unavailable, provides an **inline fallback** that
+   mirrors the same logic (trivial basename-based stage detection)
+3. Returns `(None, None)` only if `classify_mtz_type` itself is missing
+
+All three import sites now call `_import_mtz_utils()` instead of the fragile
+joint import. The safety nets work even if only `classify_mtz_type` exists.
+
+### Files to deploy
+- `agent/workflow_state.py` — Resilient imports via `_import_mtz_utils()`
+- `agent/file_utils.py` — Contains both `classify_mtz_type` and `get_mtz_stage`
+  (should have been deployed with v112.71 but was omitted from the file list)
+
+---
+
 ## Version 112.72 (Invalid space_group directive injection)
 
 The LLM directive extractor sometimes misinterprets workflow descriptions as

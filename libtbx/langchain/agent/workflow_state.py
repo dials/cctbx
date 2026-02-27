@@ -23,6 +23,71 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Safe MTZ utility imports.
+#
+# classify_mtz_type and get_mtz_stage live in file_utils.py.  In some
+# deployments file_utils.py may have classify_mtz_type but NOT get_mtz_stage
+# (added later).  Importing them in a single statement means a missing
+# get_mtz_stage kills the import of classify_mtz_type too.  When the import
+# is inside a try/except Exception: pass block (as our safety nets are),
+# BOTH functions become unavailable and the safety net is silently disabled.
+#
+# Solution: import each function separately and provide an inline fallback
+# for get_mtz_stage if it's unavailable.
+# ---------------------------------------------------------------------------
+
+def _import_mtz_utils():
+    """Import classify_mtz_type and get_mtz_stage with graceful fallback.
+
+    Returns (classify_mtz_type, get_mtz_stage) or (None, None) on failure.
+    """
+    classify_fn = None
+    stage_fn = None
+
+    # Import classify_mtz_type (required — without it, safety nets cannot work)
+    try:
+        from libtbx.langchain.agent.file_utils import classify_mtz_type
+        classify_fn = classify_mtz_type
+    except ImportError:
+        try:
+            from agent.file_utils import classify_mtz_type
+            classify_fn = classify_mtz_type
+        except ImportError:
+            return None, None
+
+    # Import get_mtz_stage (optional — fall back to inline implementation)
+    try:
+        from libtbx.langchain.agent.file_utils import get_mtz_stage
+        stage_fn = get_mtz_stage
+    except ImportError:
+        try:
+            from agent.file_utils import get_mtz_stage
+            stage_fn = get_mtz_stage
+        except ImportError:
+            # Inline fallback: mirrors file_utils.get_mtz_stage()
+            def _get_mtz_stage_fallback(filepath, category):
+                basename = os.path.basename(filepath).lower()
+                if category == "data_mtz":
+                    if '_data.mtz' in basename:
+                        return "original_data_mtz"
+                    if 'phased' in basename:
+                        return "phased_data_mtz"
+                    return "data_mtz"
+                elif category == "map_coeffs_mtz":
+                    if 'denmod' in basename or 'density_mod' in basename:
+                        return "denmod_map_coeffs"
+                    if 'map_coeffs' in basename and 'predict' in basename:
+                        return "predict_build_map_coeffs"
+                    if 'overall_best_map_coeffs' in basename:
+                        return "predict_build_map_coeffs"
+                    return "refine_map_coeffs"
+                return category
+            stage_fn = _get_mtz_stage_fallback
+
+    return classify_fn, stage_fn
+
+
 
 # =============================================================================
 # FILE VALIDITY
@@ -334,10 +399,9 @@ def _categorize_files(available_files, ligand_hints=None):
     # ligandfit's exclude_categories=[data_mtz] guard blocks the file even
     # from the best_files fallback path.
     try:
-        try:
-            from libtbx.langchain.agent.file_utils import classify_mtz_type, get_mtz_stage
-        except ImportError:
-            from agent.file_utils import classify_mtz_type, get_mtz_stage
+        classify_mtz_type, get_mtz_stage = _import_mtz_utils()
+        if classify_mtz_type is None:
+            raise ImportError("classify_mtz_type not available")
 
         for f in list(files.get("data_mtz", [])):
             if not f.lower().endswith('.mtz'):
@@ -419,10 +483,9 @@ def _categorize_files(available_files, ligand_hints=None):
     # but NOT in map_coeffs_mtz), it is moved to the correct category.
     # Without this, ligandfit cannot find map coefficients after refinement.
     try:
-        try:
-            from libtbx.langchain.agent.file_utils import classify_mtz_type, get_mtz_stage
-        except ImportError:
-            from agent.file_utils import classify_mtz_type, get_mtz_stage
+        classify_mtz_type, get_mtz_stage = _import_mtz_utils()
+        if classify_mtz_type is None:
+            raise ImportError("classify_mtz_type not available")
 
         # Ensure subcategory and parent category lists exist
         for cat in ["map_coeffs_mtz", "data_mtz", "refine_map_coeffs",
@@ -797,10 +860,13 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None):
         return False
 
     # Import shared MTZ classification
-    try:
-        from libtbx.langchain.agent.file_utils import classify_mtz_type, get_mtz_stage
-    except ImportError:
-        from agent.file_utils import classify_mtz_type, get_mtz_stage
+    classify_mtz_type, get_mtz_stage = _import_mtz_utils()
+    if classify_mtz_type is None:
+        # Cannot classify MTZ files — fall back to extension-only categorization
+        def classify_mtz_type(f):
+            return "data_mtz"
+        def get_mtz_stage(f, cat):
+            return cat
 
     for f in available_files:
         f_lower = f.lower()
