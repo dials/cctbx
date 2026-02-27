@@ -449,6 +449,31 @@ class CommandBuilder:
                                          file_sources=file_sources,
                                          strategy_sources=strategy_sources)
 
+        # Post-assembly: inject recovery-sourced strategy entries that the
+        # template-based build_command silently dropped.
+        #
+        # build_command only emits strategy entries matching strategy_flags
+        # keys in programs.yaml.  Recovery-injected params like
+        # scaling.input.xray_data.obs_labels are fully-qualified PHIL paths
+        # that don't match short strategy_flags names (unit_cell, space_group).
+        # They get silently dropped → the recovery fails.
+        #
+        # Fix: append any recovery-sourced strategy entry whose key (or leaf)
+        # is not already present in the command.
+        if command and strategy_sources:
+            for key, value in strategy.items():
+                if strategy_sources.get(key) != "recovery":
+                    continue
+                # Check if already in command (key or leaf name)
+                leaf = key.split(".")[-1] if "." in key else key
+                if key in command or leaf in command:
+                    continue
+                # Append as key=value
+                token = '%s=%s' % (key, value)
+                command = command + ' ' + token
+                self._log(context,
+                          "BUILD: Appended recovery param: %s" % token)
+
         # Post-assembly validation: reject commands with no input files
         # (e.g., "phenix.mtriage" with no map is useless and may hang)
         if command:
