@@ -1204,6 +1204,37 @@ Applied in:
 - `CommandBuilder` LLM hint validation loop
 - `_inject_missing_required_files._find_candidate_for_slot` (client-side safety net)
 
+### Ligand Category Content Validation (v112.74)
+
+The YAML categorizer (`file_categories.yaml`) may misclassify protein PDB files
+as `ligand_pdb` when broad filename patterns match names like `1aba.pdb` or
+`3gx5.pdb`.  A protein with a few HETATM ligand/cofactor atoms is still a
+macromolecular model, not a ligand coordinate file.
+
+Post-processing guard in `_categorize_files()` validates every `ligand_pdb`
+entry using `_pdb_is_protein_model()`.  If a PDB file has >150 coordinate
+records and majority ATOM records, it is a false positive and gets moved from
+`ligand_pdb`/`ligand` to `unclassified_pdb`/`pdb`/`model`.  Same defense
+pattern as the half-map validation guard.
+
+Only runs when `files_local=True` (file content readable on disk).
+
+| File | ATOM | HETATM | Total | is_protein_model | Action |
+|------|------|--------|-------|------------------|--------|
+| 1aba.pdb (protein+ligand) | 729 | 20 | 749 | True | Rescue → model |
+| atp.pdb (pure ligand) | 0 | 31 | 31 | False | Keep in ligand |
+| hem.pdb (cofactor) | 0 | 43 | 43 | False | Keep in ligand |
+
+**Defense layers for PDB ligand classification:**
+
+| Layer | What it catches | Where |
+|-------|----------------|-------|
+| YAML patterns | Name-based (e.g. `*lig*`) | `_categorize_files_yaml` |
+| Hardcoded name check | Word-boundary `lig`/`ligand` | `_categorize_files_hardcoded` |
+| Content: unclassified→ligand | HETATM-only in unclassified_pdb | Post-processing (existing) |
+| Content: ligand→model | Protein in ligand_pdb | Post-processing (v112.74) |
+| best_files_tracker | Content + name check | `_is_ligand_file` |
+
 ### Duplicate Command Detection
 
 `session.is_duplicate_command()` prevents the agent from repeating commands.
@@ -1469,24 +1500,34 @@ multiple modules.
 ### Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         CommandBuilder.build()                           │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────┐ │
-│  │ _select_     │──▶│ _build_      │──▶│ _apply_      │──▶│_assemble_│ │
-│  │   files()    │   │  strategy()  │   │ invariants() │   │command() │ │
-│  └──────────────┘   └──────────────┘   └──────────────┘   └──────────┘ │
-│        │                  │                   │                 │       │
-│        ▼                  ▼                   ▼                 ▼       │
-│  Priority order:     Auto-fill:          Auto-fill:       Final cmd    │
-│  1. LLM hints       - output_prefix     - resolution      string       │
-│  2. Locked rfree    - from history      - R-free flags                 │
-│  3. Best files                          - twin_law                     │
-│  4. Categories                                                          │
-│  5. Extensions                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         CommandBuilder.build()                               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌─────────────┐  │
+│  │_select_  │─▶│_build_   │─▶│_apply_    │─▶│_assemble_│─▶│ _inject_    │  │
+│  │ files()  │  │strategy()│  │invariants()│  │command() │  │ recovery()  │  │
+│  └──────────┘  └──────────┘  └───────────┘  └──────────┘  └─────────────┘  │
+│       │              │              │              │              │          │
+│       ▼              ▼              ▼              ▼              ▼          │
+│  Priority order:  Auto-fill:    Auto-fill:    Template-      Append any     │
+│  1. LLM hints    - output_pfx  - resolution   based cmd      recovery-     │
+│  2. Locked rfree - from hist   - R-free flags  string         sourced       │
+│  3. Best files                 - twin_law                     strategy      │
+│  4. Categories                                                entries not   │
+│  5. Extensions                                                in command    │
+│                                                                              │
+│  ↕ _apply_recovery_strategies() runs between _build_strategy and            │
+│    _apply_invariants, adding recovery flags to the strategy dict.           │
+│    Recovery entries are tagged with strategy_sources[key]="recovery".        │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+The recovery injection step is necessary because `registry.build_command()` only
+emits strategy entries matching `strategy_flags` in programs.yaml.  Recovery
+params use fully-qualified PHIL paths (e.g., `scaling.input.xray_data.obs_labels`)
+that don't match short strategy_flags names.  The post-assembly injection ensures
+they reach the final command.  See "Automatic Error Recovery" section for details.
 
 ### CommandContext
 
@@ -1553,7 +1594,46 @@ with patterns defined in `knowledge/recoverable_errors.yaml`.
    from the error message
 3. **Resolution**: A strategy selects the best choice based on program type and
    workflow context (e.g., anomalous vs merged data)
-4. **Retry**: The command is rebuilt with the corrected parameter and re-executed
+4. **Storage**: The resolution is saved as a file-keyed recovery strategy in the
+   session (`session.set_recovery_strategy`), and `force_retry_program` is set
+5. **Retry**: On the next cycle, `force_retry` bypasses the LLM's program choice,
+   the command builder applies recovery flags, and the command is re-executed
+
+### Recovery Parameter Injection (v112.74)
+
+Recovery strategies add fully-qualified PHIL parameters to the command builder's
+strategy dict (e.g., `scaling.input.xray_data.obs_labels=I(+)` for ambiguous
+data labels).  These must survive two stages to reach the final command:
+
+**Stage 1: build_command template expansion.**  `registry.build_command()` only
+emits strategy entries matching `strategy_flags` keys in programs.yaml.  Recovery
+params use fully-qualified PHIL paths that don't match short flag names.  Fix:
+after `_assemble_command` returns, any strategy entry sourced from recovery
+(`strategy_sources[key] == "recovery"`) whose key is not already present in the
+command is appended as `key=value`.
+
+**Stage 2: probe-only sanitizer.**  Programs in `_PROBE_ONLY_FILE_PROGRAMS`
+(xtriage, model_vs_data, etc.) have all non-file-path key=value tokens stripped.
+Data-label selection parameters (`obs_labels`, `labels`, `data_labels`,
+`anomalous_labels`, `r_free_flags_labels`) are whitelisted because they come
+exclusively from error recovery for ambiguous MTZ arrays.
+
+### Recovery Loop Guard (v112.74)
+
+Before storing a new recovery strategy, the system checks if one already exists
+for the same file (`session.get_recovery_strategy(file)`).  If so, the previous
+recovery attempt didn't work — re-triggering would create an infinite loop.
+The recovery is skipped and the failure falls through to the terminal diagnosis
+path.
+
+### Duplicate Check Bypass for Recovery (v112.74)
+
+Recovery retries re-run the same program, often with commands that look like
+duplicates of the failed command.  When `forced_retry` is detected in
+`decision_info` (or fallback: reasoning text contains recovery marker), the
+duplicate check in `_handle_duplicate_check` is skipped entirely.  The
+`forced_retry` flag propagates from `state['intent']` through the BUILD node's
+return dict to the top-level graph output.
 
 ### Currently Handled Errors
 
@@ -1578,11 +1658,21 @@ with patterns defined in `knowledge/recoverable_errors.yaml`.
 2. Add a resolution handler in `error_analyzer.py` (`resolve_error()` method)
 3. The fallback node in the graph will automatically use the new pattern
 
+### Recovery strategies persist intentionally
+
+After a program succeeds with a selected label (e.g., `obs_labels=I(+)`), the
+recovery strategy for that MTZ file is NOT cleared.  The ambiguity is a property
+of the MTZ file, not the program.  Downstream programs (phaser, refine) that use
+the same MTZ also need the label selection.
+
 ### Key Files
 
 - `knowledge/recoverable_errors.yaml` — Error patterns and resolution config
 - `agent/error_analyzer.py` — Detection, extraction, and resolution logic
 - `agent/graph_nodes.py` — Fallback node triggers error analysis on failure
+- `agent/command_builder.py` — Recovery param injection after `_assemble_command`
+- `agent/command_postprocessor.py` — Label param whitelist in probe-only sanitizer
+- `programs/ai_agent.py` — Loop guard, duplicate check bypass, `force_retry` handling
 
 ---
 

@@ -109,6 +109,10 @@ Unified command generation that:
 - Selects appropriate input files using BestFilesTracker
 - Applies strategy flags and defaults
 - Tracks WHY each file was selected (for transparency)
+- **Recovery param injection**: Recovery-sourced strategy entries (e.g.,
+  `obs_labels` from ambiguous data label recovery) are appended after
+  template-based command assembly, since `build_command` only emits params
+  matching known `strategy_flags` keys
 - **Content-based guards**: rejects small-molecule PDB files from model slots
   (`_pdb_is_small_molecule`) and protein models from ligand slots
   (`_pdb_is_protein_model`)
@@ -160,6 +164,13 @@ Semantic file classification using rules from `file_categories.yaml`:
 | `ligand` | Ligand files | ligand.pdb, ATP.cif |
 
 **Semantic distinction**: `model` = already positioned in crystal/map; `search_model` = template not yet placed.
+
+**Post-processing content guards** validate YAML categorizer output:
+- **Half-map guard**: Files in `half_map` without "half" in name → reclassified to `full_map`
+- **Ligand guard** (v112.74): PDB files in `ligand_pdb` that are actually protein
+  models (>150 atoms, majority ATOM records) → rescued to `model`.  Catches
+  false positives from broad YAML patterns matching names like `1aba.pdb`.
+- **MTZ safety net**: Cross-checks all MTZ files against `classify_mtz_type()` regex
 
 ### 6. Best Files Tracker (`agent/best_files_tracker.py`)
 
@@ -525,6 +536,17 @@ phenix.ai_agent dry_run=True dry_run_scenario=xray_basic
 ---
 
 ## Error Handling
+
+### Automatic Error Recovery
+
+Recognized error patterns trigger automatic retry with corrected parameters:
+- **Ambiguous data labels**: MTZ with multiple arrays → selects anomalous or merged
+  based on workflow context, injects `obs_labels` via recovery param injection
+- **Ambiguous experimental phases**: Selects HL coefficients based on context
+- **Loop guard** (v112.74): If a recovery strategy already exists for the file,
+  re-triggering is skipped to prevent infinite retry loops
+
+See ARCHITECTURE.md "Automatic Error Recovery" for implementation details.
 
 ### User Request Invalid
 

@@ -1,5 +1,60 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.74 (Xtriage recovery + ligand misclassification)
+
+### Problem 1 — Xtriage obs_labels recovery never reaches command line
+
+**Symptom:** Xtriage fails with "Multiple equally suitable arrays", recovery
+correctly selects I(+) labels, but the retry command is identical to the
+failed command — obs_labels is missing.  Agent loops until fallback STOPs.
+
+**Root cause (4-layer failure chain):**
+1. `registry.build_command()` silently drops recovery params that don't match
+   `strategy_flags` keys in programs.yaml.  Xtriage only has `unit_cell` and
+   `space_group` — the fully-qualified `scaling.input.xray_data.obs_labels`
+   is ignored.
+2. Probe-only sanitizer strips obs_labels (not a file path).
+3. Duplicate check consumes `force_retry_program` on identical command.
+4. No guard against re-triggering the same failed recovery.
+
+**Fixes:**
+- `command_builder.py`: After `_assemble_command`, append any recovery-sourced
+  strategy entry missing from the command.
+- `command_postprocessor.py`: Whitelist data-label params (`obs_labels`,
+  `labels`, `data_labels`, `anomalous_labels`, `r_free_flags_labels`) in
+  probe-only sanitizer.
+- `ai_agent.py`: Skip duplicate check when `forced_retry` is set.  Guard
+  against re-triggering recovery when strategy already exists for file.
+- `graph_nodes.py`: Propagate `forced_retry` to top-level BUILD output.
+
+### Problem 2 — Protein PDB files misclassified as ligand
+
+**Symptom:** `1aba.pdb` (729 ATOM + 20 HETATM records) rejected by BUILD:
+"LLM file rejected (in excluded category 'ligand'): model=1aba.pdb"
+
+**Root cause:** YAML categorizer patterns for `ligand_pdb` are broad enough
+to match protein PDB filenames.  Existing post-processing only validates
+`unclassified_pdb` files — files directly placed into `ligand_pdb` were
+never content-checked.
+
+**Fix:** `workflow_state.py`: Added post-processing guard in
+`_categorize_files()`.  Iterates `ligand_pdb` entries; any PDB file where
+`_pdb_is_protein_model()` returns True (>150 atoms, majority ATOM records)
+is moved to `unclassified_pdb`/`pdb`/`model`.  Same pattern as existing
+half-map validation guard.
+
+### Files modified
+
+| File | Changes |
+|---|---|
+| `command_builder.py` | Append recovery-sourced strategy entries after build_command |
+| `command_postprocessor.py` | Label param exception in probe-only sanitizer |
+| `ai_agent.py` | Skip duplicate check for recovery; recovery loop guard |
+| `graph_nodes.py` | Propagate forced_retry to top-level BUILD output |
+| `workflow_state.py` | Ligand_pdb content validation guard |
+
+---
+
 ## Version 112.73 (Output files and best_files lost on restart)
 
 ### Problem 1 — Available files empty on restart
