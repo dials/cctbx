@@ -32,10 +32,12 @@ import os
 from datetime import datetime
 
 # Centralized pattern utilities - handle both PHENIX and standalone imports
-try:
-    from libtbx.langchain.agent.pattern_manager import is_half_map
-except ImportError:
-    from agent.pattern_manager import is_half_map
+# Override is_half_map with a stricter version that requires 'half' in name.
+# The pattern_manager version uses [_-]?[12]$ which false-positives on
+# sequentially numbered maps (map_1.ccp4, map_2.ccp4).
+def is_half_map(basename):
+    """Return True only if basename contains 'half' (strict version)."""
+    return 'half' in basename.lower()
 
 
 # =============================================================================

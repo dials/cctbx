@@ -507,6 +507,37 @@ def _categorize_files(available_files, ligand_hints=None, files_local=True):
                 if f not in files[lst_key]:
                     files[lst_key].append(f)
 
+    # Post-processing: Validate half-map classification.
+    #
+    # Both the YAML and hardcoded categorizers can misclassify sequentially
+    # numbered maps (map_1.ccp4, map_2.ccp4 from resolve_cryo_em segmentation)
+    # as half-maps if broad patterns like *_[12].* are used.
+    #
+    # Half-maps from EMDB, RELION, CryoSPARC, and other cryo-EM software
+    # always contain 'half' in their filename.  Any file in half_map without
+    # 'half' in the name is reclassified as full_map.
+    if "half_map" in files and files["half_map"]:
+        reclassified = []
+        keep = []
+        for f in files["half_map"]:
+            if 'half' in os.path.basename(f).lower():
+                keep.append(f)
+            else:
+                reclassified.append(f)
+        if reclassified:
+            files["half_map"] = keep
+            if "full_map" not in files:
+                files["full_map"] = []
+            for f in reclassified:
+                if f not in files["full_map"]:
+                    files["full_map"].append(f)
+            # Also ensure reclassified files are in 'map' parent
+            if "map" not in files:
+                files["map"] = []
+            for f in reclassified:
+                if f not in files["map"]:
+                    files["map"].append(f)
+
     # Post-processing: If we have exactly one half-map and no full maps,
     # treat it as a full map. Half-maps only make sense in pairs for FSC.
     # A user providing a single map (even if named like a half-map) wants to use it.
