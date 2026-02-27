@@ -254,15 +254,43 @@ class AgentSession:
             cycle_num = cycle.get("cycle_number", 0)
             program = cycle.get("program", "")
             result = cycle.get("result", "")
+
+            # Strategy 2.5: Use stored output_dir if available
+            # (recorded by record_result — survives cycle-number mismatches)
+            stored_dir = cycle.get("output_dir")
+            if stored_dir and os.path.isdir(stored_dir):
+                for ext in ("*.mtz", "*.pdb", "*.cif",
+                            "*.map", "*.ccp4", "*.ncs_spec"):
+                    for f in glob.glob(os.path.join(stored_dir, ext)):
+                        bn = os.path.basename(f)
+                        if bn not in seen:
+                            found.append(f)
+                            seen.add(bn)
+
             # Only scan for successful cycles with a known program
             if (cycle_num > 0 and program
                     and "FAILED" not in result.upper()):
                 shortname = program.replace("phenix.", "").replace(".", "_")
+
+                # Try 1: Exact cycle-number-based pattern
                 dir_pattern = os.path.join(
                     session_dir, "sub_%02d_%s*" % (cycle_num, shortname))
-                for output_dir in glob.glob(dir_pattern):
-                    if not os.path.isdir(output_dir):
-                        continue
+                matched_dirs = [d for d in glob.glob(dir_pattern)
+                                if os.path.isdir(d)]
+
+                # Try 2: If exact match fails, scan ALL sub_*_{program}*
+                # directories.  This handles the common case where session
+                # cycle numbers diverge from GUI directory numbering after
+                # an agent restart (e.g., session says cycle 2 but GUI
+                # created sub_04_pdbtools).
+                if not matched_dirs:
+                    broad_pattern = os.path.join(
+                        session_dir, "sub_*_%s*" % shortname)
+                    matched_dirs = sorted(
+                        [d for d in glob.glob(broad_pattern)
+                         if os.path.isdir(d)])
+
+                for output_dir in matched_dirs:
                     for ext in ("*.mtz", "*.pdb", "*.cif",
                                 "*.map", "*.ccp4", "*.ncs_spec"):
                         for f in glob.glob(
@@ -1553,6 +1581,14 @@ class AgentSession:
             if isinstance(output_files, str):
                 output_files = [output_files]
             cycle["output_files"] = list(output_files)
+
+            # Store the output directory for reliable future lookups.
+            # Session cycle_number may not match GUI directory numbering
+            # after restarts, so storing the actual directory is essential.
+            for f in output_files:
+                if f and os.path.isabs(f) and os.path.exists(f):
+                    cycle["output_dir"] = os.path.dirname(f)
+                    break
 
         # Extract and store metrics from result for use by workflow_state
         program = cycle.get("program", "")

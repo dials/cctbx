@@ -1,65 +1,51 @@
 # PHENIX AI Agent - Changelog
 
-## Version 112.73 (Output files lost on restart)
+## Version 112.73 (Output files and best_files lost on restart)
 
-### Problem
+### Problem 1 — Available files empty on restart
 
 After refinement completes and the agent stops then restarts, ligandfit fails
 with "missing inputs: map_coeffs_mtz" even though refine output files exist
-on disk in `sub_03_refine/`.  The log shows only 3 available files (the
-originals) — refine outputs are completely absent.
+on disk.  The log shows only 3 available files — refine outputs are absent.
 
-### Root cause
+Root cause: `get_available_files()` Step 3 infers `agent_dirs` from tracked
+file paths.  With only original inputs tracked (no `sub_*` in paths),
+`agent_dirs` is empty and the supplemental scan never runs.
 
-`get_available_files()` and `_rebuild_best_files_from_cycles()` both rely on
-`cycle["output_files"]` containing valid, existing absolute paths.  On restart,
-these paths may be empty (never recorded), relative (resolve to wrong cwd),
-or stale (different machine).  When the stored paths fail:
+Fix: Seed `agent_dirs` from `_get_session_dir()` — always known from the
+session file path.
 
-- **Step 2** (cycle output_files) finds nothing
-- **`_find_missing_outputs`** derives directories from output_files — also
-  finds nothing when the list is empty
-- **Step 3** (directory scan) infers agent_dirs from paths of already-tracked
-  files — but only the 3 originals are tracked, none have `sub_*` in their
-  path, so `agent_dirs` is empty and the scan never runs
-- **`_rebuild_best_files_from_cycles`** iterates the same empty output_files,
-  so `best_files` stays empty
+### Problem 2 — best_files stale after restart (wrong model for refine)
 
-Every recovery mechanism depends on the previous one succeeding.  If the first
-link breaks, the entire chain fails.
+After ligandfit and pdbtools succeed, refine uses the original input model
+instead of the `*_with_ligand.pdb` from pdbtools.  Also uses original data
+MTZ instead of the R-free-locked MTZ from the first refinement.
 
-### Fix — General strategy: discover files from directory structure
+Root cause: `_rebuild_best_files_from_cycles()` uses `_discover_cycle_outputs()`
+which constructs directory names as `sub_{cycle_num}_{program}*`.  After a
+restart, session cycle numbers diverge from GUI directory numbers (e.g.,
+session says cycle 2 but GUI created `sub_04_pdbtools`).  The scan finds
+nothing, `best_files` stays at originals, and PRIORITY 2 in the command
+builder returns the stale model.
 
-New `_discover_cycle_outputs(cycle)` method resolves output files for any
-cycle using a three-strategy approach:
+Fix: `_discover_cycle_outputs()` now has five strategies:
 
-1. **Try stored paths** as-is (normal case)
-2. **Resolve relative paths** against the session directory and its parent
-   (handles cwd changes between runs)
-3. **Scan the expected output directory** (`sub_{NN}_{program}/`) for all
-   crystallography file types (handles empty output_files)
-
-The session directory (`_get_session_dir()`) is always known from the session
-file's location.  The output directory name is deterministic from the cycle
-number and program name.  No stored file paths required.
-
-Both `get_available_files()` Step 2 and `_rebuild_best_files_from_cycles()`
-now use this helper, making both paths resilient to restart scenarios.
+1. Try stored `output_files` paths as-is
+2. Resolve relative paths against session directory
+3. Use stored `output_dir` from cycle data (new: set by `record_result`)
+4. Scan `sub_{NN}_{program}*` (exact cycle-number match)
+5. Scan `sub_*_{program}*` (broad match — handles number mismatch)
 
 ### Companion fixes (defense-in-depth)
 
-- **Self-contained MTZ classification** (`workflow_state.py`) —
-  `_import_mtz_utils()` always returns working functions with inline fallbacks.
-  The safety net fires even without `file_utils.py`.
-
-- **Principled exclusion rule** (`command_builder.py`) — `_should_exclude()`
-  prevents dual-categorization from blocking files.
+- `_import_mtz_utils()` always returns working functions (workflow_state.py)
+- `_should_exclude()` for dual-categorization (command_builder.py)
 
 ### Files to deploy
 
 | File | What changed | Role |
 |------|-------------|------|
-| `agent/session.py` | `_discover_cycle_outputs()`, `_get_session_dir()` | **Critical** |
+| `agent/session.py` | Resilient `_discover_cycle_outputs()`, stored `output_dir` | **Critical** |
 | `agent/workflow_state.py` | Self-contained `_import_mtz_utils()` | Defense-in-depth |
 | `agent/command_builder.py` | `_should_exclude()` at 4 check points | Defense-in-depth |
 | `agent/file_utils.py` | Contains `get_mtz_stage` | Defense-in-depth |
