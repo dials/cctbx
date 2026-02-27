@@ -1360,6 +1360,25 @@ class CommandBuilder:
                         self._log(context, "BUILD: Directive override: %s=%s (from %s)" %
                                   (normalized_key, value, settings_key))
 
+        # Validate space_group: LLM sometimes extracts workflow descriptions
+        # (e.g. "determination" from "space group determination") as if they
+        # were actual space group symbols.  Strip invalid values before they
+        # reach the command line.
+        if "space_group" in strategy:
+            try:
+                try:
+                    from libtbx.langchain.agent.command_postprocessor import _is_valid_space_group
+                except ImportError:
+                    from agent.command_postprocessor import _is_valid_space_group
+                sg_val = strategy["space_group"]
+                if not _is_valid_space_group(sg_val):
+                    del strategy["space_group"]
+                    self._log(context,
+                              "BUILD: Stripped invalid space_group=%r from strategy "
+                              "(not a valid space group symbol)" % str(sg_val))
+            except ImportError:
+                pass
+
         # Auto-fill output_prefix for refinement programs
         if program in ("phenix.refine", "phenix.real_space_refine"):
             if "output_prefix" not in strategy:

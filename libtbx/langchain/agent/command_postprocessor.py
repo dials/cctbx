@@ -59,7 +59,60 @@ _PHASER_CS_PROGRAMS = frozenset({
 _INVALID_SG_PATTERNS = (
     "not mentioned", "not specified", "not provided",
     "unknown", "n/a", "none", "null", "tbd", "to be determined",
+    "determination", "detection", "analysis", "assignment", "search",
+    "automatic", "auto",
 )
+
+# Valid space group first characters (Hermann-Mauguin crystal system letters)
+_SG_FIRST_CHARS = set("PIFCRABHpifcrabh")
+
+
+def _is_valid_space_group(value):
+    """Check whether a value looks like a valid space group symbol or number.
+
+    Valid examples:  P1, P 21 21 21, C2221, I4/mmm, P-1, R3:H, Fm-3m, 19, 62
+    Invalid examples: determination, analysis, auto, Not specified
+
+    Returns True if the value is plausibly a space group, False otherwise.
+    """
+    if not value:
+        return False
+    sg = str(value).strip()
+    if not sg:
+        return False
+
+    sg_lower = sg.lower().replace('"', '').replace("'", '').strip()
+
+    # Check known placeholder phrases
+    if any(p in sg_lower for p in _INVALID_SG_PATTERNS):
+        return False
+
+    # Too long to be a space group (longest is ~15 chars, e.g. "P 21/n 21/n 2/n")
+    if len(sg) > 20:
+        return False
+
+    # Pure integer 1-230 is a valid space group number
+    try:
+        num = int(sg)
+        return 1 <= num <= 230
+    except (ValueError, TypeError):
+        pass
+
+    # Must start with a crystal system letter (H-M notation) or a digit
+    first = sg[0]
+    if first not in _SG_FIRST_CHARS and not first.isdigit():
+        return False
+
+    # If it's a single English word > 3 chars with no digits/spaces/slashes,
+    # it's almost certainly not a space group (e.g. "determination", "cubic")
+    if (sg.isalpha() and len(sg) > 3 and
+            ' ' not in sg and '/' not in sg and '_' not in sg):
+        # Exceptions: short symbols like "Pnma", "Pbca", "Fddd", "Fmmm"
+        # These are valid single-word space group symbols (all <= 5 chars typically)
+        if len(sg) > 6:
+            return False
+
+    return True
 
 
 def inject_crystal_symmetry(command, directives, program_name, log=None):
@@ -119,16 +172,10 @@ def inject_crystal_symmetry(command, directives, program_name, log=None):
     if space_group and "space_group" not in command_lower:
         sg_str = str(space_group).strip()
 
-        _sg_lower = sg_str.lower()
-        _is_placeholder = (
-            any(p in _sg_lower for p in _INVALID_SG_PATTERNS) or
-            len(sg_str) > 20 or
-            not sg_str[0].isalpha()
-        )
-        if _is_placeholder:
+        if not _is_valid_space_group(sg_str):
             if log:
                 log("  [inject_crystal_symmetry] skipping space_group=%r "
-                    "(placeholder / invalid value)" % sg_str)
+                    "(not a valid space group symbol)" % sg_str)
         else:
             if " " in sg_str and not sg_str.startswith('"'):
                 sg_str = '"%s"' % sg_str
@@ -353,6 +400,15 @@ def sanitize_command(command, program_name=None, bad_inject_params=None,
                     _strip = True
                     if log:
                         log("  [sanitize_command] removed placeholder token: %r"
+                            % token.strip())
+
+            # Rule B2: space_group with invalid value (e.g. "determination")
+            if not _strip and 'space_group' in key_full and 'unit_cell' not in key_full:
+                sg_val = val.strip().strip('"').strip("'")
+                if sg_val and not _is_valid_space_group(sg_val):
+                    _strip = True
+                    if log:
+                        log("  [sanitize_command] removed invalid space_group: %r"
                             % token.strip())
 
             # Rule C: key=value on a program with no strategy_flags

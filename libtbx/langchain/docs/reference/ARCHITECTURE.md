@@ -136,11 +136,12 @@ Main entry point and execution loop:
 
 #### command_postprocessor.py
 Server-safe command transforms called by the BUILD node (new in v112.66):
-- `sanitize_command()` — Rules A–D: strip placeholders, blacklisted params, hallucinated cross-program params, bare unscoped params
+- `sanitize_command()` — Rules A–D: strip placeholders, blacklisted params, hallucinated cross-program params, bare unscoped params. Rule B2 (v112.72): validates `space_group=` values and strips non-space-group words.
 - `inject_user_params()` — append user key=value params missing from command (scope-matched for dotted keys, strategy_flags-validated for bare keys)
-- `inject_crystal_symmetry()` — append unit_cell/space_group from directives
+- `inject_crystal_symmetry()` — append unit_cell/space_group from directives (validates with `_is_valid_space_group()`)
 - `inject_program_defaults()` — append defaults from programs.yaml if missing (safety net)
 - `postprocess_command()` — single entry point calling all four in order
+- `_is_valid_space_group()` — validates that a value is a plausible space group symbol (H-M notation or IT number 1-230), rejecting English words like "determination"
 
 All functions take explicit data arguments (no `self`/class dependencies), making
 them callable from both the graph (server-side) and `ai_agent.py` (client-side

@@ -1,5 +1,56 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.72 (Invalid space_group directive injection)
+
+The LLM directive extractor sometimes misinterprets workflow descriptions as
+parameter values. User advice mentioning "space group determination" caused
+`space_group=determination` to be extracted into `program_settings.default`,
+then injected verbatim into `phenix.refine` commands where it caused errors.
+
+### Root cause
+
+The LLM parsed "space group determination" as `space_group = determination`,
+treating the workflow description word as a space group symbol. No validation
+existed to distinguish real space group symbols (P1, P 21 21 21, C2221) from
+English words.
+
+### Fix: Four-layer defense
+
+**Layer 1 — Don't extract it** (`session.py`): New `_sanitize_directives()`
+method runs after directive extraction. Validates `space_group` values in all
+`program_settings` scopes using `_is_valid_space_group()`. Invalid values are
+removed before storage. Logs removal.
+
+**Layer 2 — Don't inject via strategy** (`command_builder.py`): `_build_strategy()`
+now validates any `space_group` key in the strategy dict before it reaches
+`_assemble_command()`. Invalid values are stripped with a log message.
+
+**Layer 3 — Don't inject via crystal symmetry** (`command_postprocessor.py`):
+`inject_crystal_symmetry()` now uses `_is_valid_space_group()` instead of the
+weak `_INVALID_SG_PATTERNS` substring check.
+
+**Layer 4 — Strip if already in command** (`command_postprocessor.py`):
+`sanitize_command()` Rule B2 validates `space_group=` values in the command
+string and strips invalid ones.
+
+### Space group validation (`_is_valid_space_group`)
+
+New validator in `command_postprocessor.py` checks:
+- Known placeholder phrases (extended: "determination", "detection", "analysis", "auto", etc.)
+- Length limit (>20 chars rejected)
+- Space group numbers (1-230 accepted)
+- First character must be a crystal system letter (P/I/C/F/R/A/B/H) or digit
+- Single English words >6 chars rejected (catches "determination", "monoclinic", etc.)
+- Short symbols like "Pnma", "Pbca" correctly accepted
+
+### Files Changed
+- `agent/command_postprocessor.py` — New `_is_valid_space_group()`, updated
+  `inject_crystal_symmetry()`, new Rule B2 in `sanitize_command()`
+- `agent/command_builder.py` — Space group validation in `_build_strategy()`
+- `agent/session.py` — New `_sanitize_directives()` method, called after extraction
+
+---
+
 ## Version 112.71 (MTZ categorization safety net + dual-categorization fix)
 
 After running `phenix.refine`, the agent could not find `refine_001_001.mtz` as

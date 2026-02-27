@@ -487,6 +487,10 @@ class AgentSession:
                 directives = {}
 
             # Store and log results
+            # Sanitize: strip invalid space_group values from program_settings.
+            # The LLM sometimes extracts workflow descriptions as space group
+            # symbols (e.g. "determination" from "space group determination").
+            directives = self._sanitize_directives(directives, log)
             self.data["directives"] = directives
             self.data["directives_extracted"] = True
             self.save()
@@ -544,6 +548,54 @@ class AgentSession:
             dict: Directives dict, or empty dict if not extracted
         """
         return self.data.get("directives", {})
+
+    @staticmethod
+    def _sanitize_directives(directives, log=None):
+        """Remove invalid crystal symmetry values from extracted directives.
+
+        The LLM sometimes extracts workflow descriptions as parameter values.
+        For example, user advice mentioning "space group determination" can
+        produce program_settings.default.space_group = "determination".
+        This method strips such values before they reach the command builder.
+
+        Args:
+            directives: Extracted directives dict (modified in place)
+            log: Optional logging callable
+
+        Returns:
+            The (possibly modified) directives dict
+        """
+        if not directives or not isinstance(directives, dict):
+            return directives
+
+        prog_settings = directives.get("program_settings")
+        if not prog_settings or not isinstance(prog_settings, dict):
+            return directives
+
+        try:
+            try:
+                from libtbx.langchain.agent.command_postprocessor import _is_valid_space_group
+            except ImportError:
+                from agent.command_postprocessor import _is_valid_space_group
+        except ImportError:
+            return directives  # Can't validate without the function
+
+        for scope_name in list(prog_settings.keys()):
+            scope = prog_settings.get(scope_name)
+            if not isinstance(scope, dict):
+                continue
+            sg = scope.get("space_group")
+            if sg and not _is_valid_space_group(sg):
+                del scope["space_group"]
+                if log:
+                    log("DIRECTIVES: Removed invalid space_group=%r from "
+                        "program_settings.%s (not a valid space group symbol)"
+                        % (str(sg), scope_name))
+                # Clean up empty scope
+                if not scope:
+                    del prog_settings[scope_name]
+
+        return directives
 
     def _validate_directives(self, user_advice, directives, log_func=None):
         """
