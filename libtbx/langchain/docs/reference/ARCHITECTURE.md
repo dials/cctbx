@@ -1090,6 +1090,23 @@ and corrects three types of misclassification:
 
 All corrections are logged at `WARNING` level via Python's logging module.
 
+**Layer 5: Self-contained MTZ classification (v112.73)** — The Layer 4 safety
+net depends on `classify_mtz_type()` from `file_utils.py`.  Three deployment
+failures can disable it: (a) `get_mtz_stage` not deployed (joint import kills
+`classify_mtz_type` too), (b) `file_utils.py` entirely missing, (c) YAML
+patterns incomplete.  `_import_mtz_utils()` eliminates all three by **always
+returning working functions**.  It tries importing from `file_utils.py` first,
+then falls back to inline implementations that embed the refine-output regex
+directly in `workflow_state.py`.  No external dependency can break it.
+
+**Layer 6: Principled exclusion rule (v112.73)** — Defense-in-depth in the
+command builder for dual-categorization (file in both `data_mtz` and
+`map_coeffs_mtz`).  `_should_exclude()` implements the rule: **exclude only
+if the file is in an excluded category AND NOT in any desired category**.
+With Layer 5 working, dual-categorization is cleaned up before it reaches the
+command builder.  This layer catches partial failures where the safety net adds
+a file to `map_coeffs_mtz` but doesn't remove it from `data_mtz`.
+
 ### MTZ Categorization Diagnostics
 
 Two logging points help diagnose map_coeffs_mtz failures:

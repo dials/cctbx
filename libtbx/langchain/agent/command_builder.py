@@ -484,6 +484,47 @@ class CommandBuilder:
         """Log a message through context."""
         context._log(msg)
 
+    def _should_exclude(self, path, exclude_categories, desired_categories,
+                        categorized_files):
+        """Check if a file should be excluded from selection.
+
+        The exclude_categories mechanism prevents using the wrong type of file
+        (e.g., raw Fobs MTZ where map coefficients are needed).  However, a
+        file can legitimately belong to BOTH an excluded category and a desired
+        category due to categorizer bugs or dual-categorization.
+
+        Rule: a file is excluded only if it IS in an excluded category AND is
+        NOT in any desired category.  Membership in a desired category is
+        positive evidence that overrides the exclusion.
+
+        Example: refine_001_001.mtz may be in both data_mtz (excluded) and
+        map_coeffs_mtz (desired).  Without this rule, ligandfit can never
+        find its map coefficients when dual-categorization occurs.
+
+        Args:
+            path: File path to check
+            exclude_categories: List of category names to exclude
+            desired_categories: List of category names we're looking for
+            categorized_files: Dict of category -> [file paths]
+
+        Returns:
+            bool: True if the file should be excluded
+        """
+        if not exclude_categories:
+            return False
+        in_excluded = any(path in categorized_files.get(exc, [])
+                          for exc in exclude_categories)
+        if not in_excluded:
+            return False
+        # File is in an excluded category.  Check if it's also in a desired
+        # category — if so, the positive identification wins.
+        if desired_categories:
+            in_desired = any(path in categorized_files.get(cat, [])
+                             for cat in desired_categories)
+            if in_desired:
+                return False  # Desired category overrides exclusion
+        return True
+
     # =========================================================================
     # STEP 1: FILE SELECTION
     # =========================================================================
@@ -985,8 +1026,9 @@ class CommandBuilder:
                 if any(best_path.lower().endswith(ext) for ext in extensions):
                     # Check if best file is in an excluded category
                     exclude_categories = priorities.get("exclude_categories", [])
-                    excluded = any(best_path in context.categorized_files.get(exc, [])
-                                   for exc in exclude_categories)
+                    excluded = self._should_exclude(
+                        best_path, exclude_categories, priority_categories,
+                        context.categorized_files)
                     if not excluded:
                         self._log(context, "BUILD: Using best_%s for %s" % (best_category, input_name))
                         self._record_selection(input_name, best_path, "best_files")
@@ -1026,8 +1068,8 @@ class CommandBuilder:
 
         def is_excluded(f):
             """Check if file is in any excluded category OR is user-excluded via file_preferences."""
-            if any(f in context.categorized_files.get(exc, [])
-                   for exc in exclude_categories):
+            if self._should_exclude(f, exclude_categories, priority_categories,
+                                    context.categorized_files):
                 return True
             # D1: user-specified exclude list (basename comparison)
             user_excl = context.excluded_files() if callable(getattr(context, 'excluded_files', None)) else []
@@ -1145,8 +1187,9 @@ class CommandBuilder:
             if best_path and self._file_is_available(best_path):
                 if any(best_path.lower().endswith(ext) for ext in extensions):
                     exclude_categories_check = priorities.get("exclude_categories", [])
-                    excluded = any(best_path in context.categorized_files.get(exc, [])
-                                   for exc in exclude_categories_check)
+                    excluded = self._should_exclude(
+                        best_path, exclude_categories_check, priority_categories,
+                        context.categorized_files)
                     if not excluded:
                         self._log(context, "BUILD: Using best_%s as fallback for %s "
                                  "(category lookup found no files)" % (best_category, input_name))
@@ -1178,8 +1221,9 @@ class CommandBuilder:
         # This prevents ligand files from being selected as search models, etc.
         if exclude_categories:
             candidates = [f for f in candidates
-                         if not any(f in context.categorized_files.get(exc, [])
-                                   for exc in exclude_categories)]
+                         if not self._should_exclude(
+                             f, exclude_categories, priority_categories,
+                             context.categorized_files)]
 
         # Apply exclude patterns from input_def
         exclude_patterns = input_def.get("exclude_patterns", [])
