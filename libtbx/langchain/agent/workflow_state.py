@@ -507,6 +507,42 @@ def _categorize_files(available_files, ligand_hints=None, files_local=True):
                 if f not in files[lst_key]:
                     files[lst_key].append(f)
 
+    # Post-processing: Validate ligand_pdb classification.
+    #
+    # The YAML categorizer (and potentially the hardcoded categorizer) may
+    # misclassify protein PDB files as ligands when broad patterns match
+    # filenames like 1aba.pdb, 3gx5.pdb, etc.  A real protein with a few
+    # HETATM ligand/cofactor atoms is still a macromolecular model, not a
+    # ligand coordinate file.
+    #
+    # Content inspection is the reliable tiebreaker: if a PDB file in
+    # ligand_pdb is predominantly ATOM records (i.e. _pdb_is_protein_model
+    # returns True), it is a false positive and should be reclassified as
+    # unclassified_pdb → model.
+    #
+    # Only runs when files are on local disk (files_local=True).
+    if files_local and files.get("ligand_pdb"):
+        ligand_keep = []
+        ligand_rescued = []
+        for f in files["ligand_pdb"]:
+            if f.lower().endswith('.pdb') and _pdb_is_protein_model(f):
+                ligand_rescued.append(f)
+            else:
+                ligand_keep.append(f)
+        if ligand_rescued:
+            files["ligand_pdb"] = ligand_keep
+            # Remove from ligand parent
+            for f in ligand_rescued:
+                if f in files.get("ligand", []):
+                    files["ligand"].remove(f)
+            # Add to unclassified_pdb + pdb + model
+            for dest in ("unclassified_pdb", "pdb", "model"):
+                if dest not in files:
+                    files[dest] = []
+                for f in ligand_rescued:
+                    if f not in files[dest]:
+                        files[dest].append(f)
+
     # Post-processing: Validate half-map classification.
     #
     # Both the YAML and hardcoded categorizers can misclassify sequentially
