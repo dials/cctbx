@@ -703,6 +703,20 @@ def perceive(state):
     )
     state = _log(state, "PERCEIVE: History has %d entries, mtriage_in_history=%s" % (
         len(history), mtriage_in_history))
+    # Extra diagnostic when mtriage expected but not found
+    if not mtriage_in_history and len(history) > 0:
+        for i, h in enumerate(history):
+            if isinstance(h, dict):
+                prog = h.get("program", "<empty>")
+                cmd_preview = (h.get("command", "") or "")[:60]
+                result_preview = (h.get("result", "") or "")[:40]
+                state = _log(state,
+                    "PERCEIVE: History[%d]: program=%r, cmd=%r, result=%r" % (
+                        i, prog, cmd_preview, result_preview))
+            else:
+                state = _log(state,
+                    "PERCEIVE: History[%d]: type=%s (not a dict)" % (
+                        i, type(h).__name__))
 
     workflow_state = detect_workflow_state(
         history=history,

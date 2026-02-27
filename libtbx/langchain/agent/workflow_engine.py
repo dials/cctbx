@@ -994,13 +994,19 @@ class WorkflowEngine:
 
         # Phase 1: Need analysis
         # mtriage is preferred, but if other cryo-EM programs have already run
-        # (e.g., resolve_cryo_em, dock_in_map), we're clearly past analysis.
-        # This handles tutorials that skip mtriage.
+        # (e.g., resolve_cryo_em, dock_in_map, map_to_model), we're clearly past
+        # analysis.  This handles tutorials that skip mtriage and also prevents
+        # the workflow from getting stuck in "analyze" if mtriage's done flag
+        # wasn't set (e.g., history detection missed it after a restart).
         past_analysis = (
             context.get("mtriage_done") or
             context.get("resolve_cryo_em_done", False) or
             context.get("dock_done", False) or
-            context.get("rsr_done", False)
+            context.get("rsr_done", False) or
+            context.get("map_to_model_done", False) or
+            context.get("autobuild_done", False) or
+            context.get("refine_done", False) or
+            context.get("predict_done", False)
         )
         if not past_analysis:
             return self._make_phase_result(phases, "analyze",
@@ -1234,11 +1240,26 @@ class WorkflowEngine:
             prog_def = get_program(prog)
             if prog_def:
                 tracking = prog_def.get("done_tracking", {})
-                if tracking.get("strategy") == "run_once" or tracking.get("run_once"):
+                strategy = tracking.get("strategy", "set_flag")
+                if strategy == "run_once" or tracking.get("run_once"):
                     # Check if this program has already been run
                     prog_done_key = tracking.get("flag", "")
                     if prog_done_key and context.get(prog_done_key):
                         # Skip - already run
+                        continue
+                # Belt-and-suspenders: Also filter any non-count program whose
+                # UNIQUE done flag is set.  The "count" strategy (refine, rsr,
+                # phaser) intentionally repeats; all others should stop once
+                # their flag is True.  This catches programs whose strategy
+                # wasn't explicitly set to run_once but should have been.
+                # Shared flags like "validation_done" (used by molprobity,
+                # model_vs_data, etc.) are excluded — we only filter when the
+                # flag name is program-specific (contains the program short
+                # name).
+                if strategy != "count":
+                    flag = tracking.get("flag", "")
+                    short = prog.replace("phenix.", "").replace(".", "_")
+                    if flag and short in flag and context.get(flag):
                         continue
             filtered.append(prog)
         valid = filtered

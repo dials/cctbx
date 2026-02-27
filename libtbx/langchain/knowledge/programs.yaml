@@ -916,6 +916,7 @@ phenix.map_to_model:
     markers: ["map_to_model"]
   done_tracking:
     flag: "map_to_model_done"
+    strategy: "run_once"
     history_detection:
       markers: ["map_to_model"]
 
