@@ -1053,7 +1053,27 @@ When building commands, files are selected in this order:
 ### Companion File Discovery
 
 Some clients only track a subset of program output files. The agent discovers
-missing companion files in three layers:
+missing companion files in multiple layers:
+
+**Layer 0: `session._discover_cycle_outputs()` (v112.73)** — The foundation
+layer.  All other layers depend on files appearing in `available_files`.  This
+method resolves output files for any cycle using three strategies:
+
+| Strategy | When it helps |
+|---|---|
+| Try stored `output_files` paths as-is | Normal operation |
+| Resolve relative paths against `_get_session_dir()` | cwd changed between runs |
+| Scan `sub_{NN}_{program}/` by cycle number + program name | output_files completely empty |
+
+`_get_session_dir()` returns `os.path.dirname(session_file)` — always known,
+never depends on stored file paths.  The `get_available_files()` Step 3
+directory scan is also seeded from the session directory, not just from
+already-tracked files.  This means even if Steps 1-2 find nothing, the scan
+still runs.
+
+Without this layer, all downstream recovery (categorization safety nets,
+best_files tracking, etc.) is irrelevant because the files were never in the
+working set.
 
 **Layer 1: `graph_nodes._discover_companion_files()`** — Runs in the perceive
 node before file categorization. Triggered by file patterns in available_files:
@@ -1067,7 +1087,9 @@ node before file categorization. Triggered by file patterns in available_files:
 All discovered files are checked with `os.path.exists()` and deduplicated.
 
 **Layer 2: `session._find_missing_outputs()`** — Runs in `get_available_files()`
-to supplement cycle output_files from session data.
+after Layer 0.  Derives companion files from known output file names (e.g.,
+if `refine_001_data.mtz` is found, looks for `refine_001.mtz`).  Supplements
+Layer 0's directory scan with pattern-based inference.
 
 **Layer 3: Best files evaluation (v112.70)** — Both `_rebuild_best_files_from_cycles`
 (session load) and `record_result` (live cycle completion) call

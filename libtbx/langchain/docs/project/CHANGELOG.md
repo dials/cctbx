@@ -1,58 +1,68 @@
 # PHENIX AI Agent - Changelog
 
-## Version 112.73 (Self-contained MTZ classification + exclusion rule fix)
+## Version 112.73 (Output files lost on restart)
 
-### Problem — Why ligandfit still fails after v112.71
+### Problem
 
-The v112.71 safety nets in `_categorize_files` depend on `classify_mtz_type()`
-from `file_utils.py` to cross-check YAML categorization.  Three deployment
-issues could disable these safety nets:
+After refinement completes and the agent stops then restarts, ligandfit fails
+with "missing inputs: map_coeffs_mtz" even though refine output files exist
+on disk in `sub_03_refine/`.  The log shows only 3 available files (the
+originals) — refine outputs are completely absent.
 
-1. **`get_mtz_stage` not deployed** — The joint import
-   `from file_utils import classify_mtz_type, get_mtz_stage` fails entirely
-   when `get_mtz_stage` doesn't exist.  Caught by `except Exception: pass`,
-   the safety net is silently disabled.
+### Root cause
 
-2. **`file_utils.py` not deployed** — If the entire module is missing, no
-   classification function is available and ALL `.mtz` files default to
-   `data_mtz` in the hardcoded categorizer.
+`get_available_files()` and `_rebuild_best_files_from_cycles()` both rely on
+`cycle["output_files"]` containing valid, existing absolute paths.  On restart,
+these paths may be empty (never recorded), relative (resolve to wrong cwd),
+or stale (different machine).  When the stored paths fail:
 
-3. **YAML categorizer has no patterns for `refine_NNN_NNN.mtz`** — The file
-   goes to `data_mtz` by extension alone.  Without a working safety net,
-   it stays there.
+- **Step 2** (cycle output_files) finds nothing
+- **`_find_missing_outputs`** derives directories from output_files — also
+  finds nothing when the list is empty
+- **Step 3** (directory scan) infers agent_dirs from paths of already-tracked
+  files — but only the 3 originals are tracked, none have `sub_*` in their
+  path, so `agent_dirs` is empty and the scan never runs
+- **`_rebuild_best_files_from_cycles`** iterates the same empty output_files,
+  so `best_files` stays empty
 
-In all three cases, `refine_001_001.mtz` (map coefficients) ends up ONLY in
-`data_mtz`.  Ligandfit's `exclude_categories: [data_mtz]` then blocks it at
-every priority level.  The agent falls back to STOP.
+Every recovery mechanism depends on the previous one succeeding.  If the first
+link breaks, the entire chain fails.
 
-### Fix 1 — Self-contained classification (workflow_state.py)
+### Fix — General strategy: discover files from directory structure
 
-`_import_mtz_utils()` now **always returns working functions**.  Priority:
-1. Import from `file_utils.py` (both functions)
-2. Import `classify_mtz_type` only; inline fallback for `get_mtz_stage`
-3. Inline fallback for BOTH (embeds the refine-output regex directly)
+New `_discover_cycle_outputs(cycle)` method resolves output files for any
+cycle using a three-strategy approach:
 
-Callers never need to check for None.  The safety nets fire regardless of
-what's deployed.  The hardcoded categorizer correctly classifies refine
-output MTZ even without `file_utils.py`.
+1. **Try stored paths** as-is (normal case)
+2. **Resolve relative paths** against the session directory and its parent
+   (handles cwd changes between runs)
+3. **Scan the expected output directory** (`sub_{NN}_{program}/`) for all
+   crystallography file types (handles empty output_files)
 
-### Fix 2 — Principled exclusion rule (command_builder.py)
+The session directory (`_get_session_dir()`) is always known from the session
+file's location.  The output directory name is deterministic from the cycle
+number and program name.  No stored file paths required.
 
-New `_should_exclude()` method: **a file is excluded only if it's in an
-excluded category AND NOT in any desired category.**
+Both `get_available_files()` Step 2 and `_rebuild_best_files_from_cycles()`
+now use this helper, making both paths resilient to restart scenarios.
 
-This fixes the dual-categorization scenario (file in both `data_mtz` and
-`map_coeffs_mtz`), where Fix 1's safety net adds it to `map_coeffs_mtz`
-but a partial failure leaves it also in `data_mtz`.  The old logic blocked
-the file; the new logic recognizes it belongs to the desired category.
+### Companion fixes (defense-in-depth)
 
-With Fix 1 working correctly, dual-categorization shouldn't occur (the safety
-net removes files from the wrong category).  Fix 2 is defense-in-depth.
+- **Self-contained MTZ classification** (`workflow_state.py`) —
+  `_import_mtz_utils()` always returns working functions with inline fallbacks.
+  The safety net fires even without `file_utils.py`.
+
+- **Principled exclusion rule** (`command_builder.py`) — `_should_exclude()`
+  prevents dual-categorization from blocking files.
 
 ### Files to deploy
-- `agent/workflow_state.py` — Self-contained `_import_mtz_utils()`
-- `agent/command_builder.py` — `_should_exclude()` at 4 check points
-- `agent/file_utils.py` — Contains `get_mtz_stage` (should be deployed too)
+
+| File | What changed | Role |
+|------|-------------|------|
+| `agent/session.py` | `_discover_cycle_outputs()`, `_get_session_dir()` | **Critical** |
+| `agent/workflow_state.py` | Self-contained `_import_mtz_utils()` | Defense-in-depth |
+| `agent/command_builder.py` | `_should_exclude()` at 4 check points | Defense-in-depth |
+| `agent/file_utils.py` | Contains `get_mtz_stage` | Defense-in-depth |
 
 ---
 

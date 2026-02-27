@@ -183,6 +183,97 @@ class AgentSession:
             print(f"Warning: Could not load session file: {e}")
             self._init_new_session()
 
+    def _get_session_dir(self):
+        """Get the directory containing the session file.
+
+        This is the agent working directory (e.g., ai_agent_directory/) that
+        contains all sub_NN_program/ output directories.  It's always known
+        from the session_file path and doesn't depend on any cycle data.
+        """
+        if hasattr(self, 'session_file') and self.session_file:
+            d = os.path.dirname(os.path.abspath(self.session_file))
+            if os.path.isdir(d):
+                return d
+        return None
+
+    def _discover_cycle_outputs(self, cycle):
+        """Discover output files for a cycle from disk.
+
+        Tries stored output_files paths first, then falls back to scanning
+        the expected output directory based on cycle number and program name.
+        This ensures files are found even when output_files is empty or
+        contains stale/relative paths that don't resolve.
+
+        This is the general strategy for surviving restart scenarios where
+        the agent directory exists on disk but stored paths are broken.
+
+        Args:
+            cycle: Cycle dict from session data
+
+        Returns:
+            list: Absolute paths to existing output files
+        """
+        import glob
+        found = []
+        seen = set()
+
+        output_files = cycle.get("output_files", [])
+        session_dir = self._get_session_dir()
+
+        # Strategy 1: Try stored paths as-is
+        for f in output_files:
+            if f:
+                abs_path = os.path.abspath(f) if not os.path.isabs(f) else f
+                if os.path.exists(abs_path):
+                    bn = os.path.basename(abs_path)
+                    if bn not in seen:
+                        found.append(abs_path)
+                        seen.add(bn)
+
+        # Strategy 2: Resolve relative paths against session directory
+        # Handles: cwd changed between runs, relative paths in session JSON
+        if session_dir:
+            unresolved = [f for f in output_files
+                          if f and os.path.basename(f) not in seen]
+            for f in unresolved:
+                # Try relative to session dir (ai_agent_directory/)
+                for base in [session_dir, os.path.dirname(session_dir)]:
+                    resolved = os.path.normpath(os.path.join(base, f))
+                    if os.path.exists(resolved):
+                        bn = os.path.basename(resolved)
+                        if bn not in seen:
+                            found.append(os.path.abspath(resolved))
+                            seen.add(bn)
+                        break
+
+        # Strategy 3: Scan expected output directory
+        # Uses cycle number + program name to compute the directory name,
+        # then scans for all crystallography file types.  This works even
+        # when output_files is completely empty.
+        if session_dir:
+            cycle_num = cycle.get("cycle_number", 0)
+            program = cycle.get("program", "")
+            result = cycle.get("result", "")
+            # Only scan for successful cycles with a known program
+            if (cycle_num > 0 and program
+                    and "FAILED" not in result.upper()):
+                shortname = program.replace("phenix.", "").replace(".", "_")
+                dir_pattern = os.path.join(
+                    session_dir, "sub_%02d_%s*" % (cycle_num, shortname))
+                for output_dir in glob.glob(dir_pattern):
+                    if not os.path.isdir(output_dir):
+                        continue
+                    for ext in ("*.mtz", "*.pdb", "*.cif",
+                                "*.map", "*.ccp4", "*.ncs_spec"):
+                        for f in glob.glob(
+                                os.path.join(output_dir, ext)):
+                            bn = os.path.basename(f)
+                            if bn not in seen:
+                                found.append(f)
+                                seen.add(bn)
+
+        return found
+
     def _rebuild_best_files_from_cycles(self):
         """
         Rebuild best_files tracker from cycle history.
@@ -209,17 +300,20 @@ class AgentSession:
             program = cycle.get("program", "")
             result = cycle.get("result", "")
             metrics = cycle.get("metrics", {})
-            output_files = cycle.get("output_files", [])
 
             # Skip failed cycles
             if "FAILED" in result.upper():
                 continue
 
+            # Discover output files — tries stored paths first, then falls
+            # back to scanning the expected output directory on disk.
+            output_files = self._discover_cycle_outputs(cycle)
+
             # Determine stage from program
             stage = self._infer_stage_from_program(program)
 
             for f in output_files:
-                if f and os.path.exists(f):
+                if f:
                     # Build file-specific metrics
                     file_metrics = dict(metrics) if metrics else {}
 
@@ -2529,17 +2623,19 @@ FINAL REPORT:"""
                     seen.add(basename)
 
         # 2. Add output files from each cycle (in order)
+        #    Uses _discover_cycle_outputs which tries stored paths first, then
+        #    scans the expected output directory — handles restart scenarios
+        #    where output_files is empty or paths are stale.
         for cycle in self.data.get("cycles", []):
-            for f in cycle.get("output_files", []):
-                if f:
-                    abs_path = os.path.abspath(f) if not os.path.isabs(f) else f
-                    basename = os.path.basename(abs_path)
-                    # Only add if file exists and not already tracked
-                    if basename not in seen and os.path.exists(abs_path):
-                        files.append(abs_path)
-                        seen.add(basename)
+            discovered = self._discover_cycle_outputs(cycle)
+            for f in discovered:
+                basename = os.path.basename(f)
+                if basename not in seen:
+                    files.append(f)
+                    seen.add(basename)
 
             # Supplement: look for expected outputs that client may have missed
+            # (derives companion files from known output file names/patterns)
             supplemental = self._find_missing_outputs(cycle, seen)
             for f in supplemental:
                 abs_path = os.path.abspath(f) if not os.path.isabs(f) else f
@@ -2548,13 +2644,21 @@ FINAL REPORT:"""
                     files.append(abs_path)
                     seen.add(basename)
 
-        # 3. Scan agent sub-directories for output files that may not have been
-        #    tracked in any cycle's output_files.  This mirrors the disk scanning
-        #    that _discover_companion_files() does in graph_nodes.py, but runs
-        #    HERE on the client so the server receives a complete file list.
-        #    Without this, local execution discovers companions that remote misses.
+        # 3. Catch-all: Scan agent sub-directories for output files not yet
+        #    found.  Step 2's _discover_cycle_outputs handles known cycles;
+        #    this catches files from cycles that may not be in session data
+        #    (e.g., partially written session, manual directory copies).
         import glob
         agent_dirs = set()
+
+        # PRIMARY: Use the session directory directly.
+        session_dir = self._get_session_dir()
+        if session_dir:
+            agent_dirs.add(session_dir)
+
+        # FALLBACK: Also infer agent dirs from any tracked files that happen
+        # to be inside sub_* directories (original heuristic, kept for cases
+        # where session_file isn't in the agent directory).
         for f in files:
             abs_f = os.path.abspath(f)
             parts = abs_f.replace("\\", "/").split("/")
