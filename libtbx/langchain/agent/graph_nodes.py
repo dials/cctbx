@@ -2438,6 +2438,9 @@ def _build_with_new_builder(state):
         "program": program,
         "corrected_files": corrected_files,
         "strategy": strategy,
+        # Propagate forced_retry to top level so the LocalAgent/RemoteAgent
+        # can include it in next_move for downstream duplicate-check bypass.
+        "forced_retry": state.get("intent", {}).get("forced_retry", False),
     }
 
 
