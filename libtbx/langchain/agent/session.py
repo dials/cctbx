@@ -1872,6 +1872,8 @@ class AgentSession:
             return "rsr_output"
         if "autobuild" in program_lower:
             return "autobuild_output"
+        if "map_to_model" in program_lower:
+            return "autobuild_output"
         if "dock_in_map" in program_lower:
             return "docked"
         if "process_predicted_model" in program_lower:

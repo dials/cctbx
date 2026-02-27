@@ -1240,6 +1240,8 @@ class BestFilesTracker:
                 return "refined"
             if 'overall_best' in basename or 'autobuild' in basename:
                 return "autobuild_output"
+            if 'map_to_model' in basename:
+                return "autobuild_output"
             if 'placed' in basename or 'dock' in basename:
                 return "docked"
             if 'phaser' in basename:

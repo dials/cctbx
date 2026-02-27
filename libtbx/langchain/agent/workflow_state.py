@@ -463,6 +463,24 @@ def _categorize_files(available_files, ligand_hints=None, files_local=True):
     # Only files that are SOLELY in 'unclassified_pdb' are inspected here.
     # Files that have already matched a more specific model subcategory (refined,
     # phaser_output, docked, etc.) are left alone regardless of content.
+
+    # Pre-step: rescue known program outputs that ended up in unclassified_pdb.
+    # map_to_model*.pdb is the final output of phenix.map_to_model.  A partial
+    # cryo-EM build can have ≤150 atoms and trip _pdb_is_small_molecule.
+    # Reclassify as autobuild_output BEFORE the small-molecule check.
+    for f in list(files.get("unclassified_pdb", [])):
+        bn = os.path.basename(f).lower()
+        if 'map_to_model' in bn:
+            if "autobuild_output" not in files:
+                files["autobuild_output"] = []
+            if f not in files["autobuild_output"]:
+                files["autobuild_output"].append(f)
+            # Also ensure it's in "model" parent (may already be via bubble-up)
+            if "model" not in files:
+                files["model"] = []
+            if f not in files["model"]:
+                files["model"].append(f)
+
     _model_subcats = {
         "refined", "rsr_output", "phaser_output", "autobuild_output",
         "docked", "with_ligand", "ligand_fit_output", "model_cif",
@@ -908,27 +926,40 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None, files_local=
             files["pdb"].append(f)
 
             # Subcategorize PDBs by their origin/purpose
+            # Track whether this PDB matched any known program-output subcategory.
+            # Files that match are known outputs and must NOT be reclassified as
+            # small molecules later (a small cryo-EM build can have ≤150 atoms
+            # and trip _pdb_is_small_molecule).
+            _is_program_output = False
+
             if 'phaser' in basename or basename.startswith('phaser'):
                 files["phaser_output"].append(f)
+                _is_program_output = True
 
             if 'refine' in basename and 'real_space' not in basename and 'rsr' not in basename:
                 files["refined"].append(f)
+                _is_program_output = True
 
             # RSR output detection - real_space_refine outputs contain 'real_space_refined'
             # e.g., model_real_space_refined_000.pdb
             if 'real_space_refined' in basename or 'rsr_' in basename or '_rsr' in basename:
                 files["rsr_output"].append(f)
+                _is_program_output = True
 
             if 'with_ligand' in basename:
                 files["with_ligand"].append(f)
+                _is_program_output = True
             if 'ligand_fit' in basename or 'ligandfit' in basename:
                 files["ligand_fit_output"].append(f)
+                _is_program_output = True
 
             if 'predict' in basename or 'alphafold' in basename or 'colabfold' in basename:
                 files["predicted"].append(f)
+                _is_program_output = True
 
             if 'processed' in basename:
                 files["processed_predicted"].append(f)
+                _is_program_output = True
 
             is_autobuild = (
                 ('autobuild' in basename or 'auto_build' in basename) or
@@ -941,12 +972,24 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None, files_local=
             )
             if is_autobuild and 'predict' not in basename:
                 files["autobuild_output"].append(f)
+                _is_program_output = True
+
+            # map_to_model output — the final positioned model from cryo-EM
+            # model building.  Matched by "map_to_model" in basename.  Must
+            # come AFTER the autobuild check (which catches generic 'build')
+            # and BEFORE the small-molecule check (a partial build with few
+            # atoms would otherwise be misclassified as a ligand).
+            if 'map_to_model' in basename:
+                files["autobuild_output"].append(f)
+                _is_program_output = True
 
             if 'dock' in basename and 'map' in basename:
                 files["docked"].append(f)
+                _is_program_output = True
             # Also match placed_model* from dock_in_map output
             if basename.startswith('placed_model') or '_placed' in basename:
                 files["docked"].append(f)
+                _is_program_output = True
 
             # Intermediate MR files from dock_in_map - never use for refinement
             if basename.startswith('run_mr') or fnmatch.fnmatch(basename, '*mr.[0-9]*'):
@@ -963,16 +1006,20 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None, files_local=
             if _is_ligand_name:
                 if not any(x in basename for x in ['ligand_fit', 'ligandfit', 'with_ligand']):
                     files["ligand_pdb"].append(f)
-            else:
+            elif not _is_program_output:
                 # Content-based detection: HETATM-only files whose names don't
                 # contain 'lig' or 'ligand' (e.g. atp.pdb, gdp.pdb, hem.pdb).
                 # Primary: read PDB content (works on client where files are on disk).
                 # Fallback: client-side ligand_hints (works on server).
+                #
+                # CRITICAL: Only check files that didn't match any program-output
+                # subcategory above.  A small cryo-EM map_to_model output (≤150
+                # atoms) would otherwise be misclassified as a ligand.
                 is_small = _pdb_is_small_molecule(f) if files_local else False
                 if not is_small and ligand_hints:
                     is_small = os.path.basename(f) in ligand_hints
                 if is_small:
-                    # Remove from generic 'pdb' and add to ligand_pdb instead.
+                    # Move: pdb → ligand_pdb
                     files["pdb"].remove(f)
                     files["ligand_pdb"].append(f)
 
