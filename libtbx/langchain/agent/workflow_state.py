@@ -888,18 +888,18 @@ def _categorize_files_hardcoded(available_files, ligand_hints=None, files_local=
     xray_data_extensions = ('.mtz', '.sca', '.hkl', '.sdf')
 
     def is_half_map(basename):
-        """Detect if a map file is a half-map based on naming conventions."""
-        name_lower = basename.lower()
-        name_no_ext = os.path.splitext(name_lower)[0]
+        """Detect if a map file is a half-map based on naming conventions.
 
-        if 'half' in name_lower:
-            return True
-        if re.search(r'[_\-]?[12]$', name_no_ext):
-            return True
-        if re.search(r'[_\-][ab]$', name_no_ext):
-            return True
+        Only matches files with 'half' in the name (e.g. half_map_1.mrc,
+        half1.mrc, emd_12345_half_map_2.map).
 
-        return False
+        The old regexes [_-]?[12]$ and [_-][ab]$ were removed because
+        they false-positive on sequentially numbered maps like map_1.ccp4,
+        map_2.ccp4 (segmented maps from resolve_cryo_em), segment_a.mrc,
+        etc.  Real half-maps from EMDB, RELION, CryoSPARC, and other
+        cryo-EM software all contain 'half' in their filename.
+        """
+        return 'half' in basename.lower()
 
     # Import shared MTZ classification
     classify_mtz_type, get_mtz_stage = _import_mtz_utils()

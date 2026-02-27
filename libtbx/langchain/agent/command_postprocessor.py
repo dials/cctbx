@@ -197,12 +197,15 @@ def inject_crystal_symmetry(command, directives, program_name, log=None):
 # =========================================================================
 
 # Programs that accept only positional file arguments (no key=value params)
+# Programs that take ONLY file arguments (no key=value strategy params).
+# sanitize_command strips all key=value tokens from these programs.
+# NOTE: Do NOT add programs here that accept strategy_flags (like resolution).
+# validation_cryoem is intentionally excluded — it requires resolution=X.
 _PROBE_ONLY_FILE_PROGRAMS = frozenset({
     'phenix.model_vs_data',  'mmtbx.model_vs_data',
     'phenix.xtriage',        'mmtbx.command_line.xtriage',
     'phenix.molprobity',
     'phenix.mtriage',
-    'phenix.validation_cryoem',
 })
 
 # Placeholder patterns for sanitize
@@ -212,8 +215,12 @@ _PLACEHOLDER_PATTERNS = (
 )
 
 # Universal keys that are always allowed for any program
+# NOTE: nproc is intentionally NOT here.  Not all programs accept nproc
+# (e.g. map_correlations, validation_cryoem).  Programs that do accept it
+# list nproc in their strategy_flags (added to allowlist automatically)
+# or defaults (inject_program_defaults adds it after sanitize).
 _UNIVERSAL_KEYS = {
-    'nproc', 'output_prefix', 'output_dir', 'output_directory',
+    'output_prefix', 'output_dir', 'output_directory',
     'prefix', 'overwrite', 'verbose', 'quiet',
 }
 
@@ -528,7 +535,7 @@ def inject_user_params(command, user_advice, program_name='',
         r')'
     )
 
-    _UNIVERSAL_SCOPES = {'general', 'output', 'job', 'data_manager', 'nproc'}
+    _UNIVERSAL_SCOPES = {'general', 'output', 'job', 'data_manager'}
     _SKIP_KEYS = {'e', 'i', 'http', 'https', 'key', 'param', 'setting'}
 
     # Load strategy_flags allowlist for Rule D consistency: bare (undotted)
