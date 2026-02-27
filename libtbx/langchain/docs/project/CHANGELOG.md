@@ -36,6 +36,22 @@ Fix: `_discover_cycle_outputs()` now has five strategies:
 4. Scan `sub_{NN}_{program}*` (exact cycle-number match)
 5. Scan `sub_*_{program}*` (broad match — handles number mismatch)
 
+### Problem 3 — Directory scan finds files but best_files ignores them
+
+Even after fixes 1-2, polder (and refine) still selects the ligand-free model.
+The with_ligand PDBs ARE in `available_files` (13 files), but `best_files`
+still shows `model=refine_001_001.pdb`.
+
+Root cause: Architectural gap — `get_available_files()` Step 3 (directory scan)
+adds files to the available list, but `_rebuild_best_files_from_cycles()` only
+evaluates files from known cycles.  Files discovered only by Step 3 are
+invisible to `best_files`.
+
+Fix: New Step 3.5 in `get_available_files()` — after the directory scan,
+evaluate all newly discovered files through `best_files.evaluate_file()`.
+Uses `highest_cycle` from session data for recency.  Safe because the `seen`
+set ensures no double evaluation of files already processed by Steps 1-2.
+
 ### Companion fixes (defense-in-depth)
 
 - `_import_mtz_utils()` always returns working functions (workflow_state.py)
@@ -45,7 +61,7 @@ Fix: `_discover_cycle_outputs()` now has five strategies:
 
 | File | What changed | Role |
 |------|-------------|------|
-| `agent/session.py` | Resilient `_discover_cycle_outputs()`, stored `output_dir` | **Critical** |
+| `agent/session.py` | All 3 fixes above | **Critical** |
 | `agent/workflow_state.py` | Self-contained `_import_mtz_utils()` | Defense-in-depth |
 | `agent/command_builder.py` | `_should_exclude()` at 4 check points | Defense-in-depth |
 | `agent/file_utils.py` | Contains `get_mtz_stage` | Defense-in-depth |

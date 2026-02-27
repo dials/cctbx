@@ -2685,6 +2685,7 @@ FINAL REPORT:"""
         #    this catches files from cycles that may not be in session data
         #    (e.g., partially written session, manual directory copies).
         import glob
+        pre_scan_count = len(files)  # Track boundary for Step 3.5
         agent_dirs = set()
 
         # PRIMARY: Use the session directory directly.
@@ -2738,6 +2739,29 @@ FINAL REPORT:"""
                         if bn not in seen:
                             files.append(match)
                             seen.add(bn)
+
+        # 3.5. Evaluate Step-3 discoveries through best_files.
+        #      _rebuild_best_files_from_cycles() only processes files from known
+        #      cycles.  Files discovered by the directory scan above may not be
+        #      associated with any cycle (e.g., with_ligand PDBs from pdbtools
+        #      when the cycle number doesn't match the directory number, or files
+        #      from a previous agent run).  Without this step, best_files stays
+        #      stale and the command builder selects the wrong model/MTZ.
+        new_discoveries = files[pre_scan_count:]
+        if new_discoveries and hasattr(self, 'best_files'):
+            highest_cycle = max(
+                (c.get("cycle_number", 0) for c in self.data.get("cycles", [])),
+                default=0
+            )
+            for f in new_discoveries:
+                # Let the tracker infer category and stage from filename.
+                # Use highest_cycle so these files don't lose recency tiebreakers.
+                self.best_files.evaluate_file(
+                    path=f,
+                    cycle=highest_cycle,
+                    metrics=None,
+                    stage=None
+                )
 
         # 4. Filter out corrupt / zero-byte / invalid files.
         #    _is_valid_file() checks CCP4 magic bytes, PDB structural validity,
