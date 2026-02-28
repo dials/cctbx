@@ -908,6 +908,77 @@ def test_phase2_mock_drift_check():
               "_record_command_result must call _update_inject_fail_streak")
 
 
+# ── Bug 5: map_coeffs_mtz empty after refine (GUI mode) ────────────────
+
+def test_bug5_safety_net_handles_empty_best_files():
+    """Safety net must fire when best_files is {} (empty dict).
+
+    The condition was `if best_files and not best_files.get(...)` which
+    skips {} because empty dicts are falsy.  Fixed to use `is not None`.
+    """
+    ai_agent_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "programs", "ai_agent.py")
+    with open(ai_agent_path, 'r') as f:
+        source = f.read()
+
+    # The safety net condition must use `is not None`, not truthiness
+    assert_in("best_files is not None", source,
+              "Safety net must use 'is not None' to handle empty dict")
+
+    # Must NOT have the old falsy-dict-skipping pattern
+    # (Check that 'if best_files and not best_files.get("map_coeffs_mtz")'
+    #  is not present — the 'is not None' form supersedes it)
+    import re
+    old_pattern = re.search(
+        r'if best_files and not best_files\.get\(["\']map_coeffs_mtz',
+        source)
+    assert_true(old_pattern is None,
+                "Old 'if best_files and' pattern must be replaced with "
+                "'best_files is not None'")
+
+
+def test_bug5_gui_sub_job_returns_output_dir():
+    """_execute_sub_job_for_gui must return 4-tuple including output_dir.
+
+    Without this, _execute_command uses os.getcwd() which points to the
+    parent agent directory after the OldStyle runner restores CWD.
+    """
+    ai_agent_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "programs", "ai_agent.py")
+    with open(ai_agent_path, 'r') as f:
+        source = f.read()
+
+    # The main return must include gui_output_dir
+    assert_in("return log_text, error_text, executed_command, gui_output_dir",
+              source,
+              "_execute_sub_job_for_gui must return gui_output_dir as 4th element")
+
+
+def test_bug5_execute_command_uses_gui_output_dir():
+    """_execute_command must use gui_output_dir (not os.getcwd()) in GUI mode.
+
+    The OldStyle runner restores CWD to the parent directory after execution,
+    so os.getcwd() points to the wrong place.  output files are in the
+    sub-job directory (e.g., sub_03_refine/).
+    """
+    ai_agent_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "programs", "ai_agent.py")
+    with open(ai_agent_path, 'r') as f:
+        source = f.read()
+
+    # Must unpack 4-tuple from _execute_sub_job_for_gui
+    assert_in("gui_output_dir", source,
+              "_execute_command must capture gui_output_dir from sub-job")
+
+    # working_dir must prefer gui_output_dir over os.getcwd()
+    assert_in("gui_output_dir if gui_output_dir else os.getcwd()",
+              source,
+              "working_dir must use gui_output_dir when available")
+
+
 def run_all_tests():
     """Run all autosol bugs tests."""
     run_tests_with_fail_fast()

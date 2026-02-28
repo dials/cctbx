@@ -1,5 +1,46 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.78 (GUI mode: map_coeffs_mtz empty after refine)
+
+### Problem
+
+After phenix.refine completes in GUI mode, `best_files["map_coeffs_mtz"]` stays
+empty, causing the server to fail when building the ligandfit command
+("missing required input: map_coeffs_mtz").
+
+### Root cause
+
+Two compounding bugs:
+
+| # | Location | Bug |
+|---|----------|-----|
+| 1 | `_execute_command` | Uses `os.getcwd()` as `working_dir`, but the OldStyle runner restores CWD to the parent agent directory. Output files are in `sub_03_refine/` but `extract_output_files` and `scan_directory_for_output_files` look in the parent. Result: `output_files` passed to `record_result` is empty/incomplete, so `best_files` stays `{}`. |
+| 2 | Safety net (line ~3233) | Condition `if best_files and not best_files.get("map_coeffs_mtz")` short-circuits when `best_files` is `{}` (empty dict = falsy in Python), skipping the safety net entirely. |
+
+The files DO appear in `active_files` (via `get_available_files` step-3 catch-all
+directory scan), but they never pass through `evaluate_file`, so the best_files
+tracker has no entries.
+
+### Fix
+
+**Bug 1 — return output_dir from sub-job runner:**
+`_execute_sub_job_for_gui` now returns a 4-tuple `(log_text, error_text,
+executed_command, gui_output_dir)`.  `_execute_command` uses `gui_output_dir`
+as `working_dir` instead of `os.getcwd()` when in GUI mode.
+
+**Bug 2 — safety net condition:**
+Changed `if best_files and not best_files.get("map_coeffs_mtz")` to
+`if best_files is not None and not best_files.get("map_coeffs_mtz")`.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | `_execute_sub_job_for_gui`: return 4-tuple with `gui_output_dir` (3 return paths) |
+| `programs/ai_agent.py` | `_execute_command`: unpack 4-tuple, use `gui_output_dir` as `working_dir` |
+| `programs/ai_agent.py` | Safety net: `is not None` instead of truthiness check |
+| `tests/tst_autosol_bugs.py` | +3 tests (Bug 5), total 47 |
+
 ## Version 112.77 (Autobuild rebuild_in_place stripped by Rule D)
 
 ### Problem
