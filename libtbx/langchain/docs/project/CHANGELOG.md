@@ -1,8 +1,8 @@
 # PHENIX AI Agent - Changelog
 
-## Version 112.78 (GUI mode: map_coeffs_mtz empty after refine)
+## Version 112.78 (GUI mode: map_coeffs_mtz empty after refine; daily usage Sorry)
 
-### Problem
+### Problem 1 — map_coeffs_mtz empty after refine
 
 After phenix.refine completes in GUI mode, `best_files["map_coeffs_mtz"]` stays
 empty, causing the server to fail when building the ligandfit command
@@ -52,6 +52,39 @@ output files (working_dir bug); `>0 entries` → MTZ classification mismatch.
 | `programs/ai_agent.py` | Safety net: `is not None` instead of truthiness check |
 | `programs/ai_agent.py` | Diagnostic: show entry count, differentiate two failure modes |
 | `tests/tst_autosol_bugs.py` | +4 tests (Bug 5), total 48 |
+
+### Problem 2 — Daily usage limit spins until max_cycles
+
+When the server returns `daily_usage_reached`, the RemoteAgent prints a
+message and returns None.  `_query_agent_for_command` treats None as "no
+command generated" and the cycle loop keeps trying until `max_cycles`,
+wasting time and printing confusing output.  The user never sees a clear
+error telling them to stop.
+
+### Fix
+
+**Wrapper with stdout capture:** New `_call_agent_with_error_check` method
+wraps `decide_next_step()`.  Uses `_TeeStream` to capture stdout in real
+time (user still sees messages) and checks for fatal patterns after the
+call returns None.  If a fatal pattern is detected, raises `Sorry` with
+a clear user-facing message.
+
+Fatal patterns detected: `daily_usage_reached`, `account_suspended`,
+`invalid_api_key`, `authentication_failed`.  New patterns can be added to
+`_FATAL_SERVER_ERRORS` without touching the wrapper logic.
+
+**Does NOT modify RemoteAgent** — works with any version by inspecting
+its stdout output.
+
+### Additional files changed
+
+| File | Change |
+|------|--------|
+| `programs/ai_agent.py` | `_TeeStream` helper class for stdout capture |
+| `programs/ai_agent.py` | `_FATAL_SERVER_ERRORS` pattern list |
+| `programs/ai_agent.py` | `_call_agent_with_error_check` wrapper method |
+| `programs/ai_agent.py` | `_query_agent_for_command`: call wrapper instead of direct `decide_next_step` |
+| `tests/tst_autosol_bugs.py` | +4 tests (Bug 6), total 52 |
 
 ## Version 112.77 (Autobuild rebuild_in_place stripped by Rule D)
 

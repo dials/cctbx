@@ -53,6 +53,15 @@ try:
     assert Document is not None
     assert PromptTemplate is not None
     tst_list_base += [
+      "$D/langchain/tests/tst_langchain_tools.py",
+      "$D/langchain/tests/tst_v112_13_fixes.py",
+      "$D/langchain/tests/tst_perceive_stop_checks.py",
+      "$D/langchain/tests/tst_audit_fixes.py",
+      "$D/langchain/tests/tst_shared_code_imports.py",
+      "$D/langchain/tests/tst_contract_compliance.py",
+      "$D/langchain/tests/tst_old_client_compat.py",
+      "$D/langchain/tests/tst_mtz_crosscheck.py",
+      "$D/langchain/tests/tst_autosol_bugs.py",
       "$D/langchain/tests/tst_hardcoded_cleanup.py",
       "$D/langchain/tests/tst_advice_preprocessing.py",
       "$D/langchain/tests/tst_api_schema.py",

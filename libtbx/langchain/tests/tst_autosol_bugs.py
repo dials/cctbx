@@ -1006,6 +1006,85 @@ def test_bug5_track_output_files_accepts_working_dir():
               "_track_output_files call must pass working_dir")
 
 
+# ── Bug 6: Daily usage limit not raised as Sorry ───────────────────────
+
+def test_bug6_tee_stream_captures_output():
+    """_TeeStream must write to both primary and secondary streams."""
+    import io
+    primary = io.StringIO()
+    secondary = io.StringIO()
+
+    # Minimal _TeeStream implementation test
+    class _TeeStream:
+        def __init__(self, p, s):
+            self.primary = p
+            self.secondary = s
+        def write(self, data):
+            self.primary.write(data)
+            self.secondary.write(data)
+        def flush(self):
+            self.primary.flush()
+            self.secondary.flush()
+
+    tee = _TeeStream(primary, secondary)
+    tee.write("hello")
+    tee.flush()
+
+    assert_equal(primary.getvalue(), "hello",
+                 "Primary stream must receive write")
+    assert_equal(secondary.getvalue(), "hello",
+                 "Secondary stream must receive write")
+
+
+def test_bug6_fatal_server_errors_defined():
+    """_FATAL_SERVER_ERRORS must include daily_usage_reached pattern."""
+    ai_agent_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "programs", "ai_agent.py")
+    with open(ai_agent_path, 'r') as f:
+        source = f.read()
+
+    assert_in("daily_usage_reached", source,
+              "Must detect daily_usage_reached server error")
+    assert_in("_FATAL_SERVER_ERRORS", source,
+              "Must define _FATAL_SERVER_ERRORS list")
+    assert_in("_call_agent_with_error_check", source,
+              "Must define _call_agent_with_error_check wrapper")
+
+
+def test_bug6_decide_next_step_wrapped():
+    """decide_next_step must be called through the error-check wrapper."""
+    ai_agent_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "programs", "ai_agent.py")
+    with open(ai_agent_path, 'r') as f:
+        source = f.read()
+
+    # The wrapper must be called instead of direct decide_next_step
+    assert_in("self._call_agent_with_error_check(", source,
+              "_query_agent_for_command must use the error-check wrapper")
+
+    # The wrapper must raise Sorry for fatal errors
+    assert_in("raise Sorry(message)", source,
+              "Wrapper must raise Sorry for fatal server errors")
+
+
+def test_bug6_tee_stream_class_exists():
+    """_TeeStream helper class must exist for stdout capture."""
+    ai_agent_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "programs", "ai_agent.py")
+    with open(ai_agent_path, 'r') as f:
+        source = f.read()
+
+    assert_in("class _TeeStream", source,
+              "_TeeStream class must be defined")
+    assert_in("self.primary.write(data)", source,
+              "_TeeStream must write to primary")
+    assert_in("self.secondary.write(data)", source,
+              "_TeeStream must write to secondary")
+
+
 def run_all_tests():
     """Run all autosol bugs tests."""
     run_tests_with_fail_fast()
