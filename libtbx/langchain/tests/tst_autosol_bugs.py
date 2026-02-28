@@ -908,6 +908,11 @@ def test_phase2_mock_drift_check():
               "_record_command_result must call _update_inject_fail_streak")
 
 
+def run_all_tests():
+    """Run all autosol bugs tests."""
+    run_tests_with_fail_fast()
+
+
 # =========================================================================
 
 if __name__ == "__main__":

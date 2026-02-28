@@ -174,6 +174,18 @@ is always the primary scatterer in SAD/MAD.  Uses `_ANOMALOUS_Z` table covering
 harm).  Handles multi-element `mad_ha_add_list` by swapping with the heaviest
 secondary.
 
+**Rule D design tension (v112.77):** Rule D ("fail closed") strips bare params not
+in a program's `strategy_flags` allowlist.  This is safe against hallucination but
+blocks legitimate LLM error recovery — e.g., `rebuild_in_place=False` correctly
+identified by the LLM as the fix for a sequence mismatch was silently stripped
+from autobuild.  The catch-all blacklist (v112.76) handles the reverse case (bad
+params that *cause* errors) but Rule D has no feedback loop for good params that
+get stripped.  The current mitigation is to expand `strategy_flags` for programs
+where recovery params are known.  Autobuild expanded from 3 to 6 flags
+(`rebuild_in_place`, `n_cycle_build_max`, `maps_only` added in v112.77).  A
+future "warn but keep" mode could rely on PHIL validation + catch-all blacklist
+as safety nets.
+
 #### Session Tracker (session.py)
 Persists workflow state across cycles:
 - Experiment type (X-ray/cryo-EM)

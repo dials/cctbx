@@ -48,6 +48,9 @@ Test Suites (require PHENIX environment):
   36. Audit Fix Regressions - Categories I/J/E/G/H: max_refine_cycles landing, zombie
       state detection, _is_failed_result false-positives, xtriage resolution regex,
       real_space_refine map_cc extract strategy (v112 systematic audit)
+  37. Autosol Bugs - Wavelength duplication, atom_type swap, autosol re-run,
+      heavier-atom-wins, catch-all injection blacklist, rebuild_in_place
+      allowlist (v112.75–v112.77)
 
 Key Tests for Recent Fixes (v110):
   - tst_best_files_tracker: Model scoring, autobuild_output same score as refined
@@ -57,6 +60,7 @@ Key Tests for Recent Fixes (v110):
   - tst_history_analysis: Anomalous workflow, analysis/metrics key handling
   - tst_file_utils: Shared MTZ classification (consolidation fix)
   - tst_audit_fixes: Systematic audit regressions (v112 Categories I/J/E/G/H)
+  - tst_autosol_bugs: Autosol/autobuild SAD phasing bugs (v112.75–v112.77)
 
 Usage:
     python tests/run_all_tests.py
@@ -491,6 +495,16 @@ def main():
     except ImportError as e:
         print(f"⚠️  Could not import tst_audit_fixes: {e}")
         results.append(("Audit Fix Regressions", False, 0))
+
+    # --- Autosol Bugs Tests (v112.75-v112.77) ---
+    try:
+        from tests.tst_autosol_bugs import run_all_tests as run_autosol_bugs_tests
+        success, elapsed = run_test_module(
+            "tst_autosol_bugs", run_autosol_bugs_tests, args.verbose)
+        results.append(("Autosol Bugs", success, elapsed))
+    except ImportError as e:
+        print(f"⚠️  Could not import tst_autosol_bugs: {e}")
+        results.append(("Autosol Bugs", False, 0))
 
     # --- Summary ---
     total_elapsed = time.time() - total_start

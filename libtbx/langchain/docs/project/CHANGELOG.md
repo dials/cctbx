@@ -21,18 +21,42 @@ for sequence mismatch recovery.
 |------|---------|
 | `knowledge/programs.yaml` | +15 lines: 3 new strategy_flags for autobuild + recovery hint |
 | `tests/tst_autosol_bugs.py` | +70 lines: 7 new tests (Bug 4), total 44 |
-| `docs/AUTOSOL_BUGS_ANALYSIS.md` | Observation 5: Rule D broader concern analysis |
+
+### Broader concern — Rule D is too aggressive
+
+Most programs have only 1–4 strategy_flags but accept dozens of PHIL params.
+Rule D strips anything not pre-enumerated, meaning the agent can only use params
+that were anticipated at configuration time.  This is safe against hallucination
+but blocks legitimate error recovery when the LLM discovers the correct fix.
+
+The v112.76 catch-all blacklist handles the reverse case (bad params that *cause*
+errors).  But Rule D has no feedback loop: a stripped correct param never generates
+an error, so nothing learns that stripping was wrong.
+
+A future "warn but keep" mode for Rule D could log a warning but preserve unknown
+bare params, relying on PHIL validation + catch-all blacklist (N=2 threshold) to
+handle bad ones.  Trade-off: at most 2 wasted cycles for a hallucinated param vs
+potentially infinite wasted cycles when the agent keeps proposing a correct param
+that keeps getting stripped.
+
+Programs most affected: phenix.phaser (2 flags), phenix.autobuild_denmod (2),
+phenix.ligandfit (1), phenix.dock_in_map (1).
 
 ## Version 112.76 (Catch-all injection blacklist + deterministic atom_type)
 
-Follow-up improvements from the v112.75 autosol bugs analysis.  See
-`PLAN_CATCHALL_AND_ATOMTYPE.md` for design rationale.
+Follow-up improvements from the v112.75 autosol bugs analysis.
 
 ### Deterministic atom_type — heavier atom wins
 
 **Problem:** LLM directive extraction non-deterministically assigns which
 element goes to `atom_type` vs `additional_atom_types`.  Run 109 picked
 `atom_type=S` instead of `Se` — the weaker scatterer at 0.9792 Å.
+
+**Design rationale:** Rather than trying to fix the LLM's non-determinism,
+apply a deterministic physical rule: the element with higher atomic number (Z)
+always provides stronger anomalous signal at typical synchrotron wavelengths.
+This is applied as a post-validation swap, not a pre-extraction constraint,
+so it catches errors from both LLM and simple-fallback extraction paths.
 
 **Fix:** After the v112.75 dedup check, a new validation compares atomic
 numbers (Z) of `atom_type` and `mad_ha_add_list`.  If the primary scatterer
@@ -49,6 +73,16 @@ atoms provide stronger anomalous signal in SAD/MAD experiments.
 **Problem:** `bad_inject_params` learning only fires on recognized PHIL error
 patterns.  Any unrecognized format causes the agent to loop indefinitely
 (9 wasted cycles in run 107).
+
+**Design rationale:** Pattern-based error recognition is inherently fragile
+against PHIL's open-ended error space.  Instead of adding patterns one by one,
+implement a supervisor that tracks what was injected and correlates it with
+failures — no pattern matching required.  The threshold N=2 balances between
+transient failures (filesystem/network rarely produce identical fingerprints
+twice) and wasted cycles (N=3 would waste an extra cycle on what is almost
+certainly deterministic).  The "innocent bystander" trade-off is accepted:
+harmless params like `nproc=8` may be blacklisted alongside the real offender,
+but breaking the loop outweighs losing a harmless optimization.
 
 **Fix:** Track consecutive same-program failures via error fingerprint.  After
 N=2 failures with the same fingerprint, blacklist whatever `inject_user_params`
@@ -79,8 +113,24 @@ appended — no pattern matching required.
 ## Version 112.75 (Autosol/autobuild process bugs)
 
 Three process bugs diagnosed from runs 107 and 109, all involving autosol/autobuild
-SAD phasing workflows.  See `AUTOSOL_BUGS_ANALYSIS.md` for full trace-level
-root cause analysis.
+SAD phasing workflows.
+
+### Root cause summary
+
+All three bugs stemmed from gaps in the injection/validation pipeline:
+
+| Bug | Wasted cycles | Root cause category |
+|-----|---------------|---------------------|
+| 1. wavelength duplication | 9 | Alias-blind duplicate check + unlearnable error pattern |
+| 2. atom_type swap | 1 | LLM non-determinism with no post-validation |
+| 3. autosol re-run | 1 | `_is_program_already_done` only checked `run_once` strategy |
+
+The `wavelength → autosol.lambda` mapping is uniquely treacherous: it is the only
+strategy_flag where the flag leaf (`lambda`) differs completely from the
+natural-language key (`wavelength`).  All other mappings have the key as a
+substring of the flag.  Bugs 2 and 3 compounded in run 109 — wrong atom type
+(S instead of Se) plus unnecessary re-run after both autosol and autobuild had
+already succeeded.
 
 ### Problem 1 — Duplicate `wavelength=` crashes PHIL (9 wasted cycles)
 
