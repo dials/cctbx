@@ -974,9 +974,36 @@ def test_bug5_execute_command_uses_gui_output_dir():
               "_execute_command must capture gui_output_dir from sub-job")
 
     # working_dir must prefer gui_output_dir over os.getcwd()
-    assert_in("gui_output_dir if gui_output_dir else os.getcwd()",
+    assert_in("gui_output_dir if gui_output_dir else log_dir",
               source,
               "working_dir must use gui_output_dir when available")
+
+
+def test_bug5_track_output_files_accepts_working_dir():
+    """_track_output_files must accept working_dir param and use it for scanning.
+
+    Without this, it falls back to os.getcwd() which is the parent agent
+    directory in GUI mode.
+    """
+    ai_agent_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "programs", "ai_agent.py")
+    with open(ai_agent_path, 'r') as f:
+        source = f.read()
+
+    # Function signature must accept working_dir
+    assert_in("def _track_output_files(self, log_text, session_start_time, "
+              "session=None,\n                          cycle=0, working_dir=None)",
+              source,
+              "_track_output_files must accept working_dir parameter")
+
+    # Must use working_dir for directory scanning, not os.getcwd()
+    assert_in("scan_dir = working_dir or os.getcwd()", source,
+              "_track_output_files must prefer working_dir over os.getcwd()")
+
+    # Call site must pass working_dir
+    assert_in("working_dir=working_dir)", source,
+              "_track_output_files call must pass working_dir")
 
 
 def run_all_tests():

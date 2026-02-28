@@ -134,6 +134,15 @@ Main entry point and execution loop:
 - Stop decisions: directive stops, consecutive-program cap (→ PERCEIVE)
 - Duplicate retries bypass (deleted `_retry_duplicate`, now uses graph)
 
+**GUI mode execution caveat (v112.78):** In GUI mode, `_execute_sub_job_for_gui`
+runs each program in a dedicated subdirectory (`sub_NN_program/`) and restores CWD
+to the parent agent directory afterward.  Any code that runs after the sub-job
+returns MUST NOT use `os.getcwd()` to locate output files — it will point to the
+parent directory, not the sub-job output.  `_execute_sub_job_for_gui` returns
+`gui_output_dir` as the 4th element of its return tuple; callers must use this
+for file scanning (`_record_command_result`, `_track_output_files`) while keeping
+`os.getcwd()` only for writing the agent's own log files.
+
 #### command_postprocessor.py
 Server-safe command transforms called by the BUILD node (new in v112.66):
 - `sanitize_command()` — Rules A–D: strip placeholders, blacklisted params, hallucinated cross-program params, bare unscoped params. Rule B2 (v112.72): validates `space_group=` values and strips non-space-group words.
