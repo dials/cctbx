@@ -1644,11 +1644,18 @@ class WorkflowEngine:
         return result
 
     def _is_program_already_done(self, program, context):
-        """Check if a run_once program has already been completed.
+        """Check if a program has already been completed.
 
-        Returns True if the program has a run_once done_tracking strategy
-        and its done flag is set in the context. This prevents directives
-        from re-adding programs that the run_once filter already removed.
+        Returns True when:
+        1. The program has a run_once done_tracking strategy and its done
+           flag is set (original check).
+        2. The program is a non-count program with a program-specific done
+           flag that is already True in context.  This mirrors the
+           belt-and-suspenders filter in get_valid_programs() and prevents
+           _apply_directives from re-adding completed programs via the
+           program_settings path (e.g., autosol re-running after success
+           because the directive extractor found autosol settings in user
+           advice).
 
         Args:
             program: Program name (e.g., 'phenix.map_symmetry')
@@ -1663,11 +1670,25 @@ class WorkflowEngine:
         if not prog_def:
             return False
         tracking = prog_def.get("done_tracking", {})
-        if not (tracking.get("strategy") == "run_once" or tracking.get("run_once")):
-            return False
-        done_key = tracking.get("flag", "")
-        if done_key and context.get(done_key):
-            return True
+        strategy = tracking.get("strategy", "set_flag")
+
+        # Check 1: run_once programs (original)
+        if strategy == "run_once" or tracking.get("run_once"):
+            done_key = tracking.get("flag", "")
+            if done_key and context.get(done_key):
+                return True
+
+        # Check 2: non-count programs with program-specific done flag
+        # (mirrors belt-and-suspenders filter in get_valid_programs)
+        # Count-strategy programs (refine, rsr, phaser) intentionally repeat.
+        # Shared flags (e.g., "validation_done") are excluded — only filter
+        # when the flag name contains the program short name.
+        if strategy != "count":
+            flag = tracking.get("flag", "")
+            short = program.replace("phenix.", "").replace(".", "_")
+            if flag and short in flag and context.get(flag):
+                return True
+
         return False
 
     def _check_program_prerequisites(self, program, context, phase_name):

@@ -602,11 +602,24 @@ phenix.autobuild:
     resolution:
       flag: "resolution={value}"
       type: float
+    rebuild_in_place:
+      flag: "rebuild_in_place={value}"
+      type: boolean
+      hint: "Set to False when sequence mismatch errors occur during rebuild_in_place step. Allows autobuild to construct new fragments into density without being constrained by the input model."
+    n_cycle_build_max:
+      flag: "n_cycle_build_max={value}"
+      type: int
+      hint: "Maximum number of build cycles (default ~20). Reduce to speed up runs, increase if model is incomplete."
+    maps_only:
+      flag: "maps_only={value}"
+      type: boolean
+      hint: "Only generate density-modified maps, skip model building. Useful when density modification is the goal."
 
   hints:
     - "REQUIRES phased MTZ (from phaser or refine output)"
     - "Will not work with raw F/SIGF data"
     - "If a refined model exists, include it for better results"
+    - "If rebuild_in_place fails with sequence mismatch, retry with rebuild_in_place=False"
 
   log_parsing:
     r_free:
@@ -751,11 +764,11 @@ phenix.autosol:
     atom_type:
       flag: "autosol.atom_type={value}"
       type: string
-      hint: "Primary anomalous scatterer: Se, S, Zn, Fe, etc. (single atom type only)"
+      hint: "Primary anomalous scatterer element symbol. When multiple atoms are listed, use the HEAVIER element (higher Z, stronger signal): Se-SAD → atom_type=Se; S-SAD → atom_type=S. Must differ from additional_atom_types."
     additional_atom_types:
       flag: "mad_ha_add_list={value}"
       type: string
-      hint: "Additional atom types to search for (e.g., S for sulfur in addition to Se)"
+      hint: "Secondary atom types to search for IN ADDITION to atom_type (e.g., S when atom_type=Se). Must differ from atom_type — if both are the same, the secondary scatterer is lost."
     resolution:
       flag: "resolution={value}"
       type: float

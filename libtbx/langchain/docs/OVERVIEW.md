@@ -548,6 +548,17 @@ Recognized error patterns trigger automatic retry with corrected parameters:
 
 See ARCHITECTURE.md "Automatic Error Recovery" for implementation details.
 
+### Parameter Blacklisting (`bad_inject_params`)
+
+When a PHENIX program fails due to an injected parameter, the parameter is
+blacklisted so `inject_user_params` never re-injects it. Recognized error patterns:
+- **Unknown parameter**: "Unknown command line parameter definition: FOO"
+- **No such parameter**: "No such parameter: FOO"
+- **Boolean type mismatch** (v112.75): "True or False value expected,
+  scope.path.param=value found" — blacklists the full PHIL path and all
+  components ≥ 6 characters (catches `wavelength` when PHIL resolves it to
+  `autosol.wavelength.added_wavelength`)
+
 ### User Request Invalid
 
 When user requests an unavailable program:
@@ -667,6 +678,10 @@ python3 tests/tst_event_system.py    # Single suite
 
 | Version | Key Changes |
 |---------|-------------|
+| v112.77 | **Autobuild rebuild_in_place**: Rule D stripped `rebuild_in_place=False` because it wasn't in strategy_flags; added `rebuild_in_place`, `n_cycle_build_max`, `maps_only` to autobuild allowlist; recovery hint for sequence mismatch errors |
+| v112.76 | **Catch-all injection blacklist + deterministic atom_type**: heavier-atom-wins rule swaps `atom_type`/`mad_ha_add_list` when primary has lower Z (27-element table); catch-all streak tracker blacklists injected params after 2 consecutive same-error failures (`return_injected` kwarg, `_update_inject_fail_streak`); recovery retries excluded |
+| v112.75 | **Autosol/autobuild process bugs**: strategy-flag alias awareness in `inject_user_params` (wavelength→lambda dedup); `bad_inject_params` learning expanded to PHIL boolean-type errors; autosol atom_type/mad_ha_add_list same-value dedup; `_is_program_already_done` extended to non-count programs (prevents `_apply_directives` re-adding completed autosol from program_settings); improved atom_type hint in programs.yaml |
+| v112.74 | **Xtriage recovery + ligand misclassification**: recovery param injection survives command builder and probe-only sanitizer; ligand-as-model misclassification guard; obs_labels error recovery loop guard |
 | v112.70 | **Ligandfit file selection**: fixed refine MTZ classification regex (3 locations); word-boundary `exclude_patterns`; content-based PDB guards for model/ligand slots; protein-in-ligand-slot rejection; refinement CIF exclusion; `inject_user_params` bare-key validation; supplemental file discovery on session load and live path; fallback diagnostics (per-program missing slots); duplicate detection respects different input files |
 | v112.31 | **Session management**: `display_and_stop` / `remove_last_n` populate `self.result`; `get_results()` safe before `run()`; `restart_mode` auto-set; **Q1**: resuming with new advice after workflow completion steps back from `complete` to `validate` phase, enabling follow-up programs (polder etc.) |
 | v112 | **Steps table metrics**: cycle metrics as primary source; benign warning metrics extraction; ligand typing fix; case-sensitive pattern fix; autobuild_denmod detection; YAML log_parsing for 8 programs |

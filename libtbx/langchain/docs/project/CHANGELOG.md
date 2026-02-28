@@ -1,5 +1,158 @@
 # PHENIX AI Agent - Changelog
 
+## Version 112.77 (Autobuild rebuild_in_place stripped by Rule D)
+
+### Problem
+
+The LLM correctly identifies `rebuild_in_place=False` as the fix for a sequence
+mismatch error in autobuild, but Rule D in `sanitize_command` strips it.  Rule D
+removes bare key=value params not in the program's strategy_flags allowlist.
+Autobuild had only 3 flags (quick, nproc, resolution).
+
+### Fix
+
+Added `rebuild_in_place`, `n_cycle_build_max`, and `maps_only` to autobuild's
+strategy_flags in programs.yaml.  Added hint about `rebuild_in_place=False`
+for sequence mismatch recovery.
+
+### Files changed
+
+| File | Changes |
+|------|---------|
+| `knowledge/programs.yaml` | +15 lines: 3 new strategy_flags for autobuild + recovery hint |
+| `tests/tst_autosol_bugs.py` | +70 lines: 7 new tests (Bug 4), total 44 |
+| `docs/AUTOSOL_BUGS_ANALYSIS.md` | Observation 5: Rule D broader concern analysis |
+
+## Version 112.76 (Catch-all injection blacklist + deterministic atom_type)
+
+Follow-up improvements from the v112.75 autosol bugs analysis.  See
+`PLAN_CATCHALL_AND_ATOMTYPE.md` for design rationale.
+
+### Deterministic atom_type — heavier atom wins
+
+**Problem:** LLM directive extraction non-deterministically assigns which
+element goes to `atom_type` vs `additional_atom_types`.  Run 109 picked
+`atom_type=S` instead of `Se` — the weaker scatterer at 0.9792 Å.
+
+**Fix:** After the v112.75 dedup check, a new validation compares atomic
+numbers (Z) of `atom_type` and `mad_ha_add_list`.  If the primary scatterer
+has lower Z, the values are swapped.  This is scientifically correct: heavier
+atoms provide stronger anomalous signal in SAD/MAD experiments.
+
+- `_ANOMALOUS_Z` table: 27 common anomalous scatterers (Big 5: S, Se, Zn,
+  Fe, Hg, plus Pt, Au, and others from Z=16 to Z=92)
+- Handles multi-element `mad_ha_add_list` (e.g., `Se+Zn`)
+- Do-no-harm: skips swap when either element is unknown
+
+### Catch-all injection blacklist — supervisor pattern
+
+**Problem:** `bad_inject_params` learning only fires on recognized PHIL error
+patterns.  Any unrecognized format causes the agent to loop indefinitely
+(9 wasted cycles in run 107).
+
+**Fix:** Track consecutive same-program failures via error fingerprint.  After
+N=2 failures with the same fingerprint, blacklist whatever `inject_user_params`
+appended — no pattern matching required.
+
+- `postprocess_command`: new `return_injected=False` kwarg surfaces the list of
+  params added by inject_* steps.  Default False for backward compatibility
+  with 10+ existing call sites
+- `_update_inject_fail_streak()`: streak tracker on ai_agent.py.  Computes
+  error fingerprint (first 120 chars, normalized), increments on match, resets
+  on mismatch or success, blacklists at threshold
+- Recovery retries (`force_retry_program`) excluded — they have their own loop
+  guard (v112.74)
+- "Innocent bystander" trade-off accepted: harmless params like `nproc=8` may
+  be blacklisted alongside the real offender, but breaking the loop outweighs
+  losing a harmless optimization
+
+### Files changed
+
+| File | Changes |
+|------|---------|
+| `agent/command_postprocessor.py` | +120 lines: `_ANOMALOUS_Z` table, `_ensure_primary_scatterer_is_heavier()`, step 2c call, `return_injected` kwarg with injected-list collection |
+| `agent/graph_nodes.py` | BUILD + FALLBACK nodes: call `postprocess_command(return_injected=True)`, store `last_injected_params` in graph state |
+| `agent/session.py` | +60 lines: `_fix_autosol_atom_type_order()` validates atom_type at directive extraction time (both LLM and simple-fallback paths) |
+| `programs/ai_agent.py` | +90 lines: `_update_inject_fail_streak()`, streak call in `_record_command_result`, `last_injected_params` init/extraction in `_get_command_for_cycle` and `_query_agent_for_command` |
+| `tests/tst_autosol_bugs.py` | +270 lines: 23 new tests (10 Phase 1 + 9 Phase 2 + 3 directive-level + 1 mock drift), total 37 |
+
+## Version 112.75 (Autosol/autobuild process bugs)
+
+Three process bugs diagnosed from runs 107 and 109, all involving autosol/autobuild
+SAD phasing workflows.  See `AUTOSOL_BUGS_ANALYSIS.md` for full trace-level
+root cause analysis.
+
+### Problem 1 — Duplicate `wavelength=` crashes PHIL (9 wasted cycles)
+
+**Symptom:** Every autosol attempt in run 107 crashes with "One True or False
+value expected, autosol.wavelength.added_wavelength=0.9792 found". Repeats 9
+times with no self-correction.
+
+**Root cause:** `inject_user_params` extracts `wavelength=0.9792` from user
+advice ("wavelength is 0.9792") and appends it to the command even though
+`autosol.lambda=0.9792` is already present.  The duplicate check searches for
+"wavelength" in the command string but finds only "autosol.lambda" — the
+strategy_flags mapping (`wavelength → autosol.lambda={value}`) creates an alias
+that the check doesn't know about.  PHIL resolves bare `wavelength=` to
+`autosol.wavelength.added_wavelength` (a boolean) → type error.  The error
+message doesn't match the `bad_inject_params` learning patterns ("unknown
+parameter" / "no such parameter"), so the system never learns to stop.
+
+**Fixes:**
+- `command_postprocessor.py`: Build alias map from strategy_flags (`wavelength →
+  lambda`) and check alias leaves in duplicate detection before injecting
+- `command_postprocessor.py`: Autosol-specific dedup — strip `mad_ha_add_list`
+  when identical to `atom_type` (prevents secondary scatterer loss)
+- `ai_agent.py`: Add "True or False value expected" to `bad_inject_params`
+  error learning patterns, extracting and blacklisting the offending PHIL path
+  components
+
+### Problem 2 — `atom_type=S` instead of `Se` (wrong primary scatterer)
+
+**Symptom:** Run 109 extracts `atom_type=S` from "use Se and S as anomalous
+atoms" — selenium (the stronger scatterer at 0.9792 Å) is entirely lost from
+cycle 2's command (`atom_type=S mad_ha_add_list=S`, both sulfur).
+
+**Root cause:** LLM-based directive extraction is non-deterministic.  Run 107
+got `atom_type=Se` (correct); run 109 got `atom_type=S` (wrong).  No validation
+catches the case where both parameters are set to the same element.
+
+**Fixes:**
+- `command_postprocessor.py`: Post-assembly validation — if `atom_type` and
+  `mad_ha_add_list` have the same value, strip the duplicate `mad_ha_add_list`
+- `programs.yaml`: Improved hint text explicitly states the heavier element
+  (higher Z) should be `atom_type`, and that it must differ from
+  `additional_atom_types`
+
+### Problem 3 — Autosol re-runs after autosol+autobuild both succeeded
+
+**Symptom:** Run 109 cycle 4 runs autosol again after both autosol (cycle 2)
+and autobuild (cycle 3) succeeded.  Should have proceeded to refinement.
+
+**Root cause:** `_apply_directives` re-adds `phenix.autosol` from
+`program_settings` in directives (extracted from user advice mentioning autosol
+parameters).  It calls `_is_program_already_done` which only checked `run_once`
+programs — autosol uses `set_flag` strategy, so it returned False.  Autosol
+gets inserted at position 0 in `valid_programs` and the LLM picks it.  The
+belt-and-suspenders filter in `get_valid_programs` runs before
+`_apply_directives`, so it can't catch the re-addition.
+
+**Fix:**
+- `workflow_engine.py`: Extend `_is_program_already_done` to check non-count
+  programs with program-specific done flags (mirrors the existing
+  belt-and-suspenders filter).  This prevents `_apply_directives` from
+  re-adding any completed non-count program.
+
+### Files changed
+
+| File | Changes |
+|------|---------|
+| `agent/command_postprocessor.py` | +37 lines: strategy-flag alias map, alias duplicate check, autosol atom_type dedup |
+| `agent/workflow_engine.py` | +21 lines: `_is_program_already_done` extended for non-count programs |
+| `programs/ai_agent.py` | +35 lines: "True or False" error pattern in `bad_inject_params` learning (both branches) |
+| `knowledge/programs.yaml` | Improved `atom_type` and `additional_atom_types` hints |
+| `tests/tst_autosol_bugs.py` | +240 lines: 14 regression tests covering all fixes |
+
 ## Version 112.74 (Xtriage recovery + ligand misclassification)
 
 ### Problem 1 — Xtriage obs_labels recovery never reaches command line

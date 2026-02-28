@@ -153,6 +153,27 @@ Rule D in `sanitize_command`. Without this, `sanitize_command` would strip a
 hallucinated param like `d_min=2.5` and then `inject_user_params` would re-add it
 from the user advice text.
 
+**Strategy-flag alias awareness (v112.75):** `inject_user_params` builds an alias
+map from `strategy_flags` key→flag mappings.  When `wavelength` maps to
+`autosol.lambda={value}`, the alias leaf is `lambda`.  The duplicate check now
+verifies both the bare key (`wavelength`) AND the alias leaf (`lambda`) against the
+command string.  This prevents re-injection of `wavelength=0.9792` when
+`autosol.lambda=0.9792` is already present — the prior check only looked for
+"wavelength" and missed the aliased form.
+
+**Autosol atom_type dedup (v112.75):** `postprocess_command` validates that
+`autosol.atom_type` and `mad_ha_add_list` differ after injection.  When both are
+the same element (e.g., both `S`), the duplicate `mad_ha_add_list` is stripped to
+prevent the secondary scatterer from being silently lost.
+
+**Heavier-atom-wins rule (v112.76):** After the dedup check, a deterministic
+validation compares atomic numbers (Z) of `atom_type` and `mad_ha_add_list`.  If
+the primary has lower Z than the secondary, they are swapped — the heavier element
+is always the primary scatterer in SAD/MAD.  Uses `_ANOMALOUS_Z` table covering
+27 common anomalous scatterers.  Skips swap when either element is unknown (do no
+harm).  Handles multi-element `mad_ha_add_list` by swapping with the heaviest
+secondary.
+
 #### Session Tracker (session.py)
 Persists workflow state across cycles:
 - Experiment type (X-ray/cryo-EM)
@@ -280,6 +301,17 @@ done_tracking:           get_program_done_flag_map()  ← ALL programs
 **Key functions:**
 - `get_program_done_flag_map()`: All programs → done flag names (from YAML)
 - `get_trackable_programs()`: Programs with `strategy: "run_once"` (filtered from valid list after completion)
+
+**`_is_program_already_done` scope (v112.75):** `_apply_directives` in
+`workflow_engine.py` calls `_is_program_already_done()` before re-adding programs
+from `program_settings` directives.  This function now checks two conditions:
+(1) `run_once` programs whose done flag is set (original), and (2) any non-count
+program with a program-specific done flag (e.g., `autosol_done` contains `autosol`).
+Without check (2), `_apply_directives` could re-add completed programs like autosol
+at the front of `valid_programs`, causing the LLM to re-run them.  Count-strategy
+programs (refine, rsr, phaser) are excluded since they intentionally repeat.
+Shared flags (e.g., `validation_done`) are excluded since the flag name doesn't
+contain the program short name.
 
 #### Summary Display (knowledge/summary_display.py)
 Configures session summary display from metrics.yaml:
@@ -554,6 +586,43 @@ ai_agent.py: session.data["bad_inject_params"]
     → run_ai_agent.py → create_initial_state(bad_inject_params=...)
     → graph state["bad_inject_params"]
     → BUILD: postprocess_command(bad_inject_params=set(...))
+```
+
+**Error pattern expansion (v112.75):** The learning system originally only triggered
+on "unknown command line parameter" and "no such parameter" errors.  PHIL
+boolean-type errors ("True or False value expected, scope.path.param="value" found")
+are now also caught — the full PHIL path and all components ≥ 6 characters are
+blacklisted.  Without this, `inject_user_params` could loop indefinitely injecting
+a parameter that causes a type mismatch rather than an "unknown parameter" error
+(observed as 9 wasted cycles in run 107).
+
+**Catch-all injection blacklist (v112.76):** A supervisor pattern that handles
+"unknown unknowns" — PHIL error formats not covered by pattern-based learning.
+`postprocess_command` surfaces the list of params added by inject_* steps via
+`return_injected=True` (opt-in, default False for backward compat).  The replay
+path in ai_agent.py stores this list on `session.data["last_injected_params"]`.
+`_update_inject_fail_streak()` tracks consecutive same-program failures via error
+fingerprint (first 120 chars, normalized, digits stripped).  After N=2 failures
+with matching fingerprints and non-empty injected list, all injected params are
+blacklisted.  Recovery retries (`force_retry_program`) are excluded.
+
+```
+_get_command_for_cycle()
+  ├─ session.data["last_injected_params"] = []        (init)
+  ├─ _query_agent_for_command()                        (server path)
+  │    └─ graph BUILD node
+  │         └─ postprocess_command(return_injected=True)
+  │              └─ state["last_injected_params"] = [...]
+  │    └─ history_record["last_injected_params"] → session.data
+  └─ postprocess_command(return_injected=True)         (replay path)
+       └─ session.data["last_injected_params"] = [...]
+
+_record_command_result()
+  └─ _update_inject_fail_streak(program, error, session)
+       ├─ SUCCESS → clear streak
+       └─ FAILURE → fingerprint match?
+            ├─ yes → count++ → count>=2? → blacklist injected → reset
+            └─ no  → reset streak to count=1
 ```
 
 **`best_files` value type contract:** Most entries are plain strings (`category → path`). However, multi-file entries such as `half_map` may be stored as a list:

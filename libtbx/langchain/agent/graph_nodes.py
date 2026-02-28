@@ -2407,10 +2407,16 @@ def _build_with_new_builder(state):
 
             # Collect postprocess log messages for graph debug log
             _pp_logs = []
-            command = postprocess_command(
+            command, _injected = postprocess_command(
                 command, program_name=program, directives=directives,
                 user_advice=user_advice, bad_inject_params=bad_set,
-                log=lambda msg: _pp_logs.append(msg))
+                log=lambda msg: _pp_logs.append(msg),
+                return_injected=True)
+
+            # Store injected params for catch-all blacklist (v112.76).
+            # The client reads this from state to feed
+            # _update_inject_fail_streak() after execution.
+            state["last_injected_params"] = _injected
 
             if command != pre_postprocess:
                 state = _log(state, "BUILD_POSTPROCESS: command modified by postprocess_command")
@@ -3191,10 +3197,11 @@ def _fallback_with_new_builder(state):
                 user_advice = state.get("user_advice", "")
                 all_bad = state.get("bad_inject_params", {})
                 bad_set = set(all_bad.get(program, []))
-                cmd = postprocess_command(
+                cmd, _fb_injected = postprocess_command(
                     cmd, program_name=program, directives=directives,
                     user_advice=user_advice, bad_inject_params=bad_set,
-                    log=lambda msg: None)
+                    log=lambda msg: None, return_injected=True)
+                state["last_injected_params"] = _fb_injected
             except ImportError:
                 pass  # Module not available
             except Exception:

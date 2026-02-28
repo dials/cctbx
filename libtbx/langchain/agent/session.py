@@ -613,6 +613,7 @@ class AgentSession:
             # The LLM sometimes extracts workflow descriptions as space group
             # symbols (e.g. "determination" from "space group determination").
             directives = self._sanitize_directives(directives, log)
+            directives = self._fix_autosol_atom_type_order(directives, log)
             self.data["directives"] = directives
             self.data["directives_extracted"] = True
             self.save()
@@ -643,6 +644,7 @@ class AgentSession:
             try:
                 from libtbx.langchain.agent.directive_extractor import extract_directives_simple
                 directives = extract_directives_simple(project_advice)
+                directives = self._fix_autosol_atom_type_order(directives, log)
                 self.data["directives"] = directives
                 self.data["directives_extracted"] = True
                 self.save()
@@ -716,6 +718,65 @@ class AgentSession:
                 # Clean up empty scope
                 if not scope:
                     del prog_settings[scope_name]
+
+        return directives
+
+    @staticmethod
+    def _fix_autosol_atom_type_order(directives, log=None):
+        """Ensure atom_type is the heavier element in autosol directives.
+
+        The LLM directive extractor non-deterministically assigns which element
+        goes to atom_type vs additional_atom_types.  In SAD/MAD, the heavier
+        element (higher Z) should always be the primary scatterer (atom_type).
+
+        This mirrors _ensure_primary_scatterer_is_heavier() in
+        command_postprocessor.py but operates at the directive level — before
+        command assembly — so the command builder starts with correct values.
+
+        Args:
+            directives: Extracted directives dict (modified in place)
+            log: Optional logging callable
+
+        Returns:
+            The (possibly modified) directives dict
+        """
+        if not directives or not isinstance(directives, dict):
+            return directives
+
+        prog_settings = directives.get("program_settings")
+        if not prog_settings or not isinstance(prog_settings, dict):
+            return directives
+
+        # Import the Z table from command_postprocessor
+        try:
+            try:
+                from libtbx.langchain.agent.command_postprocessor import _ANOMALOUS_Z
+            except ImportError:
+                from agent.command_postprocessor import _ANOMALOUS_Z
+        except ImportError:
+            return directives  # Can't validate without the table
+
+        # Check autosol-specific settings
+        autosol_settings = prog_settings.get("phenix.autosol")
+        if not autosol_settings or not isinstance(autosol_settings, dict):
+            return directives
+
+        at = autosol_settings.get("atom_type")
+        ha = autosol_settings.get("additional_atom_types")
+        if not at or not ha:
+            return directives
+
+        at_z = _ANOMALOUS_Z.get(str(at), 0)
+        ha_z = _ANOMALOUS_Z.get(str(ha), 0)
+
+        if at_z > 0 and ha_z > 0 and at_z < ha_z:
+            # Swap: heavier element should be atom_type
+            autosol_settings["atom_type"] = ha
+            autosol_settings["additional_atom_types"] = at
+            if log:
+                log("DIRECTIVES: Swapped atom_type=%s with "
+                    "additional_atom_types=%s (Z=%d < Z=%d, heavier "
+                    "element is primary scatterer)" % (at, ha, at_z, ha_z))
 
         return directives
 

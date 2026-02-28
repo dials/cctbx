@@ -29,6 +29,119 @@ import re
 
 
 # =========================================================================
+# Anomalous-scatterer atomic numbers (for heavier-atom-wins rule)
+# =========================================================================
+# Used by _ensure_primary_scatterer_is_heavier() to deterministically assign
+# the heavier element to atom_type (primary) and the lighter to
+# mad_ha_add_list (secondary).  Covers the "Big 5" (S, Se, Zn, Fe, Hg)
+# plus common heavy-atom derivatives.
+_ANOMALOUS_Z = {
+    "S":  16,   # Big 5 — sulfur SAD
+    "Ca": 20,
+    "Mn": 25,
+    "Fe": 26,   # Big 5 — iron proteins
+    "Co": 27,
+    "Ni": 28,
+    "Cu": 29,
+    "Zn": 30,   # Big 5 — zinc enzymes
+    "Se": 34,   # Big 5 — selenomethionine SAD
+    "Br": 35,
+    "Mo": 42,
+    "Ru": 44,
+    "Rh": 45,
+    "Pd": 46,
+    "Ag": 47,
+    "Cd": 48,
+    "I":  53,
+    "Xe": 54,
+    "Gd": 64,
+    "Yb": 70,
+    "Os": 76,
+    "Ir": 77,
+    "Pt": 78,   # Common heavy-atom derivative
+    "Au": 79,   # Common heavy-atom derivative
+    "Hg": 80,   # Big 5 — mercury derivatives
+    "Pb": 82,
+    "U":  92,
+}
+
+
+def _ensure_primary_scatterer_is_heavier(command, log=None):
+    """Swap atom_type and mad_ha_add_list if atom_type has lower Z.
+
+    In SAD/MAD experiments, the heavier element provides stronger anomalous
+    signal and should always be the primary scatterer (atom_type).  The LLM
+    directive extractor sometimes reverses the assignment; this deterministic
+    rule corrects it.
+
+    Only swaps when both elements are recognized (do no harm for unknowns).
+    Handles multi-element mad_ha_add_list (e.g. "Se+Zn") by splitting on
+    '+' or ',' and only swapping when atom_type is lighter than ALL secondary
+    elements.
+
+    Args:
+        command: Command string (after dedup validation)
+        log:     Optional callable for logging
+
+    Returns:
+        Command string with atom_type/mad_ha_add_list possibly swapped.
+    """
+    at_m = re.search(r'(?:autosol\.)?atom_type=(\w+)', command)
+    ha_m = re.search(r'mad_ha_add_list=(\S+)', command)
+    if not (at_m and ha_m):
+        return command
+
+    at_elem = at_m.group(1)
+    ha_raw = ha_m.group(1)
+
+    # Split multi-element lists (e.g., "Se+Zn" or "Se,Zn")
+    ha_elems = re.split(r'[+,]', ha_raw)
+
+    at_z = _ANOMALOUS_Z.get(at_elem, 0)
+    if at_z == 0:
+        return command  # Unknown primary — do no harm
+
+    # Check all secondary elements are known and heavier
+    ha_z_values = []
+    for elem in ha_elems:
+        elem = elem.strip()
+        z = _ANOMALOUS_Z.get(elem, 0)
+        if z == 0:
+            return command  # Unknown secondary — do no harm
+        ha_z_values.append((elem, z))
+
+    # Only swap for single-element secondary (simple case)
+    # For multi-element, only swap if atom_type is lighter than ALL secondaries
+    if len(ha_z_values) == 1:
+        ha_elem, ha_z = ha_z_values[0]
+        if at_z < ha_z:
+            # Swap: replace atom_type value and mad_ha_add_list value
+            command = command[:at_m.start(1)] + ha_elem + command[at_m.end(1):]
+            # Re-find ha_m after the edit (positions may have shifted)
+            ha_m2 = re.search(r'mad_ha_add_list=(\S+)', command)
+            if ha_m2:
+                command = command[:ha_m2.start(1)] + at_elem + command[ha_m2.end(1):]
+            if log:
+                log("  [autosol_validate] Swapped atom_type=%s with "
+                    "mad_ha_add_list=%s (Z=%d < Z=%d, heavier element "
+                    "is primary scatterer)" % (at_elem, ha_elem, at_z, ha_z))
+    elif all(at_z < z for _, z in ha_z_values):
+        # atom_type is lighter than ALL secondaries — swap with heaviest
+        heaviest_elem, heaviest_z = max(ha_z_values, key=lambda x: x[1])
+        new_ha = ha_raw.replace(heaviest_elem, at_elem)
+        command = command[:at_m.start(1)] + heaviest_elem + command[at_m.end(1):]
+        ha_m2 = re.search(r'mad_ha_add_list=(\S+)', command)
+        if ha_m2:
+            command = command[:ha_m2.start(1)] + new_ha + command[ha_m2.end(1):]
+        if log:
+            log("  [autosol_validate] Swapped atom_type=%s with heaviest "
+                "secondary %s (Z=%d < Z=%d)" %
+                (at_elem, heaviest_elem, at_z, heaviest_z))
+
+    return command
+
+
+# =========================================================================
 # inject_crystal_symmetry
 # =========================================================================
 
@@ -563,6 +676,20 @@ def inject_user_params(command, user_advice, program_name='',
     # just stripped — e.g. d_min=2.5 or elements=Se.
     prog_allowlist, _sf = _load_prog_allowlist(program_name)
 
+    # Build alias map: strategy-flag key → PHIL flag leaf in the command.
+    # E.g., autosol's strategy_flags maps wavelength → autosol.lambda={value},
+    # so _alias_leaves["wavelength"] = "lambda".  This prevents inject_user_params
+    # from re-injecting "wavelength=0.9792" when "autosol.lambda=0.9792" is
+    # already present — bare "wavelength" wouldn't be found by the simple
+    # substring check but "lambda" (the alias leaf) would.
+    _alias_leaves = {}
+    for _sfkey, _sfdef in _sf.items():
+        if isinstance(_sfdef, dict):
+            _flag_tpl = _sfdef.get('flag', '')
+            _leaf = _flag_tpl.split('=')[0].strip().split('.')[-1].lower()
+            if _leaf and _leaf != '{value}' and _leaf != _sfkey.lower():
+                _alias_leaves[_sfkey.lower()] = _leaf
+
     command_lower = command.lower()
     appended = []
     skipped = []
@@ -603,6 +730,12 @@ def inject_user_params(command, user_advice, program_name='',
 
         if key.lower() in command_lower or short_key.lower() in command_lower:
             continue
+        # Also check strategy_flags alias: if this key maps to a different PHIL
+        # flag name that IS in the command, treat it as already present.
+        # E.g., "wavelength" → alias leaf "lambda" → "autosol.lambda" in command.
+        _alias = _alias_leaves.get(key.lower())
+        if _alias and _alias in command_lower:
+            continue
 
         param = '%s=%s' % (key, val)
         command = command + ' ' + param
@@ -622,7 +755,8 @@ def inject_user_params(command, user_advice, program_name='',
 # =========================================================================
 
 def postprocess_command(command, program_name, directives=None,
-                        user_advice='', bad_inject_params=None, log=None):
+                        user_advice='', bad_inject_params=None, log=None,
+                        return_injected=False):
     """Apply all server-safe post-processing transforms to a command.
 
     This is the single entry point called by the BUILD node.
@@ -642,14 +776,22 @@ def postprocess_command(command, program_name, directives=None,
         user_advice:       User guidelines/advice text
         bad_inject_params: Set of blacklisted param names for this program
         log:               Optional callable for logging
+        return_injected:   If True, return (command, injected_list) where
+                           injected_list is the list of key=value tokens
+                           added by inject_* steps.  Default False for
+                           backward compatibility with existing callers.
 
     Returns:
-        Post-processed command string.
+        Post-processed command string, OR (command, injected_list) tuple
+        when return_injected=True.
     """
+    _empty = (command, []) if return_injected else command
     if not command or not command.strip():
-        return command
+        return _empty
     if command.strip().split()[0] == 'STOP':
-        return command
+        return _empty
+
+    _injected = []  # Collect tokens added by inject_* steps
 
     # 1. Sanitize (strip placeholders, blacklisted params)
     command = sanitize_command(
@@ -658,18 +800,47 @@ def postprocess_command(command, program_name, directives=None,
 
     # 2. Inject user params from advice text
     if user_advice:
+        _pre = set(command.split())
         command = inject_user_params(
             command, user_advice, program_name=program_name,
             bad_inject_params=bad_inject_params, log=log)
+        _injected.extend(sorted(set(command.split()) - _pre))
+
+    # 2b. AutoSol atom-type deduplication
+    # When both atom_type and mad_ha_add_list are set to the same element,
+    # the second scatterer is lost entirely.  This happens when the directive
+    # extractor picks the wrong atom from "use Se and S as anomalous atoms".
+    # Fix: remove the duplicate mad_ha_add_list so autosol uses just the
+    # primary atom_type.  The LLM typically gets the secondary atom right
+    # on the next attempt once the duplicate is gone.
+    if program_name and 'autosol' in program_name:
+        import re as _re
+        _at = _re.search(r'(?:autosol\.)?atom_type=(\w+)', command)
+        _ha = _re.search(r'mad_ha_add_list=(\w+)', command)
+        if _at and _ha and _at.group(1).lower() == _ha.group(1).lower():
+            command = _re.sub(r'\s*mad_ha_add_list=\S+', '', command)
+            if log:
+                log("  [autosol_validate] Removed duplicate mad_ha_add_list=%s "
+                    "(identical to atom_type)" % _ha.group(1))
+
+        # 2c. Heavier-atom-wins: if atom_type has lower Z than
+        # mad_ha_add_list, swap them so the stronger scatterer is primary.
+        command = _ensure_primary_scatterer_is_heavier(command, log=log)
 
     # 3. Inject crystal symmetry from directives
     if directives:
+        _pre = set(command.split())
         command = inject_crystal_symmetry(
             command, directives, program_name, log=log)
+        _injected.extend(sorted(set(command.split()) - _pre))
 
     # 4. Inject program defaults from programs.yaml (safety net)
+    _pre = set(command.split())
     command = inject_program_defaults(command, program_name, log=log)
+    _injected.extend(sorted(set(command.split()) - _pre))
 
+    if return_injected:
+        return command, _injected
     return command
 
 
