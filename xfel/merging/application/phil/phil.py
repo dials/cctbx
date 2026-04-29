@@ -790,6 +790,97 @@ filter_global {
 }
 """
 
+prepare_phil = """
+prepare
+  .help = The PREPARE section defines operations to prepare data for downstream analysis
+  {
+  spread
+    .help = Prepare data for SpReAD (Spectral Resolved Anomalous Diffraction) analysis.
+    .help = Bins experiments by energy, writes to disk, and generates batch scripts
+    .help = for stage 2 merging and phenix refinement.
+    {
+    binning = *count width
+      .type = choice
+      .help = Binning mode: count for equal-count percentile bins, width for equal-width energy bins
+    n_energy_bins = 100
+      .type = int
+      .help = Number of energy bins (percentiles) for partitioning the dataset (count mode only)
+    window_width = 20
+      .type = int
+      .help = Width of the sliding window in percentile units for stage 2 slices (count mode only)
+    window_step = 1
+      .type = int
+      .help = Step size for sliding window center in percentile units (count mode only)
+    bin_start_eV = None
+      .type = float
+      .help = Start energy in eV for width binning mode
+    bin_end_eV = None
+      .type = float
+      .help = End energy in eV for width binning mode
+    bin_width_eV = 8
+      .type = float
+      .help = Width of sliding window in eV for stage 2 slices (width mode only)
+    bin_step_eV = 1
+      .type = float
+      .help = Step size for sliding window in eV (width mode only)
+    output_dir = None
+      .type = path
+      .help = Directory for writing energy-binned files. If None, uses output.output_dir
+    stage2_phil = None
+      .type = path
+      .help = Path to phil file containing base parameters for stage 2 merge jobs
+    stage2_nproc = 128
+      .type = int
+      .help = Number of MPI ranks for stage 2 merge jobs
+    stage2_nnodes = 2
+      .type = int
+      .help = Number of nodes for stage 2 merge jobs
+    stage2_output_dir = None
+      .type = path
+      .help = Directory for stage 2 merge outputs. If None, uses output_dir/stage2
+    phenix_phil = None
+      .type = path
+      .help = Path to phil/eff file containing phenix.refine parameters
+    phenix_pdb = None
+      .type = path
+      .help = Path to starting model PDB for phenix refinement
+    n_anomalous_scatterers = 1
+      .type = int
+      .help = Number of anomalous scatterers to extract f' and f'' values for
+    statistics_bin_i = None
+      .type = int
+      .help = Resolution bin index (1-based, from merging statistics table) to extract multiplicity from
+    mtz_name = iobs_all.mtz
+      .type = str
+      .help = Name of the merged MTZ file produced by stage 2 merge
+    slurm_partition = None
+      .type = str
+      .help = SLURM partition for batch jobs
+    slurm_account = None
+      .type = str
+      .help = SLURM account for batch jobs
+    slurm_time_limit = 00:30:00
+      .type = str
+      .help = SLURM time limit for each array task
+    slurm_constraint = None
+      .type = str
+      .help = SLURM constraint (e.g. cpu, gpu) for batch jobs
+    slurm_qos = None
+      .type = str
+      .help = SLURM QOS (quality of service) for batch jobs
+    slurm_array_concurrency = 8
+      .type = int
+      .help = Maximum number of SLURM array tasks to run simultaneously
+    cctbx_activate = None
+      .type = path
+      .help = Path to cctbx activation script (sourced before stage 2 merge jobs)
+    phenix_activate = None
+      .type = path
+      .help = Path to phenix activation script (sourced before phenix refinements)
+    }
+  }
+"""
+
 
 # A place to override any defaults included from elsewhere
 program_defaults_phil_str = """
@@ -799,7 +890,8 @@ modify.cosym.use_curvatures=False
 master_phil = dispatch_phil + input_phil + tdata_phil + filter_phil + modify_phil + \
               select_phil + scaling_phil + postrefinement_phil + merging_phil + \
               output_phil + statistics_phil + group_phil + lunus_phil + \
-              publish_phil + diffbragg_phil + monitor_phil + filter_global_phil
+              publish_phil + diffbragg_phil + monitor_phil + filter_global_phil + \
+              prepare_phil
 
 import os, importlib
 custom_phil_pathstr = os.environ.get('XFEL_CUSTOM_WORKER_PATH')
