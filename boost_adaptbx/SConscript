@@ -66,7 +66,7 @@ if (libtbx.env.build_options.enable_boost_threads and
   # This environment is to be used latter to build Boost libraries
   # So we need a clean one without extra library linking.
   env_boost_shlibs_base = env_base.Clone()
-  libs = ['boost_thread', 'boost_system']
+  libs = ['boost_thread']
   if boost_thread_uses_winthreads:
     libs.append('boost_chrono')
   # In case env_base specifies LIBS already, don't override but instead
@@ -254,7 +254,6 @@ e.g. with "yum install python-dev" or "apt-get install python-dev".
                   ]
     if env_etc.boost_version >= 107200:
       fs_src_base.extend(['directory.cpp', 'exception.cpp'])
-      env_fs.Append(LIBS=['boost_system'])
     fs_src = [os.path.join(fs_root, path) for path in fs_src_base]
     if (sys.platform == 'win32'):     # Windows
       fs_src.append(os.path.join(fs_root, 'windows_file_codecvt.cpp'))
@@ -322,7 +321,7 @@ e.g. with "yum install python-dev" or "apt-get install python-dev".
         for p in boost_thread_src]
       # For Windows (c.f. point 2 above)
       env_boost_threads.Append(CPPDEFINES={'BOOST_THREAD_BUILD_DLL':1})
-      libs = ['boost_system']
+      libs = []
       if sys.platform.startswith("linux"): # require realtime extensions for clock_gettime
         libs.append('rt')
       if boost_thread_uses_winthreads:
@@ -337,26 +336,6 @@ e.g. with "yum install python-dev" or "apt-get install python-dev".
           source=boost_thread_src,
           LIBS=libs)
 
-      # Boost.System?
-      if os.path.isdir(os.path.join(env_etc.boost_dist, 'boost', 'system')):
-        env_boost_system = env_boost_thread_and_co.Clone()
-        simple_darwin_shlinkcom(env_etc, env_boost_system, 'system')
-        boost_system_src = [
-          '#' + os.path.relpath(p, os.path.dirname(env_etc.boost_dist))
-          for p in glob.glob(
-            os.path.join(env_etc.boost_dist, 'libs', 'system', 'src', '*.cpp'))]
-        # For Windows (c.f. point 2 above)
-        env_boost_system.Append(
-          CPPDEFINES={'BOOST_SYSTEM_DYN_LINK':1})
-        if boost_thread_uses_winthreads:
-          env_boost_system.StaticLibrary(
-            target='#lib/boost_system',
-            source=boost_system_src)
-        else:
-          env_boost_system.SharedLibrary(
-            target='#lib/boost_system',
-            source=boost_system_src)
-
       #Boost.Chrono?
       if os.path.isdir(os.path.join(env_etc.boost_dist, 'boost', 'chrono')):
         env_boost_chrono = env_boost_thread_and_co.Clone()
@@ -367,7 +346,7 @@ e.g. with "yum install python-dev" or "apt-get install python-dev".
             os.path.join(env_etc.boost_dist, 'libs', 'chrono', 'src', '*.cpp'))]
         # For Windows (c.f. point 2 above)
         env_boost_chrono.Append(CPPDEFINES={'BOOST_CHRONO_DYN_LINK':1})
-        libs = ['boost_system']
+        libs = []
         if sys.platform.startswith("linux"): # require realtime extensions for clock_gettime
           libs.append('rt')
         if boost_thread_uses_winthreads:
